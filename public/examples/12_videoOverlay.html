@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 12：云台视频叠加 VideoOverlay - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>12 云台视频叠加 VideoOverlay</h1>
+    <p class="desc">北京上空 mock 无人机绕圈（60s/圈，10Hz device_osd 遥测），
+      mock 视频 canvas（1280×720, 30fps）→ 贴地投影纹理（透视校正 uv/w）+ 视锥线框；
+      地球远侧足迹由 shader 内射线-球求交 discard 剔除。
+      提示：拖动旋转到地球背面，足迹与视锥应被整体遮挡。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+    // media 模块阶段6 才统一导出，本页直接深路径 import（vite dev/build 均可解析）
+    import { VideoOverlay } from '/src/media/VideoOverlay.ts';
+    import { MockTelemetrySource } from '/src/media/TelemetrySource.ts';
+    import { CanvasAnimationSource } from '/src/media/VideoSource.ts';
+    import { drawMockFeed } from '/src/media/MockVideoFeed.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      /** footprint.center（归一化 ECEF，地球半径=1）→ { lonDeg, latDeg } */
+      function footprintCenterDeg(fp) {
+        const meters = new engine.Cartesian3(fp.center.x * S, fp.center.y * S, fp.center.z * S);
+        const carto = engine.Cartographic.fromCartesian(meters); // 接口约定输入为米制 ECEF
+        return {
+          lonDeg: engine.CesiumMath.toDegrees(carto.longitude),
+          latDeg: engine.CesiumMath.toDegrees(carto.latitude),
+        };
+      }
+
+      // ── mock 视频源：程序化 canvas 动画（无外部资源，30fps）─────────
+      const videoSource = new CanvasAnimationSource(1280, 720, drawMockFeed, { fps: 30 });
+
+      // ── mock 遥测源：北京上空 800m 半径 / 400m 高度逆时针绕圈，10Hz ──
+      const CENTER = { lon: 116.39, lat: 39.91 };
+      const mock = new MockTelemetrySource({
+        center: CENTER,
+        orbitRadiusMeters: 800,
+        altitudeMeters: 400,
+        angularSpeedDegPerSec: 6,   // 6°/s → 60s 一圈
+        rateHz: 10,
+      });
+
+      // ── VideoOverlay：贴地投影 + 视锥线框（scene.effects 挂载，composite 后绘制）
+      const overlay = viewer.scene.effects.add(new VideoOverlay(viewer.context, {
+        source: videoSource,
+        fovYDeg: 45,          // OSD 解析基准视场角
+        showFrustum: true,
+      }));
+      overlay.setCamera(viewer.camera);
+
+      // 遥测回调：解析 device_osd 报文推入 overlay（成功才计数，用于实测 Hz）
+      let msgCount = 0;
+      function onTelemetry(raw) {
+        if (overlay.updateFromOsd(raw)) msgCount++;
+      }
+      mock.start(onTelemetry);
+
+      // ── FOV 循环按钮的实现路径 ─────────────────────────────────────
+      // mock 报文 zoom_factor 恒为 1 且未提供 fovFromZoom，DeviceOsdParser 的
+      // fovY 直接取 parseOptions.fovYDeg；overlay.setFovYDeg 更新的正是该基准，
+      // 而 mock 以 10Hz 持续发送报文 → ≤100ms 内下一条报文即按新 fov 解析并
+      // 触发 update()（置几何脏，自动重建足迹）。因此无需重建遥测源、
+      // 也无需 fovBias 补偿 —— 最小路径就是直接改解析基准。
+      const FOV_STEPS = [30, 45, 60, 75];
+      let fovIdx = FOV_STEPS.indexOf(45);
+
+      // ── 状态与 result 刷新（500ms 轮询 + 按钮即时刷新共用）─────────
+      let overlayOn = true;
+      let frustumOn = true;
+      let paused = false;
+      let currentHz = 0;
+      let lastCount = 0;
+
+      function refresh() {
+        let fpText = 'footprint: 等待首次几何重建…';
+        const fp = overlay.footprint;
+        if (fp !== null) {
+          if (fp.valid) {
+            const c = footprintCenterDeg(fp);
+            fpText =
+              `footprint 中心: ${c.lonDeg.toFixed(5)}°E, ${c.latDeg.toFixed(5)}°N\n` +
+              `中心斜距: ${fp.centerRangeMeters.toFixed(0)} m`;
+          } else {
+            fpText = 'footprint: degraded（射线未命中椭球）';
+          }
+        }
+        result.textContent =
+          `状态: ${overlay.state}   遥测: ~${currentHz} Hz (目标 10)\n` +
+          `FOV: ${FOV_STEPS[fovIdx]}°   视锥: ${frustumOn ? '开' : '关'}` +
+          `   遥测源: ${paused ? '已暂停' : '运行中'}\n` +
+          `${fpText}\n` +
+          '提示: 旋转到地球背面，足迹应被遮挡(discard)；暂停遥测后几何静止、纹理仍动';
+      }
+      const hzTimer = setInterval(() => {
+        currentHz = (msgCount - lastCount) * 2; // 500ms 窗口 → 每秒消息数
+        lastCount = msgCount;
+        refresh();
+      }, 500);
+
+      // ── 控件 ─────────────────────────────────────────────────────────
+      const overlayBtn = addBtn('视频叠加: 开', () => {
+        overlayOn = !overlayOn;
+        overlay.show = overlayOn;
+        overlayBtn.textContent = `视频叠加: ${overlayOn ? '开' : '关'}`;
+        overlayBtn.classList.toggle('active', overlayOn);
+        refresh();
+      });
+      overlayBtn.classList.add('active');
+
+      const frustumBtn = addBtn('视锥线框: 开', () => {
+        frustumOn = !frustumOn;
+        overlay.setShowFrustum(frustumOn);
+        frustumBtn.textContent = `视锥线框: ${frustumOn ? '开' : '关'}`;
+        frustumBtn.classList.toggle('active', frustumOn);
+        refresh();
+      });
+      frustumBtn.classList.add('active');
+
+      const OPACITY_STEPS = [1.0, 0.6, 0.3];
+      let opacityIdx = 0;
+      const opacityBtn = addBtn('不透明度 100%', () => {
+        opacityIdx = (opacityIdx + 1) % OPACITY_STEPS.length;
+        const v = OPACITY_STEPS[opacityIdx];
+        overlay.setOpacity(v);
+        opacityBtn.textContent = `不透明度 ${Math.round(v * 100)}%`;
+        refresh();
+      });
+
+      const fovBtn = addBtn('FOV 45°', () => {
+        fovIdx = (fovIdx + 1) % FOV_STEPS.length;
+        overlay.setFovYDeg(FOV_STEPS[fovIdx]); // 见上方路径说明，≤100ms 生效
+        fovBtn.textContent = `FOV ${FOV_STEPS[fovIdx]}°`;
+        refresh();
+      });
+
+      const pauseBtn = addBtn('暂停遥测', () => {
+        paused = !paused;
+        if (paused) {
+          mock.stop(); // 遥测停发 → 足迹/视锥静止；视频源独立 → 纹理仍在动
+          pauseBtn.textContent = '继续遥测';
+        } else {
+          mock.start(onTelemetry); // start 重置相位：飞机回到轨道起点
+          pauseBtn.textContent = '暂停遥测';
+        }
+        pauseBtn.classList.toggle('active', !paused);
+        refresh();
+      });
+      pauseBtn.classList.add('active');
+
+      // ── 相机：俯瞰北京（6km），3s 后 flyTo 足迹中心近看贴地投影 ─────
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat, 6_000),
+      });
+      const flyTimer = setTimeout(() => {
+        const fp = overlay.footprint;
+        if (fp === null || !fp.valid) return; // 遥测尚未就绪则跳过
+        const c = footprintCenterDeg(fp);
+        viewer.camera.flyTo({
+          destination: engine.Cartesian3.fromDegrees(c.lonDeg, c.latDeg, 1_500),
+          duration: 3,
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-45) },
+        });
+      }, 3_000);
+
+      refresh();
+
+      // ── 资源清理：停遥测 / 停轮询 / 销毁 overlay 与视频源 ───────────
+      window.addEventListener('beforeunload', () => {
+        clearInterval(hzTimer);
+        clearTimeout(flyTimer);
+        mock.stop();
+        overlay.destroy();
+        videoSource.destroy();
+      });
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.39, 39.91, 6_000],
+          imagery: 'gaode-sat', // 'none' 亦可离线运行；卫星底图便于目视核对足迹贴地
+          title: '12 · 云台视频叠加 VideoOverlay',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '12 云台视频叠加 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

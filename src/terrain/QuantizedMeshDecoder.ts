@@ -7,20 +7,19 @@
  *
  * ```
  * +0   centerX, centerY, centerZ   3 x float64   (tile centre, ECEF meters)
- * +24  horizonOcclusionX/Y         2 x float32   (variant: f32, skipped)
- * +32  centerX/Y/Z repeated        3 x float64   (variant duplicate header,
- *                                                skipped)
- * +56  maxHeight, minHeight        2 x float64   (elevation range;
- *      real tiles carry ~3373.004 / -0.27 here; a float32 fallback pair
- *      at +56/+60 exists for tiles that use the narrower encoding)
- * +64  misc                        3 x float64   (bounding sphere prefix,
- *                                                skipped)
+ * +24  minHeight, maxHeight        2 x float32   (official spec position)
+ * +32  boundingSphereCenter        3 x float64
+ * +56  boundingSphereRadius        float64
+ * +64  horizonOcclusionPoint       3 x float64
  * +88  vertexCount                 uint32
  * +92  zigzag-delta encoded        vertexCount x uint16 per channel,
  *      u / v / h                   in that order
- *      then indexCount uint32 + watermark uint32 + indexCount x uint16
- *      (if watermark != 65536 every index value must be increased by it;
- *      trailing edge indices / extensions e.g. octvertexnormals are skipped)
+ *      then u32 declaredIndexCount followed by a CONTINUOUS uint16
+ *      high-water-mark index stream (idx = highest - code; code == 0
+ *      pushes highest). The declared count only covers the first segment;
+ *      the real stream ends where the edge-index region (four u32 counts
+ *      west/south/east/north, each in [1, 200]) begins. Trailing edge
+ *      indices / extensions e.g. octvertexnormals are skipped.
  * ```
  *
  * v direction (IMPORTANT): this service uses SOUTH-UP TMS tiles
@@ -51,16 +50,24 @@ import {
   MIN_SKIRT_DEPTH,
 } from './TerrainProvider';
 
-/** Header field offsets (bytes) of the little-endian variant. */
+/** Header field offsets (bytes), matching the CesiumJS 88-byte header. */
 const OFFSET = {
   CENTER: 0,          // 3 x f64
+  MIN_HEIGHT: 24,     // f32 (official spec position)
+  MAX_HEIGHT: 28,     // f32
   VERTEX_COUNT: 88,   // u32
   VERTICES: 92,       // u16 zigzag-delta: u[vcount] v[vcount] h[vcount]
 } as const;
 
 /** Quantized u/v/h full-scale value. */
 const QUANT_MAX = 32767;
-/** Watermark stored before the index block; 65536 means "no HiLo offset". */
+/**
+ * Highest elevation any real DEM on Earth reaches (Everest 8849 m) plus
+ * margin; header scale values beyond this are per-level quantisation
+ * artefacts of the source service, not real elevations.
+ */
+const PHYSICAL_MAX_ELEVATION = 9000;
+/** Maximum vertices addressable with 16-bit indices. */
 const INDEX_WATERMARK = 65536;
 /** WGS84 semi-major axis (meters). */
 const WGS84_SEMI_MAJOR = 6378137.0;
@@ -115,7 +122,7 @@ export function decodeQuantizedMesh(
   const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
   const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
 
-  const heights = readHeightRange(view);
+  const heights = readHeightRange(view, z);
   const skirtDepth = Math.max(MIN_SKIRT_DEPTH, heights.max - heights.min);
 
   // --- vertices (zigzag-delta u/v/h) --------------------------------------
@@ -144,16 +151,45 @@ export function decodeQuantizedMesh(
     off += 2;
   }
 
-  // --- indices (+ optional HiLo watermark offset) --------------------------
-  const indexCount = view.getUint32(off, true);
-  const watermark = view.getUint32(off + 4, true);
-  off += 8;
+  // --- indices (high-water-mark, continuous until the edge-index region) ---
+  // Layout verified against the live service and the official CesiumJS
+  // decoder (CesiumTerrainProvider.createQuantizedMeshTerrainData):
+  //   u32 triangleCount (= first segment length only in this service's
+  //   tiles) followed by a CONTINUOUS u16 high-water-mark stream that runs
+  //   until the edge-index region begins. The edge region starts with four
+  //   u32 counts (west/south/east/north) each in [1, 200]; we scan forward
+  //   from the end of the declared segment for the first position where all
+  //   four counts are plausible, treating everything before it as indices.
+  const declaredCount = view.getUint32(off, true);
+  off += 4;
+
+  const findEdgeRegionStart = (): number => {
+    const maxScan = Math.floor((u8.length - off - 16) / 2);
+    for (let n = declaredCount; n <= maxScan; n++) {
+      const p = off + 2 * n;
+      if (p % 4 !== 0) continue; // counts are u32-aligned reads
+      const w = view.getUint32(p, true);
+      const s = view.getUint32(p + 4, true);
+      const e = view.getUint32(p + 8, true);
+      const no = view.getUint32(p + 12, true);
+      if (
+        w >= 1 && w <= 200 && s >= 1 && s <= 200 &&
+        e >= 1 && e <= 200 && no >= 1 && no <= 200
+      ) {
+        return n - (n % 3); // whole triangles only
+      }
+    }
+    return declaredCount; // fall back to the declared segment length
+  };
+  const indexCount = findEdgeRegionStart();
+
   const baseIndices = new Uint32Array(indexCount);
+  let highest = 0;
   for (let i = 0; i < indexCount; i++) {
-    let index = view.getUint16(off, true);
+    const code = view.getUint16(off, true);
     off += 2;
-    if (watermark !== INDEX_WATERMARK) index += watermark;
-    baseIndices[i] = index;
+    baseIndices[i] = highest - code;
+    if (code === 0) highest++;
   }
   // 之后的边缘索引 / 扩展块（octvertexnormals 等）全部跳过。
 
@@ -257,27 +293,37 @@ export function decodeQuantizedMesh(
 }
 
 /**
- * Read the elevation range: primary source is the f32 pair at +56; if the
- * values are implausible, fall back to the f64 pair at +56/+64 (real Hubei
- * tiles carry ~3373.004 / -0.27 there, per byte-level verification). Last
- * resort: 0/0 with a warning.
+ * Read the elevation range. The official spec position is the f32 pair at
+ * +24/+28 (verified live: the Hubei service carries e.g. 0/964 or 488/1572
+ * there, and coarse-level tiles carry per-level scales ~12886 at z10 that
+ * exceed any physical elevation). The legacy f64 pair at +56/+64 (which is
+ * actually the bounding-sphere radius in the official layout) is kept as a
+ * fallback for tiles whose f32 pair is implausible.
  */
-function readHeightRange(view: DataView): { min: number; max: number } {
-  // Primary: float64 pair at +56/+64 (verified against real tiles: the
-  // Hubei dataset stores ~3373.004 / -0.27 there). The f32 interpretation
-  // of those bytes happens to look plausible (~0 / ~5.3), so it must NOT
-  // take precedence.
-  const c = view.getFloat64(56, true);
-  const d = view.getFloat64(64, true);
-  const loF64 = Math.min(c, d);
-  const hiF64 = Math.max(c, d);
-  if (isPlausible(loF64, hiF64) && hiF64 - loF64 > 1e-3) return { min: loF64, max: hiF64 };
-
-  const a = view.getFloat32(56, true);
-  const b = view.getFloat32(60, true);
+function readHeightRange(view: DataView, z: number): { min: number; max: number } {
+  // Primary: official spec f32 pair at +24/+28.
+  const a = view.getFloat32(OFFSET.MIN_HEIGHT, true);
+  const b = view.getFloat32(OFFSET.MAX_HEIGHT, true);
   const loF32 = Math.min(a, b);
   const hiF32 = Math.max(a, b);
-  if (isPlausible(loF32, hiF32)) return { min: loF32, max: hiF32 };
+  if (isPlausible(loF32, hiF32) && hiF32 - loF32 > 1e-3) {
+    return { min: loF32, max: hiF32 };
+  }
+
+  // Fallback: f64 pair at +56/+64 (observed on some tiles). Coarse levels
+  // store a per-level scale (~2x per level above z12) that no real
+  // elevation reaches — normalise it back.
+  const c = view.getFloat64(56, true);
+  const d = view.getFloat64(64, true);
+  let loF64 = Math.min(c, d);
+  let hiF64 = Math.max(c, d);
+  if (isPlausible(loF64, hiF64) && hiF64 - loF64 > 1e-3) {
+    if (hiF64 > PHYSICAL_MAX_ELEVATION && z < 12) {
+      hiF64 = hiF64 / 2 ** (12 - z);
+      loF64 = Math.min(loF64, 0);
+    }
+    return { min: loF64, max: hiF64 };
+  }
 
   console.warn('QuantizedMeshDecoder: implausible elevation range, using 0/0');
   return { min: 0, max: 0 };

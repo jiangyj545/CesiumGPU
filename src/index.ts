@@ -116,6 +116,32 @@ export type {
 export { Weather } from './effect/Weather';
 export type { WeatherType, WeatherOptions, WeatherArea } from './effect/Weather';
 
+// Gimbal video overlay（云台视频流贴地投影，device_osd 遥测驱动）
+export { VideoOverlay } from './media/VideoOverlay';
+export type { VideoOverlayOptions, VideoOverlayState } from './media/VideoOverlay';
+export {
+  WGS84_POLAR_RATIO,
+  EARTH_SCALE as MEDIA_EARTH_SCALE,
+  NDC_TO_UV_Y_SIGN,
+  intersectRayEllipsoid,
+  computeFootprint,
+  buildTextureMatrix,
+} from './media/GimbalMath';
+export type { GimbalPose, Footprint } from './media/GimbalMath';
+export { DeviceOsdParser, lerpGimbal, TelemetryBuffer } from './media/Telemetry';
+export type { GimbalState } from './media/Telemetry';
+export { MockTelemetrySource, WebSocketTelemetrySource } from './media/TelemetrySource';
+export type { TelemetrySource, MockTelemetryOptions } from './media/TelemetrySource';
+export {
+  HtmlVideoSource,
+  CanvasAnimationSource,
+  VideoFrameSource,
+} from './media/VideoSource';
+export type { VideoFrameSurface } from './media/VideoSource';
+export { VideoTexture, createVideoSampler } from './media/VideoTexture';
+export { drawMockFeed } from './media/MockVideoFeed';
+export type { MockFeedStyle } from './media/MockVideoFeed';
+
 // Terrain (DEM streaming, Wave1)
 export type {
   TerrainProvider,

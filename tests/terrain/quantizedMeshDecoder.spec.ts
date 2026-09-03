@@ -16,21 +16,41 @@ interface SyntheticTile {
   center: [number, number, number];
   /** 量化 u/v/h 值（u/v ∈ [0,32767]，h 为量化高度码）。 */
   vertices: Array<{ u: number; v: number; h: number }>;
-  /** 实际索引值（写入前会减去 watermark）。 */
+  /** 实际索引值（写入时会按高水位规则编码）。 */
   indices: number[];
   minH: number;
   maxH: number;
-  /** 默认 65536（无 HiLo 偏移）。 */
-  watermark?: number;
-  /** 高程范围写法：f32 对（默认）或 f64 对回退布局。 */
+  /** 宣称的索引数（默认 = indices.length；真实服务只写第一段）。 */
+  declaredIndexCount?: number;
+  /** 高程范围写法：官方 f32 对 @+24（默认）或 f64 对 @+56/+64 回退布局。 */
   heightEncoding?: 'f32' | 'f64';
 }
 
-/** 按小端变体布局手工打包一个合成瓦片（未压缩）。 */
+/**
+ * 将索引按 CesiumJS 高水位规则编码：
+ * idx == highest 时写 0 并推进 highest；否则写 highest - idx。
+ */
+function hwmEncode(indices: number[]): number[] {
+  let highest = 0;
+  const out: number[] = [];
+  for (const idx of indices) {
+    if (idx === highest) {
+      out.push(0);
+      highest++;
+    } else {
+      out.push(highest - idx);
+    }
+  }
+  return out;
+}
+
+/** 按官方 CesiumJS 88 字节头布局手工打包一个合成瓦片（未压缩）。 */
 function packTile(tile: SyntheticTile): Uint8Array {
-  const watermark = tile.watermark ?? 65536;
   const vCount = tile.vertices.length;
-  const size = 92 + vCount * 6 + 8 + tile.indices.length * 2;
+  const enc = hwmEncode(tile.indices);
+  const declared = tile.declaredIndexCount ?? tile.indices.length;
+  // 88 头 + 顶点 + u32 declared + 索引 + 边缘区(4×u32 计数 1..200 占位)
+  const size = 92 + vCount * 6 + 4 + enc.length * 2 + 16;
   const buffer = new ArrayBuffer(size);
   const view = new DataView(buffer);
 
@@ -38,28 +58,26 @@ function packTile(tile: SyntheticTile): Uint8Array {
   view.setFloat64(0, tile.center[0], true);
   view.setFloat64(8, tile.center[1], true);
   view.setFloat64(16, tile.center[2], true);
-  // +24 horizon occlusion 2 x f32（跳过区，填占位值）
-  view.setFloat32(24, 1.5, true);
-  view.setFloat32(28, -2.5, true);
-  // +32 center 重复 3 x f64
+  // +24 minHeight / maxHeight（官方规范的 f32 对）
+  if ((tile.heightEncoding ?? 'f32') === 'f32') {
+    view.setFloat32(24, tile.minH, true);
+    view.setFloat32(28, tile.maxH, true);
+  } else {
+    // 官方位置写入非法值触发回退；真实值写在 +56/+64 的 f64 对
+    view.setFloat32(24, 99999, true);
+    view.setFloat32(28, 99999, true);
+    view.setFloat64(56, tile.maxH, true);
+    view.setFloat64(64, tile.minH, true);
+  }
+  // +32 boundingSphere center 3 x f64 + radius f64
   view.setFloat64(32, tile.center[0], true);
   view.setFloat64(40, tile.center[1], true);
   view.setFloat64(48, tile.center[2], true);
-  // +56 高程范围
-  if ((tile.heightEncoding ?? 'f32') === 'f32') {
-    view.setFloat32(56, tile.minH, true);
-    view.setFloat32(60, tile.maxH, true);
-  } else {
-    // 构造「f32 读数不合理、f64 对合理」的字节布局：
-    // +56 的 f64 = 0xC0230000477FFF00 ≈ -9.5，其低 4 字节按 f32 重读
-    // = 0x477FFF00 ≈ 65535 → 超出合理范围 → 触发 f64 回退
-    view.setUint32(56, 0x477fff00, true);
-    view.setUint32(60, 0xc0230000, true);
-    view.setFloat64(64, tile.maxH, true);
-  }
-  // +72 杂项 f64（跳过区）
-  view.setFloat64(72, 9.0, true);
-  view.setFloat64(80, 10.0, true);
+  view.setFloat64(56, tile.heightEncoding === 'f64' ? tile.maxH : 1234.5, true);
+  // +64 horizonOcclusion 3 x f64（f64 布局时 +64 被复用为 minH）
+  view.setFloat64(64, tile.heightEncoding === 'f64' ? tile.minH : 0.5, true);
+  view.setFloat64(72, 0.5, true);
+  view.setFloat64(80, 0.5, true);
   // +88 vertexCount
   view.setUint32(88, vCount, true);
 
@@ -75,13 +93,17 @@ function packTile(tile: SyntheticTile): Uint8Array {
     }
   }
 
-  // 索引块：indexCount u32 + watermark u32 + (actual - watermark) u16 数组
-  view.setUint32(off, tile.indices.length, true);
-  view.setUint32(off + 4, watermark, true);
-  off += 8;
-  for (const index of tile.indices) {
-    view.setUint16(off, index - watermark, true);
+  // u32 declaredIndexCount + 连续 HWM 编码 u16 流
+  view.setUint32(off, declared, true);
+  off += 4;
+  for (const code of enc) {
+    view.setUint16(off, code, true);
     off += 2;
+  }
+  // 边缘区特征：4 个 u32 计数（1..200），供边界探测识别
+  for (let e = 0; e < 4; e++) {
+    view.setUint32(off, 4, true);
+    off += 4;
   }
   return new Uint8Array(buffer);
 }
@@ -163,42 +185,39 @@ describe('quantizedMeshDecoder', () => {
       expect(p2[2]).toBeCloseTo(nz2 * ratio * scale2, 5);
     });
 
-    it('基础索引原样解码（watermark=65536 不偏移）', () => {
+    it('基础索引高水位解码还原原始索引', () => {
       const mesh = decodeQuantizedMesh(packTile(cornerTile), 10, 100, 200);
       // 6 个基础索引 + 4 条边 × 2 三角形 × 3 索引 = 30
       expect(mesh.indices.length).toBe(30);
       expect(Array.from(mesh.indices.slice(0, 6))).toEqual([0, 1, 2, 1, 3, 2]);
     });
 
-    it('watermark != 65536 时索引值加上偏移', () => {
+    it('declaredIndexCount 只覆盖第一段时仍解出全量索引（边界探测）', () => {
       const tile: SyntheticTile = {
         center: [0, 0, 0],
         vertices: [
-          { u: 100, v: 100, h: 0 },
-          { u: 200, v: 200, h: 16383 },
-          { u: 300, v: 300, h: 32767 },
+          { u: 0, v: 0, h: 0 },
+          { u: 32767, v: 0, h: 16383 },
+          { u: 0, v: 32767, h: 32767 },
+          { u: 32767, v: 32767, h: 16383 },
         ],
-        indices: [5, 6, 7], // 存储为 [0,1,2]
+        indices: [0, 1, 2, 1, 3, 2],
         minH: 0,
         maxH: 1000,
-        watermark: 5,
+        declaredIndexCount: 3, // 真实服务只声明第一段
       };
       const mesh = decodeQuantizedMesh(packTile(tile), 10, 100, 200);
-      expect(Array.from(mesh.indices.slice(0, 3))).toEqual([5, 6, 7]);
-      // 全内部顶点 → 无裙边，仅 3 顶点 + 3 索引
-      expect(mesh.positions.length).toBe(9);
-      expect(mesh.indices.length).toBe(3);
+      expect(Array.from(mesh.indices.slice(0, 6))).toEqual([0, 1, 2, 1, 3, 2]);
     });
 
-    it('高程 f32 对非法时回退 +56/+64 的 f64 对', () => {
+    it('高程官方 f32 对非法时回退 +56/+64 的 f64 对', () => {
       const tile: SyntheticTile = {
         ...cornerTile,
         heightEncoding: 'f64',
-        minH: -9.5, // 实际值由字节模式决定：f64 ≈ -9.5000004
+        minH: -9.5,
         maxH: 3373.004,
       };
       const mesh = decodeQuantizedMesh(packTile(tile), 10, 100, 200);
-      // f64 对读数：minH ≈ -9.5（0xC0230000477FFF00），maxH = 3373.004
       expect(mesh.minHeight).toBeGreaterThan(-9.6);
       expect(mesh.minHeight).toBeLessThan(-9.4);
       expect(mesh.maxHeight).toBeCloseTo(3373.004, 3);

@@ -55,15 +55,18 @@
           url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
           maximumLevel: 14,
         });
-        // TerrainLayer 挂到 globe.terrainLayer；sampleHeight(lonDeg, latDeg) → 米
+        // 经 setTerrainProvider 挂载（globe.terrainLayer 为只读 getter）；
+        // sampleHeight(lonDeg, latDeg) → 米
         const globe = viewer.globe;
         if (typeof engine.TerrainLayer === 'function') {
-          globe.terrainLayer = new engine.TerrainLayer({ providers: [provider] });
+          globe.setTerrainProvider(provider);
           terrainOk = true;
         } else {
           log('当前引擎版本未包含 TerrainLayer，运行在 0 高椭球模式');
         }
       } catch (err) {
+        window.__TERRAIN_ERR = err.message + '\n' + (err.stack || '').split('\n').slice(0, 3).join('\n');
+        console.error('[12_terrain] terrain init failed:', err);
         log('地形服务不可用，已降级为 0 高椭球：' + err.message);
       }
 
@@ -158,6 +161,7 @@
 
     (async () => {
       let viewer;
+      window.viewer = null; // debug hook for QA probes
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
@@ -170,6 +174,7 @@
         return;
       }
       try {
+        window.viewer = viewer; // debug hook for QA probes
         await demo(viewer, engine);
         DemoUtils.showCode(demo, '12 地形与贴地 · 核心代码');
         window.__DEMO_OK = true;

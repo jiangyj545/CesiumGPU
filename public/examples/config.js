@@ -51,6 +51,7 @@ window.EXAMPLES_CONFIG = {
         { name: '圆形扫描', fileName: '08_circleScan.html' },
         { name: '粒子系统', fileName: '09_particle.html' },
         { name: '雨雪天气', fileName: '11_weather.html' },
+        { name: '云台视频叠加', fileName: '12_videoOverlay.html' },
       ],
     },
   ],

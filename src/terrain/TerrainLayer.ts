@@ -351,18 +351,23 @@ export class TerrainLayer {
     const llh     = entry.llh;
     const indices = entry.mesh.indices;
 
-    const px = lonDeg;
-    const py = latDeg;
+    // Work in tile-local coordinates: absolute lon/lat near ±180 have huge
+    // magnitude where the squared-area denominators lose precision (a
+    // z12 tile spans only ~0.04° while the coordinates sit at ~100°).
+    const ox = entry.bounds.west;
+    const oy = entry.bounds.south;
+    const px = lonDeg - ox;
+    const py = latDeg - oy;
 
     for (let i = 0; i < indices.length; i += 3) {
       const a = indices[i]     * 3;
       const b = indices[i + 1] * 3;
       const c = indices[i + 2] * 3;
 
-      const ax = llh[a],     ay = llh[a + 1];
-      const e0x = llh[b] - ax, e0y = llh[b + 1] - ay;
-      const e1x = llh[c] - ax, e1y = llh[c + 1] - ay;
-      const v0x = px - ax,     v0y = py - ay;
+      const ax = llh[a] - ox, ay = llh[a + 1] - oy;
+      const e0x = llh[b] - ox - ax, e0y = llh[b + 1] - oy - ay;
+      const e1x = llh[c] - ox - ax, e1y = llh[c + 1] - oy - ay;
+      const v0x = px - ax,          v0y = py - ay;
 
       const d00 = e0x * e0x + e0y * e0y;
       const d01 = e0x * e1x + e0y * e1y;
@@ -372,11 +377,11 @@ export class TerrainLayer {
 
       const denom = d00 * d11 - d01 * d01;
       const denomAbs = Math.abs(denom);
-      if (denomAbs < 1e-14) continue; // degenerate (skirt wall / pole pinch)
+      if (denomAbs < 1e-18) continue; // degenerate (skirt wall / pole pinch)
 
       const u = (d11 * d20 - d01 * d21) / denom;
       const v = (d00 * d21 - d01 * d20) / denom;
-      const eps = -1e-9;
+      const eps = -1e-6;
       if (u < eps || v < eps || u + v > 1 - eps) continue;
 
       const h = llh[a + 2] + u * (llh[b + 2] - llh[a + 2]) + v * (llh[c + 2] - llh[a + 2]);
@@ -386,10 +391,10 @@ export class TerrainLayer {
   }
 
   /** Per-vertex [lonDeg, latDeg, heightM] triplets derived from positions. */
-  private _buildVertexLonLatHeight(mesh: TerrainMeshData): Float32Array {
+  private _buildVertexLonLatHeight(mesh: TerrainMeshData): Float64Array {
     const positions = mesh.positions;
     const count     = positions.length / 3;
-    const llh       = new Float32Array(count * 3);
+    const llh       = new Float64Array(count * 3);
     const rad       = 180.0 / Math.PI;
 
     for (let i = 0; i < count; i++) {
@@ -518,7 +523,7 @@ interface TerrainCacheEntry {
   /** Tile bounds in degrees (fast containment test for sampleHeight). */
   bounds: TerrainTileBounds;
   /** Lazily built per-vertex [lonDeg, latDeg, heightM] triplets. */
-  llh: Float32Array | null;
+  llh: Float64Array | null;
 }
 
 /** @internal CPU-side tile bounds used by the culling / LOD tests. */
