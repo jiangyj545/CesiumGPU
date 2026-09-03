@@ -21,3 +21,21 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.gstack/
+
+# OMC session state
+.omc/
+
+# Agent workspace
+agent-workspace/
+
+# Python cache
+.ruff_cache/
+__pycache__/
+
+# Generated docs
+docs/api/
+
+# Debug artifacts (root level screenshots)
+/*.png
+/*.jpg

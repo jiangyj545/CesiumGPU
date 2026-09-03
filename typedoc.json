@@ -1,0 +1,15 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts"],
+  "out": "docs/api",
+  "exclude": ["**/spikes/**", "**/main.ts"],
+  "tsconfig": "tsconfig.json",
+  "name": "CesiumGPU API",
+  "includeVersion": true,
+  "readme": "none",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "excludeExternals": true,
+  "logLevel": "Warn",
+  "treatWarningsAsErrors": false
+}
