@@ -14,11 +14,12 @@
 | 6 | [相机与飞行（Camera）](./camera.md) | heading/pitch 语义、`setView`/`flyTo`、防穿地飞行轨迹、Spline 路径漫游 |
 | 7 | [特效系统（Effects）](./effects.md) | `IPass`/`EffectManager`、动态墙/扫描/粒子/天气、自定义特效 pass 与 unlit 管线 |
 | 8 | [引擎架构（Architecture）](./architecture.md) | 4-pass 延迟渲染管线、目录结构、归一化 ECEF 坐标系约定、ADR 索引 |
+| 9 | [地形与贴地（Terrain）](./terrain.md) | `TerrainProvider` 双格式（quantized-mesh/Terrarium）、`sampleHeight` 采样、拾取/量测/几何贴地 |
 
 ## 其他文档
 
 - **API 参考** — [docs/api/index.html](../api/index.html)（由 `npm run docs:api` 从 `src/index.ts` 生成）
-- **设计决策（ADR）** — [docs/decisions/](../decisions/)：瓦片纹理池（0001）、GPU 拾取回读（0002）、compute 粒子（0003）
+- **设计决策（ADR）** — [docs/decisions/](../decisions/)：瓦片纹理池（0001）、GPU 拾取回读（0002）、compute 粒子（0003）、地形 Provider 双格式（0004）
 
 ## 示例
 
@@ -32,3 +33,4 @@
 | [03_geojson.html](http://localhost:3001/examples/03_geojson.html) | Entity / GeoJSON |
 | [04_geometry.html](http://localhost:3001/examples/04_geometry.html) | 几何与图元 |
 | [05_draw.html](http://localhost:3001/examples/05_draw.html) | 绘制与量测 |
+| [12_terrain.html](http://localhost:3001/examples/12_terrain.html) | 地形与贴地 |

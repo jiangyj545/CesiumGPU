@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 12：地形与贴地 Terrain - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>12 地形与贴地</h1>
+    <p class="desc">LocalQuantizedMeshProvider 加载本地 quantized-mesh 地形（湖北）；
+      pickGlobe 命中点自动贴合地形，折线/多边形经 heightReference: 'clampToGround'
+      贴地渲染，量测经 Measure 钩子计算贴地距离/面积。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 需要本地地形服务在线：<code>http://localhost:8888</code>
+      （terrain_hubei 服务）。离线时自动降级为 0 高椭球，功能不报错但无地形起伏。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+      function log(text) { result.textContent = text; }
+
+      // ── 1. 地形层：LocalQuantizedMeshProvider（本地 8888 服务）────────
+      let terrainOk = false;
+      try {
+        const provider = new engine.LocalQuantizedMeshProvider({
+          // 默认 URL 即本地 terrain_hubei 服务，此处显式写出便于替换
+          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          maximumLevel: 14,
+        });
+        // TerrainLayer 挂到 globe.terrainLayer；sampleHeight(lonDeg, latDeg) → 米
+        const globe = viewer.globe;
+        if (typeof engine.TerrainLayer === 'function') {
+          globe.terrainLayer = new engine.TerrainLayer({ providers: [provider] });
+          terrainOk = true;
+        } else {
+          log('当前引擎版本未包含 TerrainLayer，运行在 0 高椭球模式');
+        }
+      } catch (err) {
+        log('地形服务不可用，已降级为 0 高椭球：' + err.message);
+      }
+
+      // 贴地采样回调（几何 / 量测共用；geometry 不 import terrain 模块，保持分层）
+      const sampleHeight = terrainOk
+        ? (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat)
+        : () => 0;
+
+      // 度制经纬度 → 归一化 ECEF（引擎内部地球半径 = 1）
+      const toUnit = (m) => {
+        const s = 1 / 6378137;
+        return new engine.Cartesian3(m.x * s, m.y * s, m.z * s);
+      };
+
+      // ── 2. 贴地折线（heightReference: 'clampToGround' 自动沿线加密）──
+      function addTerrainPolyline() {
+        // 湖北境内一条跨地形的折线（宜昌 → 荆门 一带）
+        const positions = [
+          [110.5, 30.7], [111.2, 30.9], [112.0, 31.0], [112.6, 31.3],
+        ].map(([lon, lat]) => toUnit(engine.Cartesian3.fromDegrees(lon, lat)));
+        viewer.scene.entities.add({
+          name: 'terrain-polyline',
+          polyline: {
+            positions,
+            width: 3,
+            color: new engine.Color(1, 0.8, 0.2, 1),
+            heightReference: 'clampToGround',
+            sampleHeight,
+          },
+        });
+      }
+
+      // ── 3. 贴地多边形 ────────────────────────────────────────────────
+      function addTerrainPolygon() {
+        const deg = [[112.2, 30.8], [112.8, 30.8], [112.8, 31.2], [112.2, 31.2]];
+        const ring = deg.map(([lon, lat]) => toUnit(engine.Cartesian3.fromDegrees(lon, lat)));
+        viewer.scene.entities.add({
+          name: 'terrain-polygon',
+          polygon: {
+            hierarchy: { positions: ring },
+            color: new engine.Color(0.3, 0.8, 1, 0.35),
+            heightReference: 'clampToGround',
+            sampleHeight,
+          },
+        });
+      }
+
+      // ── 4. 量测（Measure 钩子：贴地距离/面积）────────────────────────
+      const draw = new engine.DrawHandler(viewer);
+      let drawType = null;
+      draw.drawEnd.addListener(({ positions }) => {
+        const clamp = (p) => engine.Measure.clampToTerrain(p, sampleHeight);
+        const isArea = drawType === 'polygon';
+        const value = isArea
+          ? engine.Measure.area(positions, { clampToTerrain: clamp })
+          : engine.Measure.distance(positions, false, { clampToTerrain: clamp });
+        const text = isArea
+          ? engine.MeasureCollection.formatArea(value)
+          : engine.MeasureCollection.formatDistance(value);
+        const label = (isArea ? '贴地面积: ' : '贴地距离: ') + text;
+        viewer.scene.entities.add({
+          name: `terrain-measure-${Date.now()}`,
+          position: positions[Math.floor(positions.length / 2)],
+          label: { text: label, fillColor: new engine.Color(0.72, 1, 0.72, 1) },
+        });
+        log(`${label}\n（顶点 ${positions.length} 个，地形${terrainOk ? '在线' : '离线 → 0 高'}）`);
+        drawType = null;
+      });
+
+      addBtn('贴地折线', () => { addTerrainPolyline(); log('已添加贴地折线（宜昌→荆门）'); });
+      addBtn('贴地多边形', () => { addTerrainPolygon(); log('已添加贴地多边形'); });
+      addBtn('测贴地距离', () => { drawType = 'polyline'; draw.start('polyline'); log('左键取点，右键结束（拾取点已自动贴合地形）'); });
+      addBtn('测贴地面积', () => { drawType = 'polygon'; draw.start('polygon'); log('左键取点，右键结束（拾取点已自动贴合地形）'); });
+      addBtn('清除实体', () => { draw.stop(); viewer.scene.entities.removeAll(); log('已清空'); });
+
+      // ── 5. flyTo 湖北：300 km 高空 → 拉近 ────────────────────────────
+      viewer.camera.flyTo({
+        destination: { lon: 112.4, lat: 30.9, height: 300_000 },
+        duration: 3,
+        complete: () => {
+          viewer.camera.flyTo({
+            destination: { lon: 112.4, lat: 30.9, height: 80_000 },
+            duration: 4,
+          });
+        },
+      });
+
+      log(terrainOk
+        ? '地形已就绪（localhost:8888）。拉近后可见折线/多边形贴合山谷起伏。\n点击「贴地折线」「贴地多边形」查看，或用「测贴地距离/面积」量测。'
+        : '运行在 0 高椭球模式（无 TerrainLayer 或服务离线）。');
+    }
+
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.4, 30.9, 300_000],
+          imagery: 'gaode-sat',
+          title: '12 · 地形与贴地 Terrain',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '12 地形与贴地 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

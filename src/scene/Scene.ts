@@ -101,6 +101,8 @@ export class Scene {
     // None of these touch context.device — safe to call before initialize().
     this.camera     = new Camera();
     this.globe      = new Globe(context);
+    // Terrain-aware picking: pickGlobe snaps hits via globe.terrainLayer.
+    this.camera.globe = this.globe;
     this.primitives = new PrimitiveCollection();
 
     // Default sun light

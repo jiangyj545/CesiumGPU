@@ -320,7 +320,21 @@ export class DrawHandler {
       camera.direction.y + ndcX * tanHalfFovX * camera.right.y + ndcY * tanHalfFovY * camera.up.y,
       camera.direction.z + ndcX * tanHalfFovX * camera.right.z + ndcY * tanHalfFovY * camera.up.z,
     );
-    return Measure.rayEllipsoid(camera.position, direction);
+    const hit = Measure.rayEllipsoid(camera.position, direction);
+    if (hit === null) return null;
+    // Match the GPU pick path: snap the fallback hit onto the terrain.
+    return this._terrainClamp(hit);
+  }
+
+  /**
+   * Snap a picked point onto the terrain surface via `globe.terrainLayer`.
+   * Returns the input unchanged when no terrain layer is attached (or no
+   * tile covers the location), keeping the ellipsoid behaviour.
+   */
+  private _terrainClamp(position: Cartesian3): Cartesian3 {
+    const terrain = this._viewer.globe.terrainLayer;
+    if (!terrain) return position;
+    return Measure.clampToTerrain(position, (lon, lat) => terrain.sampleHeight(lon, lat));
   }
 
   // ── Geometry helpers ──────────────────────────────────────────────────────
@@ -338,7 +352,7 @@ export class DrawHandler {
     const latMin = Math.min(c1.latitude, c2.latitude);
     const latMax = Math.max(c1.latitude, c2.latitude);
     const corner = (lon: number, lat: number): Cartesian3 =>
-      Measure.clampToEllipsoid(Cartesian3.fromRadians(lon, lat));
+      this._terrainClamp(Measure.clampToEllipsoid(Cartesian3.fromRadians(lon, lat)));
     return [
       corner(lonMin, latMin),
       corner(lonMax, latMin),

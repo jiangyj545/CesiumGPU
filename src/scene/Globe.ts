@@ -8,6 +8,10 @@ import { TileKey } from '../imagery/TileKey';
 import { Color } from '../math/Color';
 import { Matrix4 } from '../math/Matrix4';
 import { Cartesian3 } from '../math/Cartesian3';
+import { TerrainLayer } from '../terrain/TerrainLayer';
+import type { TerrainRenderTile } from '../terrain/TerrainLayer';
+import type { TerrainProvider, TerrainMeshData } from '../terrain/TerrainProvider';
+import { geographicTileBounds, webmercatorTileBounds } from '../terrain/TerrainProvider';
 
 export interface GlobeOptions {
   /** Number of longitude partitions. Default: 128 */
@@ -60,6 +64,16 @@ export class Globe {
    */
   private _detachTexture: GPUTexture | null = null;
 
+  // ── Terrain rendering state (active when a provider is attached) ──────────
+  /** Terrain streaming layer (null until setTerrainProvider is called). */
+  private _terrainLayer: TerrainLayer | null = null;
+  /** Live terrain tile primitives, keyed by rendered tile key. */
+  private _terrainPrimitives = new Map<string, TilePrimitiveEntry>();
+  /** CPU geometry cache for terrain meshes, keyed `terrain:<key>#<levels>`. */
+  private _terrainGeometryCache = new Map<string, CachedTileGeometry>();
+  /** 1×1 earthy texture bound to terrain tiles with no resolvable imagery. */
+  private _terrainFallbackTexture: GPUTexture | null = null;
+
   /** Scale factor: globe radius in normalised units = 1.0 */
   static readonly RADIUS = 1.0;
 
@@ -102,6 +116,46 @@ export class Globe {
   }
 
   get primitive(): Primitive | null { return this._primitive; }
+
+  /**
+   * Terrain streaming layer, or `null` while no provider is attached (the
+   * flat-ellipsoid path is used). Consumed by terrain-aware picking via
+   * `Camera.pickGlobe` / `Measure.clampToTerrain` / draw handlers.
+   */
+  get terrainLayer(): TerrainLayer | null { return this._terrainLayer; }
+
+  /**
+   * Attach (or detach with `null`) a terrain provider. While attached the
+   * globe streams terrain meshes each frame and renders displaced tile
+   * geometry instead of the flat per-tile regions.
+   */
+  setTerrainProvider(provider: TerrainProvider | null): void {
+    this._clearTerrainPrimitives();
+    this._terrainGeometryCache.clear();
+    if (this._terrainLayer !== null) {
+      this._terrainLayer.destroy();
+      this._terrainLayer = null;
+    }
+    if (!provider) return;
+
+    this._terrainLayer = new TerrainLayer({
+      provider,
+      // A tile mesh arrived: drop its cached geometry (it may have been built
+      // from a parent-mesh fallback) so the primitive rebuilds from real
+      // terrain on the next sync.
+      onTileReady: (z, x, y) => {
+        const prefix = `terrain:${z}/${x}/${y}`;
+        for (const cacheKey of this._terrainGeometryCache.keys()) {
+          if (cacheKey.startsWith(prefix)) this._terrainGeometryCache.delete(cacheKey);
+        }
+        const stale = this._terrainPrimitives.get(`${z}/${x}/${y}`);
+        if (stale !== undefined) {
+          this._destroyTilePrimitive(stale);
+          this._terrainPrimitives.delete(`${z}/${x}/${y}`);
+        }
+      },
+    });
+  }
 
   /**
    * Load a texture from an HTMLImageElement and apply it to the globe.
@@ -283,21 +337,40 @@ export class Globe {
   update(camera: Camera): void {
     if (!this._opaquePipeline) {
       this._clearTilePrimitives();
+      this._clearTerrainPrimitives();
       return;
     }
 
     const layer = this.layers.activeLayer;
     if (layer === null) {
       this._clearTilePrimitives();
-      return;
+    } else {
+      layer.update(this._context.device, camera, this._context.drawingBufferHeight);
+      this._syncTilePrimitives(layer);
     }
 
-    layer.update(this._context.device, camera, this._context.drawingBufferHeight);
-    this._syncTilePrimitives(layer);
+    // Terrain streaming runs alongside imagery: meshes arrive asynchronously
+    // and displace the per-tile geometry once resident (see drawTiles).
+    if (this._terrainLayer !== null) {
+      this._terrainLayer.update(camera, this._context.drawingBufferHeight);
+      this._syncTerrainPrimitives(layer);
+    } else {
+      this._clearTerrainPrimitives();
+    }
   }
 
-  /** Draw all live tile primitives in the G-Buffer pass. */
+  /**
+   * Draw all live tile primitives in the G-Buffer pass. While terrain
+   * primitives exist they replace the flat imagery tiles (they carry the same
+   * tile textures where the grids align); otherwise imagery tiles draw.
+   */
   drawTiles(pass: GPURenderPassEncoder, cameraBindGroup: GPUBindGroup): void {
+    if (this._terrainPrimitives.size > 0) {
+      for (const entry of this._terrainPrimitives.values()) {
+        entry.primitive.drawOpaque(pass, cameraBindGroup);
+      }
+      return;
+    }
     for (const entry of this._tilePrimitives.values()) {
       entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
@@ -417,6 +490,214 @@ export class Globe {
     return geometry;
   }
 
+  // ── Terrain tile rendering (Wave2-A) ────────────────────────────────────────
+
+  /**
+   * Synchronise terrain primitives with the layer's render set (selected
+   * tiles backed by an own or ancestor mesh). Mirrors the imagery sync.
+   */
+  private _syncTerrainPrimitives(layer: ImageryLayer | null): void {
+    const terrainLayer = this._terrainLayer;
+    if (terrainLayer === null) return;
+
+    const keep = new Set<string>();
+    for (const tile of terrainLayer.renderTiles) keep.add(`${tile.z}/${tile.x}/${tile.y}`);
+
+    for (const [key, entry] of this._terrainPrimitives) {
+      if (!keep.has(key)) {
+        this._destroyTilePrimitive(entry);
+        this._terrainPrimitives.delete(key);
+      }
+    }
+
+    for (const tile of terrainLayer.renderTiles) {
+      const key = `${tile.z}/${tile.x}/${tile.y}`;
+      const mesh = terrainLayer.getMesh(tile.z, tile.x, tile.y);
+      if (mesh === null) continue; // evicted between selection and sync
+
+      // Textures: only the webmercator terrain grid aligns 1:1 with imagery
+      // TileKeys, so tile textures are reused there; geographic terrain (and
+      // anything unresolvable) renders with the flat fallback texture.
+      let texture: GPUTexture;
+      let textureLevels = -1; // -1 → fallback texture, full [0,1] uv
+      if (layer !== null && terrainLayer.provider.tilingScheme === 'webmercator') {
+        const resolved = layer.resolveTexture(new TileKey(tile.z, tile.x, tile.y));
+        if (resolved !== null) {
+          texture = resolved.texture;
+          textureLevels = resolved.ancestorLevels;
+        } else {
+          texture = this._getTerrainFallbackTexture();
+        }
+      } else {
+        texture = this._getTerrainFallbackTexture();
+      }
+
+      const entry = this._terrainPrimitives.get(key);
+      if (entry !== undefined && entry.texture !== texture) {
+        // Bound texture changed → rebuild with matching uv sub-rect geometry.
+        this._destroyTilePrimitive(entry);
+        this._terrainPrimitives.delete(key);
+      }
+      if (!this._terrainPrimitives.has(key)) {
+        this._terrainPrimitives.set(key, this._createTerrainPrimitive(tile, mesh, texture, textureLevels));
+      }
+    }
+  }
+
+  /** Build one terrain primitive (displaced mesh geometry + tile texture). */
+  private _createTerrainPrimitive(
+    tile: TerrainRenderTile,
+    mesh: TerrainMeshData,
+    texture: GPUTexture,
+    textureLevels: number
+  ): TilePrimitiveEntry {
+    const uvRect = textureLevels > 0 ? this._tileUvRect(tile.x, tile.y, textureLevels) : undefined;
+    const geometry = this._getTerrainGeometry(tile, mesh, uvRect, textureLevels);
+    const primitive = new Primitive(this._context, {
+      vertices:    geometry.vertices,
+      indices:     geometry.indices,
+      translucent: false,
+    });
+    // Mesh positions are already normalised ECEF at true height — identity
+    // model matrix and NO TILE_RADIUS_SCALE lift (that is imagery-only).
+    Matrix4.identity(primitive.modelMatrix);
+    primitive.setTexture(texture, this._getTileSampler());
+    primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
+    return { primitive, texture };
+  }
+
+  /**
+   * Cached (or newly generated) interleaved geometry for a terrain mesh.
+   *
+   * Positions come verbatim from the mesh (normalised ECEF, height folded in).
+   * Normals are accumulated from face crosses (robust across skirts); zero-
+   * length sums fall back to the radial direction. UVs map each vertex's
+   * lon/lat linearly across the tile bounds — the same mapping
+   * `EllipsoidGeometry.createRegion` uses, so tile textures line up.
+   */
+  private _getTerrainGeometry(
+    tile: TerrainRenderTile,
+    mesh: TerrainMeshData,
+    uvRect: { u0: number; v0: number; u1: number; v1: number } | undefined,
+    textureLevels: number
+  ): CachedTileGeometry {
+    const cacheKey = `terrain:${tile.z}/${tile.x}/${tile.y}#${tile.ancestorLevels}#${textureLevels}`;
+    const cached = this._terrainGeometryCache.get(cacheKey);
+    if (cached) return cached;
+
+    const terrainLayer = this._terrainLayer as TerrainLayer;
+    const rect = terrainLayer.provider.tilingScheme === 'geographic'
+      ? geographicTileBounds(tile.z, tile.x, tile.y)
+      : webmercatorTileBounds(tile.z, tile.x, tile.y);
+
+    const positions = mesh.positions;
+    const indices   = Uint32Array.from(mesh.indices);
+    const vertexCount = positions.length / 3;
+    const vertices    = new Float32Array(vertexCount * 8); // [pos(3), normal(3), uv(2)]
+    const normals     = new Float32Array(vertexCount * 3);
+    const rad         = 180.0 / Math.PI;
+
+    // Pass 1: positions + uvs; face-normal accumulation.
+    for (let i = 0; i < indices.length; i += 3) {
+      const a = indices[i] * 3;
+      const b = indices[i + 1] * 3;
+      const c = indices[i + 2] * 3;
+      const e0x = positions[b]     - positions[a];
+      const e0y = positions[b + 1] - positions[a + 1];
+      const e0z = positions[b + 2] - positions[a + 2];
+      const e1x = positions[c]     - positions[a];
+      const e1y = positions[c + 1] - positions[a + 1];
+      const e1z = positions[c + 2] - positions[a + 2];
+      const nx = e0y * e1z - e0z * e1y;
+      const ny = e0z * e1x - e0x * e1z;
+      const nz = e0x * e1y - e0y * e1x;
+      normals[a] += nx; normals[a + 1] += ny; normals[a + 2] += nz;
+      normals[b] += nx; normals[b + 1] += ny; normals[b + 2] += nz;
+      normals[c] += nx; normals[c + 1] += ny; normals[c + 2] += nz;
+    }
+
+    const u0 = uvRect ? uvRect.u0 : 0;
+    const v0 = uvRect ? uvRect.v0 : 0;
+    const du = uvRect ? uvRect.u1 - uvRect.u0 : 1;
+    const dv = uvRect ? uvRect.v1 - uvRect.v0 : 1;
+    const lonSpan = rect.east - rect.west;
+    const latSpan = rect.north - rect.south;
+
+    for (let i = 0; i < vertexCount; i++) {
+      const x = positions[i * 3];
+      const y = positions[i * 3 + 1] / WGS84_POLAR_RATIO; // undo squash
+      const z = positions[i * 3 + 2] / WGS84_POLAR_RATIO;
+
+      const lon = Math.atan2(y, x) * rad;
+      const lat = Math.atan2(z, Math.hypot(x, y)) * rad;
+      const u   = u0 + du * (lon - rect.west) / lonSpan;
+      const v   = v0 + dv * (rect.north - lat) / latSpan; // row 0 = north edge
+
+      let nx = normals[i * 3];
+      let ny = normals[i * 3 + 1];
+      let nz = normals[i * 3 + 2];
+      const nLen = Math.hypot(nx, ny, nz);
+      if (nLen < 1e-12) { nx = x; ny = y; nz = z; } // degenerate → radial
+      const invLen = 1.0 / (nLen < 1e-12 ? Math.hypot(x, y, z) : nLen);
+
+      const vi = i * 8;
+      vertices[vi]     = x;
+      vertices[vi + 1] = positions[i * 3 + 1];
+      vertices[vi + 2] = positions[i * 3 + 2];
+      vertices[vi + 3] = nx * invLen;
+      vertices[vi + 4] = ny * invLen;
+      vertices[vi + 5] = nz * invLen;
+      vertices[vi + 6] = u;
+      vertices[vi + 7] = v;
+    }
+
+    const geometry: CachedTileGeometry = { vertices, indices };
+    if (this._terrainGeometryCache.size >= TILE_GEOMETRY_CACHE_CAPACITY) {
+      this._terrainGeometryCache.clear();
+    }
+    this._terrainGeometryCache.set(cacheKey, geometry);
+    return geometry;
+  }
+
+  /** UV sub-rect of an ancestor tile texture covering this tile (imagery path convention). */
+  private _tileUvRect(x: number, y: number, ancestorLevels: number) {
+    const n   = 2 ** ancestorLevels;
+    const inv = 1.0 / n;
+    const u0  = (x % n) * inv;
+    const v0  = (y % n) * inv;
+    return { u0, v0, u1: u0 + inv, v1: v0 + inv };
+  }
+
+  /** Lazily created 1×1 earthy texture for terrain without resolvable imagery. */
+  private _getTerrainFallbackTexture(): GPUTexture {
+    if (this._terrainFallbackTexture === null) {
+      const device = this._context.device;
+      const texture = device.createTexture({
+        label: 'Globe.TerrainFallback',
+        size:  { width: 1, height: 1 },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      device.queue.writeTexture(
+        { texture },
+        new Uint8Array([137, 124, 104, 255]),
+        { bytesPerRow: 4, rowsPerImage: 1 },
+        { width: 1, height: 1 }
+      );
+      this._terrainFallbackTexture = texture;
+    }
+    return this._terrainFallbackTexture;
+  }
+
+  /** Destroy all terrain primitives (used when no provider is attached). */
+  private _clearTerrainPrimitives(): void {
+    if (this._terrainPrimitives.size === 0) return;
+    for (const entry of this._terrainPrimitives.values()) {
+      this._destroyTilePrimitive(entry);
+    }
+    this._terrainPrimitives.clear();
+  }
+
   /** Lazily created shared tile sampler (driven by the active layer). */
   private _getTileSampler(): GPUSampler {
     if (this._tileSampler === null) {
@@ -463,6 +744,14 @@ export class Globe {
 
   destroy(): void {
     this._clearTilePrimitives();
+    this._clearTerrainPrimitives();
+    this._terrainGeometryCache.clear();
+    if (this._terrainLayer !== null) {
+      this._terrainLayer.destroy();
+      this._terrainLayer = null;
+    }
+    this._terrainFallbackTexture?.destroy();
+    this._terrainFallbackTexture = null;
     this._geometryCache.clear();
     this._detachTexture?.destroy();
     this._detachTexture = null;
@@ -493,6 +782,9 @@ const TILE_PARTITIONS = 8;
  * underneath never z-fights with them.
  */
 const TILE_RADIUS_SCALE = 1.001;
+
+/** WGS84 polar / equatorial ratio (matches EllipsoidGeometry normalisation). */
+const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
 
 /** Max cached tile geometries (CPU arrays only; ~4 KB each at 8×8). */
 const TILE_GEOMETRY_CACHE_CAPACITY = 1024;

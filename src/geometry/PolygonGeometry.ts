@@ -1,6 +1,7 @@
 import { Cartesian3 } from '../math/Cartesian3';
 import { Matrix4 } from '../math/Matrix4';
 import { Transforms } from '../math/Transforms';
+import { Measure } from '../analysis/Measure';
 import { GeometryPipeline } from './GeometryPipeline';
 import type { InterleavedGeometryBuffers } from './GeometryPipeline';
 
@@ -9,6 +10,7 @@ export interface PolygonGeometryOptions {
    * Height above the surface, in normalized units (Earth radius = 1).
    * Vertices are placed at radius `1 + height` along their radial direction;
    * with the default 0 the polygon lies on the sphere surface.
+   * Ignored when {@link heightReference} is `'clampToGround'`.
    */
   height?: number;
   /**
@@ -16,6 +18,23 @@ export interface PolygonGeometryOptions {
    * Default: none.
    */
   holes?: Cartesian3[][];
+  /**
+   * Vertex height mode.
+   * - `'none'` (default): vertices sit at the flat `1 + height` shell.
+   * - `'clampToGround'`: every ring vertex (outer ring and holes) is snapped
+   *   onto the terrain surface before triangulation. Note only the vertices
+   *   follow the terrain — the triangle interior stays a coarse shell.
+   *
+   * Requires {@link sampleHeight}; without it this behaves as `'none'`.
+   */
+  heightReference?: 'none' | 'clampToGround';
+  /**
+   * Terrain height sampler `(lonDeg, latDeg) => heightMetres`, typically
+   * bound to `globe.terrainLayer.sampleHeight` by the caller. The geometry
+   * module never imports the terrain stack — the callback keeps layering
+   * clean. Required by `heightReference: 'clampToGround'`.
+   */
+  sampleHeight?: (lon: number, lat: number) => number;
 }
 
 // ── Earcut (self-contained 2D triangulation, classic algorithm) ──────────────
@@ -491,13 +510,24 @@ export class PolygonGeometry {
     const height = options.height ?? 0.0;
     const holes = options.holes ?? [];
 
-    // Local ENU frame at the first vertex; project onto its east-north plane.
-    const origin = positions[0];
+    // Terrain clamping pass: snap every ring vertex onto the terrain surface
+    // before triangulation. No-op unless heightReference === 'clampToGround'
+    // and a sampler was provided; the input arrays are never modified.
+    const sample = options.sampleHeight;
+    const terrainClamped =
+      options.heightReference === 'clampToGround' && typeof sample === 'function';
+    const rings: Cartesian3[][] = [positions, ...holes].map((ring) =>
+      terrainClamped && sample
+        ? ring.map((p) => Measure.clampToTerrain(p, sample))
+        : ring,
+    );
+
+    // Local ENU frame at the first (possibly terrain-clamped) vertex; project
+    // onto its east-north plane.
+    const origin = rings[0][0];
     const enu = Transforms.eastNorthUpToFixedFrame(origin);
     const inverse = Matrix4.inverse(enu, new Matrix4());
     const inv = inverse.values;
-
-    const rings: Cartesian3[][] = [positions, ...holes];
     const flat: number[] = [];             // [east, north] pairs
     const sourcePoints: Cartesian3[] = []; // same order as `flat`
     const holeIndices: number[] = [];
@@ -529,7 +559,6 @@ export class PolygonGeometry {
     }
 
     const vertexCount = sourcePoints.length;
-    const radius = 1.0 + height;
     const eastRange = eastMax - eastMin > 1e-15 ? eastMax - eastMin : 1.0;
     const northRange = northMax - northMin > 1e-15 ? northMax - northMin : 1.0;
 
@@ -543,6 +572,10 @@ export class PolygonGeometry {
       const dir = len > 1e-15
         ? new Cartesian3(src.x / len, src.y / len, src.z / len)
         : new Cartesian3(0, 0, 1); // Degenerate position guard.
+
+      // Terrain-clamped vertices carry their own radius (magnitude of the
+      // clamped point, polar squash included); dir * len reproduces src.
+      const radius = terrainClamped ? len : 1.0 + height;
 
       positionsOut[i * 3] = dir.x * radius;
       positionsOut[i * 3 + 1] = dir.y * radius;

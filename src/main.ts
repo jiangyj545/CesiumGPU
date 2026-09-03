@@ -41,6 +41,16 @@ async function main() {
       viewer.globe.generateProceduralTexture();
     });
 
+    // ── Terrain (DEM streaming, 可选) ────────────────────────────────────────
+    // 默认不启用（本示例离线运行，无地形服务）。接入示例：
+    //   import { TerrariumProvider } from './terrain/TerrariumProvider';
+    //   viewer.globe.setTerrainProvider(new TerrariumProvider({
+    //     url: 'http://localhost:8888/terrarium/{z}/{x}/{y}.png',
+    //     maximumLevel: 12,
+    //   }));
+    // 服务不可达时 Provider 的会话内失败缓存会安静回退到平面地球，
+    // `globe.terrainLayer?.sampleHeight(lon, lat)` 未命中瓦片时返回 0。
+
     // ── Clock (simulation time) ────────────────────────────────────────────
     // Start at noon UTC on today's date so the sun is visible immediately.
     const today = new Date();

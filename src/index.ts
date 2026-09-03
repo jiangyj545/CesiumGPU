@@ -115,3 +115,26 @@ export type {
 // Weather effects (T3.5, 对齐 EV_Rain / EV_Snow)
 export { Weather } from './effect/Weather';
 export type { WeatherType, WeatherOptions, WeatherArea } from './effect/Weather';
+
+// Terrain (DEM streaming, Wave1)
+export type {
+  TerrainProvider,
+  TerrainMeshData,
+  TerrainTilingScheme,
+} from './terrain/TerrainProvider';
+export { HttpTerrainProviderBase } from './terrain/TerrainProvider';
+export { LocalQuantizedMeshProvider } from './terrain/LocalQuantizedMeshProvider';
+export type {
+  LocalQuantizedMeshProviderOptions,
+} from './terrain/LocalQuantizedMeshProvider';
+export { TerrariumProvider } from './terrain/TerrariumProvider';
+export type { TerrariumProviderOptions } from './terrain/TerrariumProvider';
+
+// Terrain streaming + height sampling (Wave2-A)
+export { TerrainLayer } from './terrain/TerrainLayer';
+export type {
+  TerrainLayerOptions,
+  TerrainLayerStats,
+  TerrainRenderTile,
+  TerrainTileBounds,
+} from './terrain/TerrainLayer';

@@ -3,7 +3,23 @@ import { Cartesian3 } from '../math/Cartesian3';
 import { CesiumMath } from '../math/CesiumMath';
 import { Cartographic } from '../math/Cartographic';
 import { EasingFunction } from '../math/EasingFunction';
+import { Measure } from '../analysis/Measure';
 import { CameraFlightPath } from './CameraFlightPath';
+
+/**
+ * Minimal structural contract the camera needs from the globe for
+ * terrain-aware picking. `Globe` satisfies it through its `terrainLayer`
+ * (attached by the terrain stack); kept structural so `Camera` does not
+ * depend on the terrain implementation.
+ */
+export interface CameraGlobeSurface {
+  /**
+   * Terrain height sampler, present while terrain tiles are streaming.
+   * `sampleHeight(lonDeg, latDeg)` returns the terrain elevation in metres,
+   * or `0` when no tile covers the location.
+   */
+  terrainLayer?: { sampleHeight(lon: number, lat: number): number } | null;
+}
 
 /** Camera orientation expressed as heading / pitch / roll (radians). */
 export interface Orientation {
@@ -71,6 +87,13 @@ export class Camera {
 
   /** Active camera flight, or null when the camera is idle. */
   private _flight: CameraFlightPath | null = null;
+
+  /**
+   * Globe surface reference used by `pickGlobe` to snap hits onto the terrain.
+   * Assigned by `Scene` at construction; `null` (no terrain sampling) keeps
+   * the legacy ellipsoid-only picking behaviour.
+   */
+  globe: CameraGlobeSurface | null = null;
 
   /** Minimum dot product of camera direction with nadir before pitch is rejected (~85° max tilt). */
   private static readonly _MAX_TILT_NADIR_DOT = Math.cos(CesiumMath.toRadians(85));
@@ -273,10 +296,66 @@ export class Camera {
     const t = (-b - Math.sqrt(discriminant)) * 0.5;
     if (t < 0) return null;
 
-    return new Cartesian3(
+    const hit = new Cartesian3(
       this.position.x + t * rayDir.x,
       this.position.y + t * rayDir.y,
       this.position.z + t * rayDir.z,
+    );
+    return Camera._clampHitToTerrain(hit, this.globe?.terrainLayer);
+  }
+
+  /**
+   * Snap an ellipsoid hit onto the terrain surface with a fixed-point
+   * iteration (max 3 steps): ECEF → geodetic lon/lat → `sampleHeight` →
+   * surface ECEF at `1 + h / 6378137`, repeated until the sampled height
+   * stops changing (< 1 cm). Terrain elevations shift the surface point,
+   * which slightly moves its geodetic latitude, so one sample is not always
+   * enough for full convergence.
+   *
+   * When no terrain layer is attached, or the sampler reports no data (0)
+   * at the hit location, the original ellipsoid hit is returned unchanged.
+   */
+  private static _clampHitToTerrain(
+    hit: Cartesian3,
+    sampler: { sampleHeight(lon: number, lat: number): number } | null | undefined,
+  ): Cartesian3 {
+    if (!sampler) return hit;
+
+    let point = hit;
+    let prevHeight = Number.NaN;
+    for (let i = 0; i < 3; i++) {
+      const height = Camera._sampleTerrainHeight(point, sampler);
+      if (!Number.isFinite(height) || height === 0.0) {
+        // No terrain coverage here: keep the ellipsoid hit.
+        return i === 0 ? hit : point;
+      }
+      if (Math.abs(height - prevHeight) < 0.01) break; // converged
+      prevHeight = height;
+      point = Measure.clampToTerrain(point, (lon, lat) => sampler.sampleHeight(lon, lat));
+    }
+    return point;
+  }
+
+  /**
+   * Terrain elevation (metres) at a normalised ECEF point. Uses the engine
+   * surface convention (y/z squashed by the WGS84 polar ratio — same as
+   * `Measure.clampToTerrain` / the terrain tile grid): unsquash the
+   * direction, then read the parametric lon/lat in degrees.
+   */
+  private static _sampleTerrainHeight(
+    point: Cartesian3,
+    sampler: { sampleHeight(lon: number, lat: number): number },
+  ): number {
+    const ratio = Measure.POLAR_RATIO;
+    const inv = 1.0 / Cartesian3.magnitude(point);
+    const ux = point.x * inv;
+    const uy = (point.y * inv) / ratio;
+    const uz = (point.z * inv) / ratio;
+    const lon = Math.atan2(uy, ux);
+    const lat = Math.atan2(uz, Math.hypot(ux, uy));
+    return sampler.sampleHeight(
+      CesiumMath.toDegrees(lon),
+      CesiumMath.toDegrees(lat),
     );
   }
 

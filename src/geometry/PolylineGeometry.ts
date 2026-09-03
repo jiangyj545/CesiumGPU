@@ -1,4 +1,5 @@
 import { Cartesian3 } from '../math/Cartesian3';
+import { Measure } from '../analysis/Measure';
 import { GeometryPipeline } from './GeometryPipeline';
 import type { InterleavedGeometryBuffers } from './GeometryPipeline';
 
@@ -9,10 +10,33 @@ export interface PolylineGeometryOptions {
    * Default: 0.001
    */
   width?: number;
+  /**
+   * Vertex height mode.
+   * - `'none'` (default): positions are used as-is.
+   * - `'clampToGround'`: every vertex is snapped onto the terrain surface
+   *   before the ribbon is built, and each segment is densified along the
+   *   great circle (spherical step 2 degrees, at least 32 subdivisions) so
+   *   the line follows valleys between vertices instead of cutting through
+   *   them.
+   *
+   * Requires {@link sampleHeight}; without it this behaves as `'none'`.
+   */
+  heightReference?: 'none' | 'clampToGround';
+  /**
+   * Terrain height sampler `(lonDeg, latDeg) => heightMetres`, typically
+   * bound to `globe.terrainLayer.sampleHeight` by the caller. The geometry
+   * module never imports the terrain stack — the callback keeps layering
+   * clean. Required by `heightReference: 'clampToGround'`.
+   */
+  sampleHeight?: (lon: number, lat: number) => number;
 }
 
 /** Squared length below which a segment is treated as degenerate. */
 const DEGENERATE_EPSILON_SQ = 1e-20;
+/** Densification step for clamped polylines: at most 2 degrees of arc per sub-vertex. */
+const DENSIFY_STEP_DEG = 2.0;
+/** Minimum number of subdivisions per segment when clamping (bounds sag between vertices). */
+const MIN_SUBDIVISIONS = 32;
 
 /**
  * PolylineGeometry - Expands a polyline into a camera-independent triangle
@@ -38,6 +62,10 @@ export class PolylineGeometry {
     positions: Cartesian3[],
     options: PolylineGeometryOptions = {}
   ): InterleavedGeometryBuffers {
+    // Terrain clamping (incl. along-line densification); no-op unless
+    // heightReference === 'clampToGround' and a sampler was provided.
+    positions = PolylineGeometry._clampForTerrain(positions, options);
+
     const n = positions.length;
     if (n < 2) {
       return GeometryPipeline.emptyBuffers();
@@ -126,6 +154,70 @@ export class PolylineGeometry {
       vertexCount,
       indexCount,
     };
+  }
+
+  /**
+   * Terrain clamping pass for `heightReference: 'clampToGround'`: every
+   * input vertex is snapped onto the terrain surface, and each segment is
+   * densified along the great circle so the ribbon follows the terrain
+   * between vertices (a straight chord would tunnel through valleys).
+   *
+   * Subdivision count per segment = max(ceil(spherical angle / 2°), 32).
+   * No-op when the options leave the default `'none'` mode or omit the
+   * sampler; the input array is never modified.
+   */
+  private static _clampForTerrain(
+    positions: Cartesian3[],
+    options: PolylineGeometryOptions,
+  ): Cartesian3[] {
+    if (options.heightReference !== 'clampToGround' || !options.sampleHeight) {
+      return positions;
+    }
+    const sample = options.sampleHeight;
+
+    const out: Cartesian3[] = [];
+    out.push(Measure.clampToTerrain(positions[0], sample));
+    for (let i = 1; i < positions.length; i++) {
+      const a = positions[i - 1];
+      const b = positions[i];
+      const ua = PolylineGeometry._radial(a);
+      const ub = PolylineGeometry._radial(b);
+      const dot = Cartesian3.dot(ua, ub);
+      const angle = Math.acos(dot < -1 ? -1 : dot > 1 ? 1 : dot);
+      const steps = Math.max(
+        Math.ceil((angle * 180 / Math.PI) / DENSIFY_STEP_DEG),
+        MIN_SUBDIVISIONS,
+      );
+      const sinAngle = Math.sin(angle);
+      if (sinAngle < 1e-12 || steps <= 1) {
+        // Degenerate arc: slerp falls back to a plain lerp + normalize.
+        for (let s = 1; s < steps; s++) {
+          const t = s / steps;
+          out.push(Measure.clampToTerrain(
+            new Cartesian3(
+              ua.x + (ub.x - ua.x) * t,
+              ua.y + (ub.y - ua.y) * t,
+              ua.z + (ub.z - ua.z) * t,
+            ),
+            sample,
+          ));
+        }
+      } else {
+        // Slerp on the unit sphere: (sin((1-t)ω)a + sin(tω)b) / sin(ω).
+        for (let s = 1; s < steps; s++) {
+          const t = s / steps;
+          const k0 = Math.sin((1 - t) * angle) / sinAngle;
+          const k1 = Math.sin(t * angle) / sinAngle;
+          out.push(Measure.clampToTerrain(new Cartesian3(
+            ua.x * k0 + ub.x * k1,
+            ua.y * k0 + ub.y * k1,
+            ua.z * k0 + ub.z * k1,
+          ), sample));
+        }
+      }
+      out.push(Measure.clampToTerrain(b, sample));
+    }
+    return out;
   }
 
   /**

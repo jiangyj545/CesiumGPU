@@ -46,6 +46,65 @@ export class Measure {
   }
 
   /**
+   * 将点贴到**地形表面**：ECEF → 经纬度（度）→ `sampleHeight` → 重建引擎
+   * ECEF，径向 `1 + h / 6378137`。
+   *
+   * 经纬度采用**引擎面约定**（与 `EllipsoidGeometry` / 地形网格一致的
+   * y/z 极半径压缩）：方向先按极半径比还原，再取参数化球面角——这正是
+   * 地形瓦片网格顶点的 (lon, lat) 键，因此本函数对已贴地点幂等。
+   *
+   * `sampleHeight` 返回 0 或非有限值（该处无地形数据）时退化为贴基础面
+   * （h = 0）。几何模块通过 options 注入本函数（见 `PolylineGeometry` /
+   * `PolygonGeometry` 的 `sampleHeight`），analysis 层不依赖 terrain 模块。
+   *
+   * @param position - 归一化 ECEF 坐标
+   * @param sampleHeight - `(lonDeg, latDeg) => 高程（米）`，通常绑定为
+   *        `(lon, lat) => globe.terrainLayer.sampleHeight(lon, lat)`
+   * @param result - 可选输出对象
+   */
+  static clampToTerrain(
+    position: Cartesian3,
+    sampleHeight: (lon: number, lat: number) => number,
+    result?: Cartesian3,
+  ): Cartesian3 {
+    if (typeof sampleHeight !== 'function') {
+      throw new Error('Measure.clampToTerrain: sampleHeight callback is required');
+    }
+    const mag = Cartesian3.magnitude(position);
+    if (mag < 1e-15) {
+      const out = result ?? new Cartesian3();
+      out.x = position.x;
+      out.y = position.y;
+      out.z = position.z;
+      return out;
+    }
+
+    // Parametric lon/lat under the engine surface convention.
+    const inv = 1.0 / mag;
+    const ux = position.x * inv;
+    const uy = (position.y * inv) / Measure.POLAR_RATIO;
+    const uz = (position.z * inv) / Measure.POLAR_RATIO;
+    const lon = Math.atan2(uy, ux);
+    const lat = Math.atan2(uz, Math.hypot(ux, uy));
+
+    const h = sampleHeight(lon * (180 / Math.PI), lat * (180 / Math.PI));
+    const height = Number.isFinite(h) ? h : 0.0;
+
+    // Rebuild the surface point: parametric direction squashed in y/z,
+    // radially scaled by 1 + height / EARTH_SCALE (identical to the terrain
+    // mesh vertex formula `ecefFromLonLatHeight`).
+    const cosLat = Math.cos(lat);
+    const sinLat = Math.sin(lat);
+    const scale = 1.0 + height / Measure.EARTH_SCALE;
+
+    const out = result ?? new Cartesian3();
+    out.x = cosLat * Math.cos(lon) * scale;
+    out.y = cosLat * Math.sin(lon) * Measure.POLAR_RATIO * scale;
+    out.z = sinLat * Measure.POLAR_RATIO * scale;
+    return out;
+  }
+
+  /**
    * 折线长度量测（米）。
    *
    * 两点以上按相邻点分段累加。每段长度 = 三维直线弦长 × 球面修正系数，
@@ -55,10 +114,20 @@ export class Measure {
    * @param points - 归一化 ECEF 坐标数组（至少 2 个）
    * @param clamped - true 时每点先贴地（归一化到半径 1）再累加，
    *                  此时每段即为纯地表测地线距离
+   * @param options - 可选地形钩子；提供 `clampToTerrain` 时每个点先经其
+   *                  贴到地形表面再累加（优先于 `clamped` 的半径 1 贴地）
    * @returns 总长度（米）
    */
-  static distance(points: Cartesian3[], clamped = false): number {
+  static distance(
+    points: Cartesian3[],
+    clamped = false,
+    options?: MeasureTerrainOptions,
+  ): number {
     if (!points || points.length < 2) return 0.0;
+    const terrainClamp = options?.clampToTerrain;
+    if (terrainClamp) {
+      points = points.map((p) => terrainClamp(p));
+    }
 
     let total = 0.0;
     for (let i = 1; i < points.length; i++) {
@@ -139,10 +208,16 @@ export class Measure {
    * 顶点顺序（顺/逆时针）均可；面积取绝对值。
    *
    * @param points - 归一化 ECEF 坐标数组（至少 3 个，不含重复首尾点）
+   * @param options - 可选地形钩子；提供 `clampToTerrain` 时每个顶点先经其
+   *                  贴到地形表面再计算
    * @returns 球面多边形面积（m²）
    */
-  static area(points: Cartesian3[]): number {
+  static area(points: Cartesian3[], options?: MeasureTerrainOptions): number {
     if (!points || points.length < 3) return 0.0;
+    const terrainClamp = options?.clampToTerrain;
+    if (terrainClamp) {
+      points = points.map((p) => terrainClamp(p));
+    }
 
     const n = points.length;
     let angleSum = 0.0;
@@ -262,6 +337,18 @@ export class Measure {
 /** 局部 clamp（避免引入 CesiumMath 依赖，语义同 CesiumMath.clamp） */
 function clamp(value: number, min: number, max: number): number {
   return value < min ? min : value > max ? max : value;
+}
+
+/**
+ * 量测的地形钩子（可选参数，见 `Measure.distance` / `Measure.area`）。
+ *
+ * 调用方显式注入贴地函数（典型实现：`(p) => Measure.clampToTerrain(p,
+ * (lon, lat) => globe.terrainLayer.sampleHeight(lon, lat))`），Measure 不
+ * 直接依赖 terrain 模块，保持 analysis 层纯净。缺省时不贴地（0 高假设）。
+ */
+export interface MeasureTerrainOptions {
+  /** 将归一化 ECEF 点贴到地形表面，返回贴地后的点。 */
+  clampToTerrain?: (position: Cartesian3) => Cartesian3;
 }
 
 /** 量测类型 */
