@@ -283,12 +283,18 @@ export class GltfLoader {
   ): Promise<(ImageBitmap | null)[]> {
     if (!json.images) return [];
 
-    const promises = json.images.map(async (img): Promise<ImageBitmap | null> => {
+    const promises = json.images.map(async (img, imageIndex): Promise<ImageBitmap | null> => {
       try {
         if (img.bufferView !== undefined) {
           // Image embedded in a bufferView (typical in GLB)
-          const bv  = json.bufferViews![img.bufferView];
+          const bv = json.bufferViews?.[img.bufferView];
+          if (!bv) {
+            throw new Error(`GltfLoader: image ${imageIndex} references missing bufferView ${img.bufferView}`);
+          }
           const buf = buffers[bv.buffer];
+          if (!buf) {
+            throw new Error(`GltfLoader: image ${imageIndex} bufferView ${img.bufferView} references missing buffer ${bv.buffer}`);
+          }
           const arr = new Uint8Array(buf, bv.byteOffset ?? 0, bv.byteLength);
           const blob = new Blob([arr], { type: img.mimeType ?? 'image/jpeg' });
           return createImageBitmap(blob);
@@ -406,24 +412,44 @@ export class GltfLoader {
     if (posIdx === undefined) return null;
 
     // Read position accessor
-    const positions = GltfLoader._readFloatAccessor(json, buffers, posIdx, 3);
+    let positions = GltfLoader._readFloatAccessor(json, buffers, posIdx, 3);
     const vertexCount = positions.length / 3;
-
-    // Read normal accessor (optional – generate flat normals if absent)
-    const normIdx = prim.attributes.NORMAL;
-    const normals = normIdx !== undefined
-      ? GltfLoader._readFloatAccessor(json, buffers, normIdx, 3)
-      : GltfLoader._generateFlatNormals(positions);
 
     // Read UV0 accessor (optional – default [0,0])
     const uvIdx = prim.attributes.TEXCOORD_0;
-    const uvs = uvIdx !== undefined
+    let uvs = uvIdx !== undefined
       ? GltfLoader._readFloatAccessor(json, buffers, uvIdx, 2)
       : new Float32Array(vertexCount * 2);
 
+    // Read indices (resolved first – flat normal generation needs the triangle list)
+    let indices: Uint32Array;
+    if (prim.indices !== undefined) {
+      const raw = GltfLoader._readIndexAccessor(json, buffers, prim.indices);
+      indices = raw instanceof Uint32Array ? raw : new Uint32Array(raw);
+    } else {
+      // Non-indexed: sequential
+      indices = new Uint32Array(vertexCount);
+      for (let i = 0; i < vertexCount; i++) indices[i] = i;
+    }
+
+    // Read normal accessor (optional – generate flat normals if absent)
+    const normIdx = prim.attributes.NORMAL;
+    let normals: Float32Array;
+    if (normIdx !== undefined) {
+      normals = GltfLoader._readFloatAccessor(json, buffers, normIdx, 3);
+    } else if (prim.indices !== undefined) {
+      // Indexed triangles are defined by index triples: un-weld the vertices
+      // and assign each triangle its own flat face normal.
+      ({ positions, normals, uvs, indices } = GltfLoader._generateFlatNormalsIndexed(positions, uvs, indices));
+    } else {
+      // Non-indexed: consecutive vertex triples form triangles.
+      normals = GltfLoader._generateFlatNormals(positions);
+    }
+
     // Build interleaved buffer: [pos(3), norm(3), uv(2)] × vertexCount
-    const vertices = new Float32Array(vertexCount * 8);
-    for (let i = 0; i < vertexCount; i++) {
+    const outVertexCount = positions.length / 3;
+    const vertices = new Float32Array(outVertexCount * 8);
+    for (let i = 0; i < outVertexCount; i++) {
       const vi = i * 8;
       vertices[vi + 0] = positions[i * 3 + 0];
       vertices[vi + 1] = positions[i * 3 + 1];
@@ -433,17 +459,6 @@ export class GltfLoader {
       vertices[vi + 5] = normals[i * 3 + 2];
       vertices[vi + 6] = uvs[i * 2 + 0];
       vertices[vi + 7] = uvs[i * 2 + 1];
-    }
-
-    // Indices
-    let indices: Uint32Array;
-    if (prim.indices !== undefined) {
-      const raw = GltfLoader._readIndexAccessor(json, buffers, prim.indices);
-      indices = raw instanceof Uint32Array ? raw : new Uint32Array(raw);
-    } else {
-      // Non-indexed: sequential
-      indices = new Uint32Array(vertexCount);
-      for (let i = 0; i < vertexCount; i++) indices[i] = i;
     }
 
     // Material
@@ -464,7 +479,10 @@ export class GltfLoader {
     accessorIndex: number,
     componentCount: number
   ): Float32Array {
-    const accessor   = json.accessors![accessorIndex];
+    const accessor = json.accessors?.[accessorIndex];
+    if (!accessor) {
+      throw new Error(`GltfLoader: accessor ${accessorIndex} does not exist in glTF (glTF declares ${json.accessors?.length ?? 0} accessors)`);
+    }
     const typeCount  = ACCESSOR_TYPE_COUNT[accessor.type] ?? componentCount;
     const compSize   = COMPONENT_TYPE_SIZE[accessor.componentType] ?? 4;
     const count      = accessor.count;
@@ -474,17 +492,27 @@ export class GltfLoader {
       return new Float32Array(count * typeCount);
     }
 
-    const bv       = json.bufferViews![accessor.bufferView];
-    const buffer   = buffers[bv.buffer];
+    const bv = json.bufferViews?.[accessor.bufferView];
+    if (!bv) {
+      throw new Error(`GltfLoader: accessor ${accessorIndex} references missing bufferView ${accessor.bufferView}`);
+    }
+    const buffer = buffers[bv.buffer];
+    if (!buffer) {
+      throw new Error(`GltfLoader: accessor ${accessorIndex} bufferView ${accessor.bufferView} references missing buffer ${bv.buffer}`);
+    }
     const byteOffset = (bv.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
     const stride   = bv.byteStride ?? (typeCount * compSize);
     const isPacked = stride === typeCount * compSize;
 
     if (accessor.componentType === 5126 /* FLOAT */ && isPacked) {
       // Fast path: already Float32, no stride gaps
+      const byteLength = count * typeCount * 4;
+      if (byteOffset < 0 || byteOffset + byteLength > buffer.byteLength) {
+        throw new Error(`GltfLoader: accessor ${accessorIndex} read out of bounds (byteOffset ${byteOffset} + ${byteLength} bytes exceeds buffer size ${buffer.byteLength})`);
+      }
       return new Float32Array(buffer.slice(
         byteOffset,
-        byteOffset + count * typeCount * 4
+        byteOffset + byteLength
       ));
     }
 
@@ -514,7 +542,10 @@ export class GltfLoader {
     buffers: ArrayBuffer[],
     accessorIndex: number
   ): Uint16Array | Uint32Array {
-    const accessor   = json.accessors![accessorIndex];
+    const accessor = json.accessors?.[accessorIndex];
+    if (!accessor) {
+      throw new Error(`GltfLoader: accessor ${accessorIndex} does not exist in glTF (glTF declares ${json.accessors?.length ?? 0} accessors)`);
+    }
     const count      = accessor.count;
     const compType   = accessor.componentType;
 
@@ -522,8 +553,14 @@ export class GltfLoader {
       return new Uint32Array(count);
     }
 
-    const bv       = json.bufferViews![accessor.bufferView];
-    const buffer   = buffers[bv.buffer];
+    const bv = json.bufferViews?.[accessor.bufferView];
+    if (!bv) {
+      throw new Error(`GltfLoader: accessor ${accessorIndex} references missing bufferView ${accessor.bufferView}`);
+    }
+    const buffer = buffers[bv.buffer];
+    if (!buffer) {
+      throw new Error(`GltfLoader: accessor ${accessorIndex} bufferView ${accessor.bufferView} references missing buffer ${bv.buffer}`);
+    }
     const byteOff  = (bv.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
 
     if (compType === 5123 /* UNSIGNED_SHORT */) {
@@ -649,6 +686,71 @@ export class GltfLoader {
       }
     }
     return normals;
+  }
+
+  /**
+   * Generate flat per-face normals for an indexed primitive (no NORMAL attribute).
+   *
+   * Triangles are defined by index triples (not consecutive vertex triples),
+   * so shared vertices are un-welded (expanded) and each triangle carries its
+   * own face normal – matching the flat-shading semantics of the non-indexed
+   * path.
+   *
+   * @returns Expanded positions/normals/uvs plus sequential indices.
+   */
+  private static _generateFlatNormalsIndexed(
+    positions: Float32Array,
+    uvs: Float32Array,
+    indices: Uint32Array
+  ): { positions: Float32Array; normals: Float32Array; uvs: Float32Array; indices: Uint32Array } {
+    const vertexCount = positions.length / 3;
+    const triCount = (indices.length / 3) | 0;
+    const outPositions = new Float32Array(triCount * 9);
+    const outNormals   = new Float32Array(triCount * 9);
+    const outUvs       = new Float32Array(triCount * 6);
+    const outIndices   = new Uint32Array(triCount * 3);
+
+    for (let t = 0; t < triCount; t++) {
+      const cornerIndices = [indices[t * 3 + 0], indices[t * 3 + 1], indices[t * 3 + 2]];
+      const ia = cornerIndices[0];
+      const ib = cornerIndices[1];
+      const ic = cornerIndices[2];
+
+      if (ia >= vertexCount || ib >= vertexCount || ic >= vertexCount) {
+        throw new Error(`GltfLoader: primitive index ${Math.max(ia, ib, ic)} out of range (vertex count ${vertexCount})`);
+      }
+
+      const ax = positions[ia * 3 + 0], ay = positions[ia * 3 + 1], az = positions[ia * 3 + 2];
+      const bx = positions[ib * 3 + 0], by = positions[ib * 3 + 1], bz = positions[ib * 3 + 2];
+      const cx = positions[ic * 3 + 0], cy = positions[ic * 3 + 1], cz = positions[ic * 3 + 2];
+
+      // Edge vectors
+      const ex = bx - ax, ey = by - ay, ez = bz - az;
+      const fx = cx - ax, fy = cy - ay, fz = cz - az;
+
+      // Cross product
+      let nx = ey * fz - ez * fy;
+      let ny = ez * fx - ex * fz;
+      let nz = ex * fy - ey * fx;
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len > 0) { nx /= len; ny /= len; nz /= len; }
+
+      for (let v = 0; v < 3; v++) {
+        const src = cornerIndices[v];
+        const di  = t * 9 + v * 3;
+        outPositions[di + 0] = positions[src * 3 + 0];
+        outPositions[di + 1] = positions[src * 3 + 1];
+        outPositions[di + 2] = positions[src * 3 + 2];
+        outNormals[di + 0] = nx;
+        outNormals[di + 1] = ny;
+        outNormals[di + 2] = nz;
+        outUvs[t * 6 + v * 2 + 0] = uvs[src * 2 + 0];
+        outUvs[t * 6 + v * 2 + 1] = uvs[src * 2 + 1];
+        outIndices[t * 3 + v] = t * 3 + v;
+      }
+    }
+
+    return { positions: outPositions, normals: outNormals, uvs: outUvs, indices: outIndices };
   }
 
   // ── Matrix helpers ───────────────────────────────────────────────────────────

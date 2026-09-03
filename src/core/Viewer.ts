@@ -92,8 +92,9 @@ export class Viewer {
   private _lastMiddleMouseY = 0;
   private _middlePivot: Cartesian3 | null = null;
 
-  private _initialized = false;
   private _destroyed = false;
+  private _initPromise: Promise<void> | null = null;
+  private _resizeObserver: ResizeObserver | null = null;
 
   constructor(containerOrId: string | HTMLElement, _options: ViewerOptions = {}) {
     if (typeof containerOrId === 'string') {
@@ -134,19 +135,22 @@ export class Viewer {
    * Must be awaited before the viewer is usable.
    */
   async initialize(): Promise<void> {
-    if (this._initialized) return;
+    if (this._initPromise) return this._initPromise;
 
-    await this._context.initialize();
-    this._resizeCanvas();
-    await this._scene.initialize();
-    this._initialized = true;
+    this._initPromise = (async () => {
+      await this._context.initialize();
+      this._resizeCanvas();
+      await this._scene.initialize();
 
-    // Default camera position: 3× Earth radius above equator
-    this._scene.camera.position.set(0, 0, 3.0);
-    this._scene.camera.setAspectRatio(this._canvas.width / this._canvas.height);
+      // Default camera position: 3× Earth radius above equator
+      this._scene.camera.position.set(0, 0, 3.0);
+      this._scene.camera.setAspectRatio(this._canvas.width / this._canvas.height);
 
-    this._setupInputHandlers();
-    this._startRenderLoop();
+      this._setupInputHandlers();
+      this._startRenderLoop();
+    })();
+
+    return this._initPromise;
   }
 
   /**
@@ -156,6 +160,8 @@ export class Viewer {
     if (this._destroyed) return;
     this._destroyed = true;
     if (this._animFrameId !== null) cancelAnimationFrame(this._animFrameId);
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
     this._handler?.destroy();
     this._handler = null;
     this._scene.destroy();
@@ -206,8 +212,8 @@ export class Viewer {
 
   private _setupInputHandlers(): void {
     // Resize observer
-    const ro = new ResizeObserver(() => this._resizeCanvas());
-    ro.observe(this._container);
+    this._resizeObserver = new ResizeObserver(() => this._resizeCanvas());
+    this._resizeObserver.observe(this._container);
 
     // All raw DOM input goes through the event abstraction layer (T1.2).
     const handler = new ScreenSpaceEventHandler(this._canvas);
@@ -312,11 +318,9 @@ export class Viewer {
     // ── GPU pick on left click (only when a consumer registered onPick) ─────
     handler.setInputAction((pos: ScreenSpacePosition) => {
       if (!this.onPick) return;
-      // Handler reports CSS pixels; picking uses canvas device pixels.
-      const sx = this._canvas.width  / Math.max(1, this._canvas.clientWidth);
-      const sy = this._canvas.height / Math.max(1, this._canvas.clientHeight);
+      // Handler reports CSS pixels; scene.pick converts them to texels.
       this._scene
-        .pick(pos.x * sx, pos.y * sy)
+        .pick(pos.x, pos.y)
         .then((result) => this.onPick?.(result, pos))
         .catch((err: unknown) => console.error('[Viewer] GPU pick failed:', err));
     }, 'LEFT_CLICK');

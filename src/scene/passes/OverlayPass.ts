@@ -189,7 +189,9 @@ export class OverlayPass implements IPass {
 
     this._cameraUBO = device.createBuffer({
       label: 'Overlay.CameraUBO',
-      size:  80, // viewProj(64) + viewport(8) + depthBias(4) + pad(4)
+      // Must match OverlayCamera in OverlayShader (minBindingSize):
+      // viewProj @0 (64 B) + viewport @64 (8 B) + params @80 (16 B, x = depthBias).
+      size:  96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -238,11 +240,13 @@ export class OverlayPass implements IPass {
     this._width  = this._context.drawingBufferWidth  || 1;
     this._height = this._context.drawingBufferHeight || 1;
 
-    const uniform = new Float32Array(20); // 80 bytes
+    // Mirrors OverlayCamera: viewProj(16f) @byte0, viewport(2f) @byte64,
+    // params(4f) @byte80 — index = byteOffset / 4.
+    const uniform = new Float32Array(24); // 96 bytes
     uniform.set(camera.viewProjectionMatrix.values, 0);
     uniform[16] = this._width;
     uniform[17] = this._height;
-    uniform[18] = DEPTH_BIAS;
+    uniform[20] = DEPTH_BIAS; // params.x (byte 80)
     this._context.writeBuffer(this._cameraUBO, 0, uniform);
 
     this._quadCount = 0;

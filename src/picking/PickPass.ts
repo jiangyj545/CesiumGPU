@@ -70,9 +70,11 @@ const READBACK_BYTES_PER_ROW = 256;
  *  - the last result is cached and served from cache until the camera or
  *    the scene content changes.
  *
- * Coordinates: `pick(x, y)` takes canvas device-pixel coordinates with a
- * top-left origin — the same convention as DOM `clientX/clientY` scaled to
- * the canvas AND WebGPU texture texels, so no y-flip is required.
+ * Coordinates: `pick(x, y)` takes canvas CSS-pixel coordinates with a
+ * top-left origin — exactly the space reported by
+ * `ScreenSpaceEventHandler` (`clientX/clientY` minus the canvas rect).
+ * The CSS→texel conversion (`pickTextureWidth / canvas.clientWidth`) is
+ * applied once here, so callers never scale by devicePixelRatio themselves.
  */
 export class PickPass {
   private _scene: Scene;
@@ -164,7 +166,9 @@ export class PickPass {
   // ── Picking ──────────────────────────────────────────────────────────────────
 
   /**
-   * Request a pick at canvas device-pixel coordinates (top-left origin).
+   * Request a pick at canvas CSS-pixel coordinates (top-left origin — the
+   * same space as `ScreenSpaceEventHandler` positions). Converted to
+   * pick-texture texels internally via the texture/CSS-size ratio.
    *
    * - While a pick is in flight, further calls return the SAME pending
    *   promise (max one readback per frame).
@@ -177,10 +181,17 @@ export class PickPass {
   pick(x: number, y: number): Promise<PickResult | null> {
     if (!this._scene.opaquePipeline) return Promise.resolve(null);
 
-    const w = Math.max(1, this._scene.context.drawingBufferWidth);
-    const h = Math.max(1, this._scene.context.drawingBufferHeight);
-    const cx = Math.min(Math.max(0, Math.round(x)), w - 1);
-    const cy = Math.min(Math.max(0, Math.round(y)), h - 1);
+    // Convert CSS pixels → pick-texture texels with the ratio between the
+    // pick target size and the canvas CSS size (the effective DPR, correct
+    // even when the drawing buffer was clamped). Ratio is 1 at DPR 1, so
+    // the legacy path is unchanged.
+    const canvas = this._scene.context.canvas;
+    const w = this._targetWidth  || Math.max(1, this._scene.context.drawingBufferWidth);
+    const h = this._targetHeight || Math.max(1, this._scene.context.drawingBufferHeight);
+    const sx = w / Math.max(1, canvas.clientWidth);
+    const sy = h / Math.max(1, canvas.clientHeight);
+    const cx = Math.min(Math.max(0, Math.round(x * sx)), w - 1);
+    const cy = Math.min(Math.max(0, Math.round(y * sy)), h - 1);
 
     const camFp   = this._cameraFingerprint();
     const sceneFp = this._sceneFingerprint();
@@ -537,6 +548,17 @@ export class PickPass {
         },
       });
       pass.setPipeline(this._pipeline);
+      // Rasterize only the texel that is read back below. The 1×1 viewport
+      // keeps the NDC→framebuffer mapping of the full-size pass consistent
+      // at that texel (NDC origin lands exactly on texel (job.x, job.y)'s
+      // centre = the copyTextureToBuffer origin), and the scissor rect —
+      // always active in WebGPU, no pipeline state needed — skips fragment
+      // work for every other pixel of the canvas-sized target. job.x/y are
+      // already clamped integers within [0, size-1], so the 1×1 scissor is
+      // always inside the render target. This pass is encoded independently
+      // from the main render, so per-pass state cannot leak into it.
+      pass.setViewport(job.x, job.y, 1, 1, 0, 1);
+      pass.setScissorRect(job.x, job.y, 1, 1);
       this._drawPickSet(pass, this._cameraBindGroup);
       pass.end();
 

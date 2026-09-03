@@ -411,7 +411,7 @@ export class Camera {
     const camUp = Camera._rotateByAxis(up, rightH, pitch, new Cartesian3());
 
     // Roll around the final look direction.
-    let right = new Cartesian3();
+    const right = new Cartesian3();
     Cartesian3.cross(dir, camUp, right);
     Cartesian3.normalize(right, right);
     const finalUp = new Cartesian3();

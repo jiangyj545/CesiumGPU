@@ -83,7 +83,9 @@ export class Primitive {
       size:  options.vertices.byteLength,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
-    context.writeBuffer(this._vertexBuffer, 0, options.vertices.buffer as ArrayBuffer);
+    // Copy through the view (not .buffer) so subarray() views upload exactly
+    // their own range instead of the whole underlying ArrayBuffer.
+    context.writeBuffer(this._vertexBuffer, 0, new Float32Array(options.vertices));
 
     // Index buffer
     this._indexBuffer = device.createBuffer({
@@ -91,7 +93,7 @@ export class Primitive {
       size:  options.indices.byteLength,
       usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     });
-    context.writeBuffer(this._indexBuffer, 0, options.indices.buffer as ArrayBuffer);
+    context.writeBuffer(this._indexBuffer, 0, new Uint32Array(options.indices));
     this._indexCount = options.indices.length;
 
     // Model uniform buffer: modelMatrix (64 bytes) + normalMatrix (64 bytes) = 128 bytes

@@ -110,7 +110,7 @@ export class Globe {
     if (!this._primitive) return;
     const device = this._context.device;
 
-    const bitmap = createImageBitmap(image).then(bitmap => {
+    createImageBitmap(image).then(bitmap => {
       const texture = device.createTexture({
         label:  'Globe.Imagery',
         size:   { width: bitmap.width, height: bitmap.height },
@@ -143,9 +143,7 @@ export class Globe {
       this._imageryTexture = texture;
       this._primitive?.setTexture(texture, sampler);
       bitmap.close();
-    });
-
-    void bitmap;
+    }).catch(err => console.error('Globe: failed to create texture bitmap:', err));
   }
 
   /**

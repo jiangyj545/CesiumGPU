@@ -14,11 +14,16 @@
  *   loc 3 - depth    : f32        projected clip z/w of the anchor position
  */
 export const OVERLAY_SHADER = /* wgsl */ `
+// Layout (uniform address space — every member offset must be a multiple of 16,
+// so scalars are packed into vec4 fields rather than trailing loose f32s):
+//   viewProj @0  (64 B)  unused on CPU-projected quads, kept for layout parity
+//   viewport @64 (8 B)   canvas size in pixels
+//   params   @80 (16 B)  x = depthBias (occlusion bias, normalised depth)
+//   struct size 96 B — must match OverlayPass._cameraUBO size.
 struct OverlayCamera {
-  viewProj  : mat4x4<f32>,   // offset 0   (unused on CPU-projected quads, kept for layout parity with other passes)
-  viewport  : vec2<f32>,     // offset 64  canvas size in pixels
-  depthBias : f32,           // offset 72  occlusion bias (normalised depth)
-  pad       : f32,           // offset 76
+  viewProj  : mat4x4<f32>,   // offset 0
+  viewport  : vec2<f32>,     // offset 64
+  params    : vec4<f32>,     // offset 80 (x = depthBias)
 };
 
 @group(0) @binding(0) var<uniform> camera : OverlayCamera;
@@ -61,7 +66,7 @@ fn vs_main(
 fn isOccluded(fragCoord : vec4<f32>, anchorDepth : f32) -> bool {
   let coords = vec2<i32>(fragCoord.xy);
   let sceneDepth = textureLoad(gbufDepth, coords, 0).r;
-  return sceneDepth < anchorDepth - camera.depthBias;
+  return sceneDepth < anchorDepth - camera.params.x;
 }
 
 @fragment

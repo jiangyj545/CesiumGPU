@@ -294,12 +294,9 @@ export class DrawHandler {
    * a camera-ray / ellipsoid intersection when nothing is hit.
    */
   private async _pickSurface(pos: ScreenSpacePosition): Promise<Cartesian3 | null> {
-    const canvas = this._viewer.canvas;
-    // Handler reports CSS pixels; scene.pick expects canvas device pixels.
-    const sx = canvas.width / Math.max(1, canvas.clientWidth);
-    const sy = canvas.height / Math.max(1, canvas.clientHeight);
+    // Handler reports CSS pixels; scene.pick converts them to texels.
     try {
-      const result = await this._viewer.scene.pick(pos.x * sx, pos.y * sy);
+      const result = await this._viewer.scene.pick(pos.x, pos.y);
       if (result !== null && result.worldPosition !== null) {
         return result.worldPosition.clone();
       }

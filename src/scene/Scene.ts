@@ -77,6 +77,7 @@ export class Scene {
   private _entityVisualizer: EntityVisualizer | null = null;
 
   private _prepared = false;
+  private _initPromise: Promise<void> | null = null;
   private _width  = 1;
   private _height = 1;
 
@@ -102,80 +103,84 @@ export class Scene {
    * context.initialize() so that context.device is available.
    */
   async initialize(): Promise<void> {
-    if (this._prepared) return;
+    if (this._initPromise) return this._initPromise;
 
-    // Read canvas size now — context.initialize() + _resizeCanvas() have already run.
-    this._width  = this._context.drawingBufferWidth  || 1;
-    this._height = this._context.drawingBufferHeight || 1;
+    this._initPromise = (async () => {
+      // Read canvas size now — context.initialize() + _resizeCanvas() have already run.
+      this._width  = this._context.drawingBufferWidth  || 1;
+      this._height = this._context.drawingBufferHeight || 1;
 
-    // G-Buffer pass (creates GPU textures lazily on first use)
-    this._gbufferPass = new GBufferPass(this._context, this._width, this._height);
+      // G-Buffer pass (creates GPU textures lazily on first use)
+      this._gbufferPass = new GBufferPass(this._context, this._width, this._height);
 
-    // Lighting pass (creates GPU buffers in constructor — device is now available)
-    this._lightingPass = new LightingPass(
-      this._context,
-      this._gbufferPass,
-      this._context.preferredFormat
-    );
+      // Lighting pass (creates GPU buffers in constructor — device is now available)
+      this._lightingPass = new LightingPass(
+        this._context,
+        this._gbufferPass,
+        this._context.preferredFormat
+      );
 
-    // Transparent pass
-    this._transparentPass = new TransparentPass(
-      this._context,
-      this._width,
-      this._height,
-      this._context.preferredFormat
-    );
+      // Transparent pass
+      this._transparentPass = new TransparentPass(
+        this._context,
+        this._width,
+        this._height,
+        this._context.preferredFormat
+      );
 
-    // Shared camera UBO for the G-Buffer pass
-    this._cameraUniformBuffer = this._context.device.createBuffer({
-      label: 'Scene.CameraUBO',
-      size:  256,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+      // Shared camera UBO for the G-Buffer pass
+      this._cameraUniformBuffer = this._context.device.createBuffer({
+        label: 'Scene.CameraUBO',
+        size:  256,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
 
-    // Build globe geometry
-    const globePrimitive = this.globe.initialize();
+      // Build globe geometry
+      const globePrimitive = this.globe.initialize();
 
-    // Build opaque render pipeline (shared)
-    this._opaquePipeline = buildOpaquePipeline(this._context, 'depth32float');
+      // Build opaque render pipeline (shared)
+      this._opaquePipeline = buildOpaquePipeline(this._context, 'depth32float');
 
-    // Unlit G-Buffer pipeline variant (emissive effect primitives).
-    // Shares bind group layouts with the opaque pipeline so per-primitive
-    // bind groups stay valid when switching pipelines mid-pass.
-    this._unlitPipeline = buildUnlitPipeline(this._context, 'depth32float', this._opaquePipeline);
+      // Unlit G-Buffer pipeline variant (emissive effect primitives).
+      // Shares bind group layouts with the opaque pipeline so per-primitive
+      // bind groups stay valid when switching pipelines mid-pass.
+      this._unlitPipeline = buildUnlitPipeline(this._context, 'depth32float', this._opaquePipeline);
 
-    // Build per-primitive bind groups
-    globePrimitive.buildOpaqueBindGroup(this._opaquePipeline);
+      // Build per-primitive bind groups
+      globePrimitive.buildOpaqueBindGroup(this._opaquePipeline);
 
-    // Give the globe the shared pipeline so imagery-tile primitives can
-    // build their per-tile bind groups (see Globe.update / Globe.drawTiles).
-    this.globe.setOpaquePipeline(this._opaquePipeline);
+      // Give the globe the shared pipeline so imagery-tile primitives can
+      // build their per-tile bind groups (see Globe.update / Globe.drawTiles).
+      this.globe.setOpaquePipeline(this._opaquePipeline);
 
-    // Camera bind group for G-Buffer pass
-    this._cameraBindGroup = this._context.device.createBindGroup({
-      label:  'Scene.CameraBG',
-      layout: this._opaquePipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this._cameraUniformBuffer } }],
-    });
+      // Camera bind group for G-Buffer pass
+      this._cameraBindGroup = this._context.device.createBindGroup({
+        label:  'Scene.CameraBG',
+        layout: this._opaquePipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: this._cameraUniformBuffer } }],
+      });
 
-    // Lighting pass
-    this._lightingPass.prepare();
+      // Lighting pass
+      this._lightingPass.prepare();
 
-    // Transparent pass
-    this._transparentPass.prepare();
+      // Transparent pass
+      this._transparentPass.prepare();
 
-    // Entity layer: screen-space billboards + polygon/polyline bridging.
-    // Created last so host pipelines are ready for any pre-added entities.
-    this._overlayPass = new OverlayPass(
-      this._context,
-      this.entities,
-      this._gbufferPass,
-      this._context.preferredFormat
-    );
-    this._overlayPass.prepare();
-    this._entityVisualizer = new EntityVisualizer(this._context, this.entities, this);
+      // Entity layer: screen-space billboards + polygon/polyline bridging.
+      // Created last so host pipelines are ready for any pre-added entities.
+      this._overlayPass = new OverlayPass(
+        this._context,
+        this.entities,
+        this._gbufferPass,
+        this._context.preferredFormat
+      );
+      this._overlayPass.prepare();
+      this._entityVisualizer = new EntityVisualizer(this._context, this.entities, this);
 
-    this._prepared = true;
+      this._prepared = true;
+    })();
+
+    return this._initPromise;
   }
 
   /**
@@ -224,9 +229,11 @@ export class Scene {
   }
 
   /**
-   * GPU-pick the object under canvas device-pixel coordinates (top-left
-   * origin).  At most one readback per rendered frame; results are cached
-   * until the camera or the scene content changes.
+   * GPU-pick the object under canvas CSS-pixel coordinates (top-left
+   * origin — the same space as `ScreenSpaceEventHandler` positions;
+   * converted to pick-texture texels internally).  At most one readback
+   * per rendered frame; results are cached until the camera or the scene
+   * content changes.
    *
    * @returns null when the scene is not initialised yet, otherwise a
    * `PickResult` (`id === 0` means background / no hit).
