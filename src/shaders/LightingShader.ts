@@ -104,6 +104,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   }
 
   let albedo   = albedo4.rgb;
+
+  // Unlit passthrough (T3.1): the unlit G-Buffer fragment entry writes a
+  // zero-length normal as a marker.  Bypass lighting, haze, tone mapping and
+  // gamma entirely so effect geometry keeps its raw emissive colour.
+  if (dot(normal4.xyz, normal4.xyz) < 0.5) {
+    return vec4<f32>(albedo, 1.0);
+  }
+
   let normal   = normalize(normal4.xyz);
   let worldPos = worldPos4.xyz;
   let viewDir  = normalize(camera.cameraPosition.xyz - worldPos);

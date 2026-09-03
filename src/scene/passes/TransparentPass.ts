@@ -12,6 +12,9 @@ import {
  *  1. Accumulation: transparent objects write weighted colour+alpha into two
  *     render targets (accum + reveal).
  *  2. Composite: the accum/reveal textures are blended over the opaque scene.
+ *
+ * @future IPass — 双子 pass（accumulation + composite）拆分执行且与 Scene.render()
+ * 的条件分支耦合，暂不实现 IPass；待渲染编排重构后渐进迁移。
  */
 export class TransparentPass {
   private _context: Context;

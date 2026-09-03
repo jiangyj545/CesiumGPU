@@ -33,6 +33,14 @@ export namespace CesiumMath {
     return (1.0 - time) * p + time * q;
   }
 
+  /**
+   * Smooth Hermite interpolation between 0 and 1 as x crosses [edge0, edge1].
+   */
+  export function smoothstep(edge0: number, edge1: number, x: number): number {
+    const t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+  }
+
   export function negativePiToPi(angle: number): number {
     return zeroToTwoPi(angle + PI) - PI;
   }

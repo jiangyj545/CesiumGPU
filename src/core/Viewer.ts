@@ -4,6 +4,9 @@ import { Cartesian3 } from '../math/Cartesian3';
 import { Camera } from '../scene/Camera';
 import { Globe } from '../scene/Globe';
 import { Color } from '../math/Color';
+import { ScreenSpaceEventHandler } from './ScreenSpaceEventHandler';
+import type { PinchPosition, WheelPosition, ScreenSpacePosition } from './ScreenSpaceEventHandler';
+import type { PickResult } from '../picking/PickPass';
 
 export interface ViewerOptions {
   /** GPU power preference. Default: 'high-performance' */
@@ -31,6 +34,7 @@ export class Viewer {
   private _canvas: HTMLCanvasElement;
   private _context: Context;
   private _scene: Scene;
+  private _handler: ScreenSpaceEventHandler | null = null;
 
   /**
    * Optional callback invoked at the beginning of every render frame, before
@@ -46,11 +50,31 @@ export class Viewer {
    */
   preRender: (() => void) | null = null;
 
+  /**
+   * Optional GPU-pick callback invoked for every LEFT_CLICK once registered.
+   * Receives the pick result (`null` = scene not ready) and the click
+   * position in canvas CSS pixels.  Without a registered callback no picking
+   * happens on click.
+   *
+   * ```typescript
+   * viewer.onPick = (result) => console.log(result?.id, result?.worldPosition);
+   * ```
+   */
+  onPick: ((result: PickResult | null, position: ScreenSpacePosition) => void) | null = null;
+
+  /**
+   * When true (drawing tools active, e.g. DrawHandler), camera drag handlers
+   * are suppressed so pointer input drives drawing instead of orbiting.
+   * Wheel / pinch zoom stay active.
+   */
+  drawMode = false;
+
   private _animFrameId: number | null = null;
   private _fps = 0;
   private _frameCount = 0;
   private _fpsInterval = 0;
   private _fpsEl: HTMLElement | null = null;
+  private _lastFrameTime: number | null = null;
 
   // Mouse orbit state (left button)
   private _isDragging = false;
@@ -98,6 +122,10 @@ export class Viewer {
   get camera(): Camera { return this._scene.camera; }
   get globe(): Globe   { return this._scene.globe; }
   get canvas(): HTMLCanvasElement { return this._canvas; }
+  /** WebGPU device context. Valid after {@link initialize}. */
+  get context(): Context { return this._context; }
+  /** The canvas input abstraction (T1.2). Null before {@link initialize}. */
+  get screenSpaceEventHandler(): ScreenSpaceEventHandler | null { return this._handler; }
 
   // ── Initialization ────────────────────────────────────────────────────────
 
@@ -128,6 +156,8 @@ export class Viewer {
     if (this._destroyed) return;
     this._destroyed = true;
     if (this._animFrameId !== null) cancelAnimationFrame(this._animFrameId);
+    this._handler?.destroy();
+    this._handler = null;
     this._scene.destroy();
     this._context.destroy();
     this._canvas.remove();
@@ -154,6 +184,11 @@ export class Viewer {
       // Pre-render hook (clock tick, sun direction update, etc.)
       this.preRender?.();
 
+      // Camera flight (T2.6): advance the active flyTo by the frame delta time
+      const dt = this._lastFrameTime === null ? 0 : Math.min((now - this._lastFrameTime) / 1000, 0.1);
+      this._lastFrameTime = now;
+      this._scene.camera.updateFlight(dt);
+
       this._scene.render();
 
       // FPS counter
@@ -170,126 +205,121 @@ export class Viewer {
   }
 
   private _setupInputHandlers(): void {
-    const canvas = this._canvas;
-
     // Resize observer
     const ro = new ResizeObserver(() => this._resizeCanvas());
     ro.observe(this._container);
 
-    // ── Left-button drag → orbit (Cesium-compatible) ───────────────────────
-    canvas.addEventListener('mousedown', (e) => {
-      if (e.button === 0) {
-        this._isDragging    = true;
-        this._lastMouseX    = e.clientX;
-        this._lastMouseY    = e.clientY;
-      } else if (e.button === 1) {
-        // Middle button — pitch / heading orbit around the hit point on the globe
-        e.preventDefault();
-        const rect = canvas.getBoundingClientRect();
-        const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        const ndcY = 1 - ((e.clientY - rect.top) / rect.height) * 2;
-        // Pick the globe at the click position; fall back to screen centre
-        this._middlePivot =
-          this._scene.camera.pickGlobe(ndcX, ndcY) ??
-          this._scene.camera.pickGlobe(0, 0);
-        if (this._middlePivot) {
-          this._isMiddleDragging = true;
-          this._lastMiddleMouseX = e.clientX;
-          this._lastMiddleMouseY = e.clientY;
-        }
-      } else if (e.button === 2) {
-        this._isRightDragging = true;
-        this._lastRightMouseY = e.clientY;
-      }
-    });
+    // All raw DOM input goes through the event abstraction layer (T1.2).
+    const handler = new ScreenSpaceEventHandler(this._canvas);
+    this._handler = handler;
+    const camera = this._scene.camera;
 
-    window.addEventListener('mousemove', (e) => {
+    // ── Left button / one-finger drag → orbit (Cesium-compatible) ──────────
+    handler.setInputAction((pos) => {
+      if (this.drawMode) return; // drawing tools own pointer input (T2.5)
+      camera.cancelFlight(); // user input interrupts flyTo (T2.6)
+      this._isDragging = true;
+      this._lastMouseX = pos.x;
+      this._lastMouseY = pos.y;
+    }, 'LEFT_DOWN');
+
+    handler.setInputAction(() => {
+      this._isDragging = false;
+    }, 'LEFT_UP');
+
+    // ── Mouse move: orbit / middle pivot tilt / right-drag zoom ────────────
+    handler.setInputAction((pos) => {
       // Orbit sensitivity scales with camera distance (Cesium behaviour)
-      const r = Cartesian3.magnitude(this._scene.camera.position);
+      const r = Cartesian3.magnitude(camera.position);
 
       if (this._isDragging) {
-        const dx = e.clientX - this._lastMouseX;
-        const dy = e.clientY - this._lastMouseY;
-        this._lastMouseX = e.clientX;
-        this._lastMouseY = e.clientY;
+        const dx = pos.x - this._lastMouseX;
+        const dy = pos.y - this._lastMouseY;
+        this._lastMouseX = pos.x;
+        this._lastMouseY = pos.y;
 
         const sensitivity = r * 0.0003;
         // dy sign matches Cesium: drag DOWN → camera orbits northward (positive deltaLat)
-        this._scene.camera.rotate(-dx * sensitivity, dy * sensitivity);
+        camera.rotate(-dx * sensitivity, dy * sensitivity);
       }
 
       if (this._isMiddleDragging && this._middlePivot) {
-        const dx = e.clientX - this._lastMiddleMouseX;
-        const dy = e.clientY - this._lastMiddleMouseY;
-        this._lastMiddleMouseX = e.clientX;
-        this._lastMiddleMouseY = e.clientY;
+        const dx = pos.x - this._lastMiddleMouseX;
+        const dy = pos.y - this._lastMiddleMouseY;
+        this._lastMiddleMouseX = pos.x;
+        this._lastMiddleMouseY = pos.y;
         // dx > 0 (right) → negative heading  (Cesium-compatible)
         // dy > 0 (down)  → positive pitch delta (tilt away from horizon)
-        this._scene.camera.orbitAroundPivot(this._middlePivot, -dx * 0.005, -dy * 0.005);
+        camera.orbitAroundPivot(this._middlePivot, -dx * 0.005, -dy * 0.005);
       }
 
       if (this._isRightDragging) {
-        const dy = e.clientY - this._lastRightMouseY;
-        this._lastRightMouseY = e.clientY;
+        const dy = pos.y - this._lastRightMouseY;
+        this._lastRightMouseY = pos.y;
         // Right-drag down → zoom in (matches Cesium: drag toward globe = move closer)
-        this._scene.camera.zoom(-dy * r * 0.002);
+        camera.zoom(-dy * r * 0.002);
       }
-    });
+    }, 'MOUSE_MOVE');
 
-    window.addEventListener('mouseup', (e) => {
-      if (e.button === 0) this._isDragging = false;
-      if (e.button === 1) { this._isMiddleDragging = false; this._middlePivot = null; }
-      if (e.button === 2) this._isRightDragging = false;
-    });
+    // ── Middle button: pitch/heading orbit around the hit point on the globe
+    handler.setInputAction((pos) => {
+      if (this.drawMode) return; // drawing tools own pointer input (T2.5)
+      const ndcX = (pos.x / this._canvas.clientWidth) * 2 - 1;
+      const ndcY = 1 - (pos.y / this._canvas.clientHeight) * 2;
+      // Pick the globe at the click position; fall back to screen centre
+      this._middlePivot = camera.pickGlobe(ndcX, ndcY) ?? camera.pickGlobe(0, 0);
+      if (this._middlePivot) {
+        camera.cancelFlight(); // user input interrupts flyTo (T2.6)
+        this._isMiddleDragging = true;
+        this._lastMiddleMouseX = pos.x;
+        this._lastMiddleMouseY = pos.y;
+      }
+    }, 'MIDDLE_DOWN');
 
-    // Prevent browser context menu when right-clicking the canvas
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    handler.setInputAction(() => {
+      this._isMiddleDragging = false;
+      this._middlePivot = null;
+    }, 'MIDDLE_UP');
+
+    // ── Right button drag → zoom ───────────────────────────────────────────
+    handler.setInputAction((pos) => {
+      if (this.drawMode) return; // drawing tools own pointer input (T2.5)
+      camera.cancelFlight(); // user input interrupts flyTo (T2.6)
+      this._isRightDragging = true;
+      this._lastRightMouseY = pos.y;
+    }, 'RIGHT_DOWN');
+
+    handler.setInputAction(() => {
+      this._isRightDragging = false;
+    }, 'RIGHT_UP');
 
     // ── Scroll wheel → proportional zoom (Cesium-compatible) ──────────────
-    canvas.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      const r = Cartesian3.magnitude(this._scene.camera.position);
+    handler.setInputAction((pos: WheelPosition) => {
+      camera.cancelFlight(); // user input interrupts flyTo (T2.6)
+      const r = Cartesian3.magnitude(camera.position);
       // Scroll up (deltaY < 0) → zoom in; scroll down → zoom out
-      this._scene.camera.zoom(e.deltaY * r * 0.0002);
-    }, { passive: false });
+      camera.zoom(pos.deltaY * r * 0.0002);
+    }, 'WHEEL');
 
-    // ── Touch support ──────────────────────────────────────────────────────
-    let lastTouchDist = 0;
-    canvas.addEventListener('touchstart', (e) => {
-      if (e.touches.length === 1) {
-        this._isDragging = true;
-        this._lastMouseX = e.touches[0].clientX;
-        this._lastMouseY = e.touches[0].clientY;
-      } else if (e.touches.length === 2) {
-        this._isDragging = false;
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        lastTouchDist = Math.sqrt(dx * dx + dy * dy);
-      }
-    }, { passive: true });
+    // ── Two-finger pinch → proportional zoom ───────────────────────────────
+    handler.setInputAction((pos: PinchPosition) => {
+      camera.cancelFlight(); // user input interrupts flyTo (T2.6)
+      const r = Cartesian3.magnitude(camera.position);
+      // Pinch apart → zoom in (negative delta), pinch together → zoom out
+      camera.zoom((pos.lastDist - pos.dist) * r * 0.002);
+    }, 'PINCH');
 
-    canvas.addEventListener('touchmove', (e) => {
-      e.preventDefault();
-      const r = Cartesian3.magnitude(this._scene.camera.position);
-
-      if (e.touches.length === 1 && this._isDragging) {
-        const dx = e.touches[0].clientX - this._lastMouseX;
-        const dy = e.touches[0].clientY - this._lastMouseY;
-        this._lastMouseX = e.touches[0].clientX;
-        this._lastMouseY = e.touches[0].clientY;
-        const sensitivity = r * 0.0003;
-        this._scene.camera.rotate(-dx * sensitivity, dy * sensitivity);
-      } else if (e.touches.length === 2) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        // Pinch apart → zoom in (negative delta), pinch together → zoom out
-        this._scene.camera.zoom((lastTouchDist - dist) * r * 0.002);
-        lastTouchDist = dist;
-      }
-    }, { passive: false });
-
-    canvas.addEventListener('touchend', () => { this._isDragging = false; });
+    // ── GPU pick on left click (only when a consumer registered onPick) ─────
+    handler.setInputAction((pos: ScreenSpacePosition) => {
+      if (!this.onPick) return;
+      // Handler reports CSS pixels; picking uses canvas device pixels.
+      const sx = this._canvas.width  / Math.max(1, this._canvas.clientWidth);
+      const sy = this._canvas.height / Math.max(1, this._canvas.clientHeight);
+      this._scene
+        .pick(pos.x * sx, pos.y * sy)
+        .then((result) => this.onPick?.(result, pos))
+        .catch((err: unknown) => console.error('[Viewer] GPU pick failed:', err));
+    }, 'LEFT_CLICK');
   }
 }
 

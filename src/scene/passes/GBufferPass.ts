@@ -20,6 +20,9 @@ export interface GBufferTextures {
  *   Attachment 1 – normal    (rgba16float) world-space normals
  *   Attachment 2 – worldPos  (rgba32float) world-space positions
  *   Depth        – depth32float
+ *
+ * @future IPass — 资源持有者（`beginRenderPass` 由 Scene.render() 驱动，无独立
+ * execute），暂不实现 IPass；待渲染编排重构后渐进迁移。
  */
 export class GBufferPass {
   private _context: Context;
@@ -100,24 +103,22 @@ export class GBufferPass {
     const w = this._width;
     const h = this._height;
 
-    const makeRT = (format: GPUTextureFormat, label: string) => {
+    const makeRT = (format: GPUTextureFormat, label: string, extraUsage: GPUFlagsConstant = 0) => {
       return device.createTexture({
         label,
         size:   { width: w, height: h },
         format,
-        usage:  GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        usage:  GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | extraUsage,
       });
     };
 
     const albedo   = makeRT('rgba8unorm',    'GBuffer.Albedo');
     const normal   = makeRT('rgba16float',   'GBuffer.Normal');
-    const worldPos = makeRT('rgba32float',   'GBuffer.WorldPos');
-    const depth    = device.createTexture({
-      label:  'GBuffer.Depth',
-      size:   { width: w, height: h },
-      format: 'depth32float',
-      usage:  GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    });
+    // worldPos carries COPY_SRC so GPU picking can read back 1×1 texels
+    // (depth32float cannot: WebGPU only allows full-subresource copies of
+    // depth/stencil formats, so a 1×1 depth readback is not possible)
+    const worldPos = makeRT('rgba32float',  'GBuffer.WorldPos', GPUTextureUsage.COPY_SRC);
+    const depth    = makeRT('depth32float', 'GBuffer.Depth');
 
     this._textures = {
       albedo, normal, worldPos, depth,

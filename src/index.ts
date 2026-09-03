@@ -5,6 +5,14 @@
  */
 export { Viewer } from './core/Viewer';
 export { Clock } from './core/Clock';
+export { CameraFlightPath } from './core/CameraFlightPath';
+export { ScreenSpaceEventHandler } from './core/ScreenSpaceEventHandler';
+export type {
+  ScreenSpaceEventType,
+  ScreenSpacePosition,
+  WheelPosition,
+  PinchPosition,
+} from './core/ScreenSpaceEventHandler';
 
 // Math
 export { CesiumMath } from './math/CesiumMath';
@@ -17,6 +25,17 @@ export { Quaternion } from './math/Quaternion';
 export { Ellipsoid } from './math/Ellipsoid';
 export { Color } from './math/Color';
 export { JulianDate } from './math/JulianDate';
+export { Cartographic } from './math/Cartographic';
+export { EasingFunction } from './math/EasingFunction';
+export { HermiteSpline, CatmullRomSpline } from './math/Spline';
+
+// Analysis
+export { Measure, MeasureCollection } from './analysis/Measure';
+export type { MeasureType, MeasureItem } from './analysis/Measure';
+
+// Draw interaction (T2.5)
+export { DrawHandler } from './handler/DrawHandler';
+export type { DrawType, DrawEndEvent } from './handler/DrawHandler';
 
 // Renderer
 export { Context } from './renderer/Context';
@@ -36,12 +55,75 @@ export { GltfLoader } from './loader/GltfLoader';
 export type { ModelFromGltfOptions } from './scene/Model';
 export type { ParsedGltfModel, ParsedMeshPrimitive, ParsedMaterial } from './loader/GltfLoader';
 
+// Imagery (tile streaming)
+export { TileKey } from './imagery/TileKey';
+export type { TileRectangle } from './imagery/TileKey';
+export type { ImageryProvider } from './imagery/ImageryProvider';
+export { rotateSubdomain } from './imagery/ImageryProvider';
+export { XyzImageryProvider } from './imagery/XyzImageryProvider';
+export type { XyzImageryProviderOptions } from './imagery/XyzImageryProvider';
+export { ImageryLayer } from './imagery/ImageryLayer';
+export type {
+  ImageryLayerOptions,
+  ImageryLayerStats,
+  ResolvedTileTexture,
+} from './imagery/ImageryLayer';
+export { ImageryLayerCollection } from './imagery/ImageryLayerCollection';
+
+// GPU picking (T2.3)
+export { PickPass } from './picking/PickPass';
+export type { PickResult } from './picking/PickPass';
+
+// Data sources (Entity / GeoJSON)
+export { Event } from './dataSource/Event';
+export { Entity } from './dataSource/Entity';
+export type {
+  EntityOptions,
+  PointGraphics,
+  PolylineGraphics,
+  PolygonGraphics,
+  PolygonHierarchy,
+  LabelGraphics,
+} from './dataSource/Entity';
+export { EntityCollection } from './dataSource/EntityCollection';
+export { GeoJsonDataSource } from './dataSource/GeoJsonDataSource';
+export type { GeoJsonLoadOptions } from './dataSource/GeoJsonDataSource';
+
 // Rendering passes
 export { GBufferPass } from './scene/passes/GBufferPass';
 export { LightingPass } from './scene/passes/LightingPass';
 export { TransparentPass } from './scene/passes/TransparentPass';
+export { OverlayPass } from './scene/passes/OverlayPass';
+export type { IPass } from './scene/passes/IPass';
+
+// Effects (T3.1)
+export { EffectManager } from './effect/EffectManager';
+export type { Effect } from './effect/EffectManager';
+
+// Circle scan effect (T3.3)
+export { CircleScan } from './effect/CircleScan';
+export type { CircleScanOptions } from './effect/CircleScan';
+
+// Dynamic wall effect (T3.2, 对齐 EV_DynamicWall)
+export { DynamicWall } from './effect/DynamicWall';
+export type { DynamicWallOptions } from './effect/DynamicWall';
+
+// Particle system (T3.4, 对齐 EV_ParticleSystem)
+export { ParticleSystem } from './effect/ParticleSystem';
+export type {
+  ParticleOptions,
+  ParticleMode,
+  ParticleOrigin,
+  ParticlePreset,
+  ParticleColorMode,
+} from './effect/ParticleSystem';
+
+// Weather effects (T3.5, 对齐 EV_Rain / EV_Snow)
+export { Weather } from './effect/Weather';
+export type { WeatherType, WeatherOptions, WeatherArea } from './effect/Weather';
 
 // Shaders
 export { GBUFFER_SHADER } from './shaders/GBufferShader';
 export { LIGHTING_SHADER } from './shaders/LightingShader';
 export { TRANSPARENT_ACCUMULATION_SHADER, TRANSPARENT_COMPOSITE_SHADER } from './shaders/TransparentShader';
+export { WEATHER_SHADER } from './shaders/WeatherShader';

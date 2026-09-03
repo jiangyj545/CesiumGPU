@@ -1,14 +1,41 @@
 import { Matrix4 } from '../math/Matrix4';
 import { Cartesian3 } from '../math/Cartesian3';
 import { CesiumMath } from '../math/CesiumMath';
+import { Cartographic } from '../math/Cartographic';
+import { EasingFunction } from '../math/EasingFunction';
+import { CameraFlightPath } from '../core/CameraFlightPath';
+
+/** Camera orientation expressed as heading / pitch / roll (radians). */
+export interface Orientation {
+  /** Yaw around the local up axis. 0 = north, positive = clockwise (toward east). */
+  heading?: number;
+  /** Pitch. 0 = look at the horizon, negative = look down, -π/2 = nadir. */
+  pitch?: number;
+  /** Roll around the look direction. */
+  roll?: number;
+}
+
+/**
+ * Destination accepted by `setView` / `flyTo`:
+ * - `Cartesian3`: ECEF position in **metres** (e.g. `Cartesian3.fromDegrees(...)`).
+ * - `{ lon, lat, height }`: longitude/latitude in **degrees**, height in **metres**.
+ */
+export type Destination = Cartesian3 | { lon: number; lat: number; height?: number };
 
 export interface SetViewOptions {
-  destination?: Cartesian3;
-  orientation?: {
-    heading?: number;
-    pitch?: number;
-    roll?: number;
-  };
+  destination?: Destination;
+  orientation?: Orientation;
+}
+
+export interface FlyToOptions extends SetViewOptions {
+  /** Flight duration in seconds. Default 3. */
+  duration?: number;
+  /** Easing curve. Default `EasingFunction.QUINTIC_IN_OUT`. */
+  easingFunction?: EasingFunction.Callback;
+  /** Invoked when the flight completes normally. */
+  complete?: () => void;
+  /** Invoked when the flight is cancelled (user input or a new flyTo). */
+  cancel?: () => void;
 }
 
 /**
@@ -41,6 +68,9 @@ export class Camera {
   private _viewProjMatrix: Matrix4;
   private _viewDirty = true;
   private _projDirty = true;
+
+  /** Active camera flight, or null when the camera is idle. */
+  private _flight: CameraFlightPath | null = null;
 
   /** Minimum dot product of camera direction with nadir before pitch is rejected (~85° max tilt). */
   private static readonly _MAX_TILT_NADIR_DOT = Math.cos(CesiumMath.toRadians(85));
@@ -85,17 +115,27 @@ export class Camera {
 
   /**
    * Position the camera using geographic coordinates.
-   * @param destination - ECEF position (metres) or Cartesian3.fromDegrees result.
+   * @param options.destination - ECEF position in metres (`Cartesian3.fromDegrees`)
+   *   or a `{ lon, lat, height }` shortcut (degrees / metres).
+   * @param options.orientation - heading / pitch / roll in radians.  When omitted
+   *   the camera looks straight down at the Earth centre (nadir).
    */
   setView(options: SetViewOptions): void {
     if (options.destination) {
-      // Convert from real ECEF (metres) to normalised units
-      const scale = 1.0 / Camera.EARTH_SCALE;
-      this.position.x = options.destination.x * scale;
-      this.position.y = options.destination.y * scale;
-      this.position.z = options.destination.z * scale;
+      const dest = Camera.resolveDestination(options.destination);
+      this.position.x = dest.x;
+      this.position.y = dest.y;
+      this.position.z = dest.z;
 
-      this._rebuildFrame();
+      if (options.orientation) {
+        this._applyOrientation(
+          options.orientation.heading ?? 0.0,
+          CesiumMath.clamp(options.orientation.pitch ?? -Math.PI / 2, -Math.PI / 2, Math.PI / 2),
+          options.orientation.roll ?? 0.0,
+        );
+      } else {
+        this._rebuildFrame();
+      }
     }
     this._viewDirty = true;
   }
@@ -164,11 +204,44 @@ export class Camera {
   }
 
   /**
-   * Fly to a position (immediate, no animation in this basic version).
-   * @param destination - Cartesian3 in ECEF metres
+   * Fly the camera to a destination along a great-circle path with a
+   * parabolic altitude arch, animating over `duration` seconds (default 3).
+   * Any user input (drag / wheel / pinch) or a new `flyTo` cancels the
+   * current flight and invokes its `cancel` callback.
    */
-  flyTo(options: { destination: Cartesian3 }): void {
-    this.setView({ destination: options.destination });
+  flyTo(options: FlyToOptions): void {
+    this.cancelFlight();
+    this._flight = new CameraFlightPath(this, options);
+  }
+
+  /** True while a camera flight is in progress. */
+  get inFlight(): boolean {
+    return this._flight !== null && !this._flight.finished;
+  }
+
+  /** Abort the active flight (if any) and fire its `cancel` callback. */
+  cancelFlight(): void {
+    const flight = this._flight;
+    if (!flight) return;
+    this._flight = null;
+    flight.cancelCallback?.();
+  }
+
+  /**
+   * Advance the active flight by `dtSeconds`.  Called once per frame by the
+   * Viewer render loop; evaluates the flight and writes the result into this
+   * camera.
+   */
+  updateFlight(dtSeconds: number): void {
+    const flight = this._flight;
+    if (!flight) return;
+
+    flight.update(this, dtSeconds);
+
+    if (flight.finished) {
+      this._flight = null;
+      flight.completeCallback?.();
+    }
   }
 
   /**
@@ -276,6 +349,103 @@ export class Camera {
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Normalise a destination to internal ECEF units (Earth radius = 1).
+   * Accepts metres-ECEF `Cartesian3` or a `{ lon, lat, height }` shortcut
+   * (lon/lat in degrees, height in metres).
+   */
+  static resolveDestination(destination: Destination): Cartesian3 {
+    const scale = 1.0 / Camera.EARTH_SCALE;
+    if ('x' in destination && 'y' in destination && 'z' in destination) {
+      return Cartesian3.multiplyByScalar(destination, scale, new Cartesian3());
+    }
+    // { lon, lat, height } — route through the WGS84 cartographic conversion
+    // so it matches `Cartesian3.fromDegrees` exactly.
+    const metres = Cartographic.fromDegrees(
+      destination.lon,
+      destination.lat,
+      (destination.height ?? 0.0) / Camera.EARTH_SCALE,
+    ).toCartesian();
+    return Cartesian3.multiplyByScalar(metres, scale, new Cartesian3());
+  }
+
+  /**
+   * Derive the heading / pitch (radians) implied by the camera's current
+   * direction vector relative to the local east-north-up frame at its position.
+   * heading: 0 = north, positive clockwise (toward east).
+   * pitch:   0 = horizon, negative = down, ±π/2 = zenith / nadir.
+   */
+  _deriveHeadingPitch(): { heading: number; pitch: number } {
+    const up = Cartesian3.normalize(this.position, new Cartesian3());
+    const east = new Cartesian3();
+    const north = new Cartesian3();
+    Camera._eastNorthUp(up, east, north);
+
+    const pitch = Math.asin(CesiumMath.clamp(Cartesian3.dot(this.direction, up), -1, 1));
+    const heading = Math.atan2(
+      Cartesian3.dot(this.direction, east),
+      Cartesian3.dot(this.direction, north),
+    );
+    return { heading, pitch };
+  }
+
+  /**
+   * Rebuild direction / up / right from a heading / pitch / roll triple at the
+   * camera's current position.  heading = 0 / pitch = 0 looks north along the
+   * horizon; negative pitch tilts the look direction downward.
+   */
+  _applyOrientation(heading: number, pitch: number, roll: number): void {
+    const up = Cartesian3.normalize(this.position, new Cartesian3());
+    const east = new Cartesian3();
+    const north = new Cartesian3();
+    Camera._eastNorthUp(up, east, north);
+
+    // Heading: rotate north / east around the up axis (clockwise seen from
+    // above, so positive heading turns the look direction toward east).
+    const lookH = Camera._rotateByAxis(north, up, -heading, new Cartesian3());
+    const rightH = Camera._rotateByAxis(east, up, -heading, new Cartesian3());
+
+    // Pitch around the horizontal right axis: negative = look down.
+    const dir = Camera._rotateByAxis(lookH, rightH, pitch, new Cartesian3());
+    const camUp = Camera._rotateByAxis(up, rightH, pitch, new Cartesian3());
+
+    // Roll around the final look direction.
+    let right = new Cartesian3();
+    Cartesian3.cross(dir, camUp, right);
+    Cartesian3.normalize(right, right);
+    const finalUp = new Cartesian3();
+    if (roll !== 0.0) {
+      Camera._rotateByAxis(right, dir, roll, right);
+      Camera._rotateByAxis(camUp, dir, roll, finalUp);
+    } else {
+      finalUp.x = camUp.x; finalUp.y = camUp.y; finalUp.z = camUp.z;
+    }
+    Cartesian3.normalize(dir, this.direction);
+    Cartesian3.normalize(finalUp, this.up);
+    Cartesian3.normalize(right, this.right);
+
+    this._viewDirty = true;
+  }
+
+  /**
+   * Compute the local east / north unit vectors at a surface up vector
+   * (geocentric normal).  Falls back to a fixed east at the poles.
+   */
+  private static _eastNorthUp(up: Cartesian3, east: Cartesian3, north: Cartesian3): void {
+    // east = normalize(cross(UNIT_Z, up)) = normalize(-up.y, up.x, 0)
+    const ex = -up.y;
+    const ey = up.x;
+    const eMag = Math.hypot(ex, ey);
+    if (eMag < 1e-6) {
+      // Degenerate at the poles — fixed fallback (same as _rebuildFrame).
+      east.x = 1; east.y = 0; east.z = 0;
+    } else {
+      east.x = ex / eMag; east.y = ey / eMag; east.z = 0;
+    }
+    Cartesian3.cross(up, east, north);
+    Cartesian3.normalize(north, north);
+  }
 
   /**
    * Rotate vector v around unit axis by angle using Rodrigues' formula.

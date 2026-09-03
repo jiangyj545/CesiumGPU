@@ -11,6 +11,9 @@ const MAX_LIGHTS = 8;
  * LightingPass - Reads the G-Buffer and computes deferred Blinn-Phong lighting.
  * Renders a full-screen triangle, outputting the lit colour to the supplied
  * render target (or the swap-chain texture).
+ *
+ * @future IPass — execute 已接近签名，但缺 label/prepare/resize 且由 Scene.render()
+ * 直接驱动，暂不实现 IPass；待迁移后统一。
  */
 export class LightingPass {
   private _context: Context;

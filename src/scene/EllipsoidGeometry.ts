@@ -19,6 +19,21 @@ export interface GeometryBuffers {
   indexCount: number;
 }
 
+export interface CreateRegionOptions {
+  /**
+   * UV sub-rect mapped over the region (u0/v0 at the northwest corner).
+   * Default: the full [0, 1] range. Used to sample an ancestor tile texture
+   * when a tile's own texture has not loaded yet.
+   */
+  uvRect?: { u0: number; v0: number; u1: number; v1: number };
+  /**
+   * Radial scale applied to the surface positions. Default: 1. Tile
+   * primitives use a value slightly above 1 to sit just above the base
+   * globe and avoid z-fighting.
+   */
+  radiusScale?: number;
+}
+
 /**
  * EllipsoidGeometry - Generates tessellated ellipsoid geometry (UV sphere).
  * Matches Cesium's EllipsoidGeometry API.
@@ -149,6 +164,105 @@ export class EllipsoidGeometry {
 
     return { vertices, indices, vertexCount, indexCount };
   }
+
+  /**
+   * Generate interleaved geometry for a latitude/longitude sub-region of the
+   * ellipsoid (used by the imagery tile system: one patch per Web Mercator
+   * tile). UVs run from northwest (u0, v0) to southeast (u1, v1) of the
+   * supplied `uvRect`, defaulting to the normalised [0, 1] range.
+   *
+   * Positions use the same normalised convention as {@link createGeometry}
+   * (radii scaled so the equatorial radius is 1, y/z squashed by the WGS84
+   * polar ratio), optionally scaled radially by `radiusScale`.
+   *
+   * @param west       Western edge longitude (radians)
+   * @param south      Southern edge latitude (radians)
+   * @param east       Eastern edge longitude (radians)
+   * @param north      Northern edge latitude (radians)
+   * @param partitions Subdivisions per axis (8×8 is ample for a tile)
+   */
+  static createRegion(
+    west: number,
+    south: number,
+    east: number,
+    north: number,
+    partitions: number,
+    options: CreateRegionOptions = {}
+  ): { vertices: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number } {
+    const uvRect  = options.uvRect ?? { u0: 0, v0: 0, u1: 1, v1: 1 };
+    const scale   = options.radiusScale ?? 1.0;
+    const ratio   = WGS84_POLAR_RATIO;
+    const ratioSq = ratio * ratio;
+
+    const stacks = partitions; // rows: north → south
+    const slices = partitions; // columns: west → east
+
+    const vertexCount = (stacks + 1) * (slices + 1);
+    const vertices    = new Float32Array(vertexCount * 8); // [pos(3), normal(3), uv(2)]
+
+    let vi = 0;
+    for (let stack = 0; stack <= stacks; stack++) {
+      const t   = stack / stacks;
+      const lat = north + (south - north) * t; // row 0 = north edge
+      const v   = uvRect.v0 + (uvRect.v1 - uvRect.v0) * t;
+      const cosLat = Math.cos(lat);
+      const sinLat = Math.sin(lat);
+
+      for (let slice = 0; slice <= slices; slice++) {
+        const s   = slice / slices;
+        const lon = west + (east - west) * s;
+        const u   = uvRect.u0 + (uvRect.u1 - uvRect.u0) * s;
+
+        const nx = cosLat * Math.cos(lon);
+        const ny = cosLat * Math.sin(lon);
+        const nz = sinLat;
+
+        // Position (EllipsoidGeometry normalisation: x on unit sphere,
+        // y/z squashed by the polar ratio).
+        vertices[vi++] = scale * nx;
+        vertices[vi++] = scale * ny * ratio;
+        vertices[vi++] = scale * nz * ratio;
+
+        // Ellipsoid surface normal (same math as createGeometry).
+        const ny2  = ny / ratioSq;
+        const nz2  = nz / ratioSq;
+        const nLen = Math.sqrt(nx * nx + ny2 * ny2 + nz2 * nz2);
+        vertices[vi++] = nx / nLen;
+        vertices[vi++] = ny2 / nLen;
+        vertices[vi++] = nz2 / nLen;
+
+        vertices[vi++] = u;
+        vertices[vi++] = v;
+      }
+    }
+
+    const indexCount = stacks * slices * 6;
+    const indices    = new Uint32Array(indexCount);
+    let   idx        = 0;
+    const stride     = slices + 1;
+
+    for (let stack = 0; stack < stacks; stack++) {
+      for (let slice = 0; slice < slices; slice++) {
+        const a = stack * stride + slice;
+        const b = a + stride;
+        const c = b + 1;
+        const d = a + 1;
+
+        indices[idx++] = a;
+        indices[idx++] = b;
+        indices[idx++] = d;
+
+        indices[idx++] = b;
+        indices[idx++] = c;
+        indices[idx++] = d;
+      }
+    }
+
+    return { vertices, indices, vertexCount, indexCount };
+  }
 }
+
+/** WGS84 polar / equatorial semi-axis ratio (6356752.3142 / 6378137). */
+const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
 
 export default EllipsoidGeometry;

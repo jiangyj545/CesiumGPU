@@ -76,6 +76,27 @@ fn fs_main(in: VertexOutput) -> GBufferOutput {
 
   return out;
 }
+
+// ── Unlit fragment entry (effect/emissive geometry, T3.1) ─────────────────────
+// Same vertex stage, same G-Buffer targets as fs_main, but writes a
+// zero-length normal as the "unlit" marker.  The lighting pass detects
+// dot(N,N) < 0.5 and outputs raw albedo (no shading / haze / tonemap),
+// so the primitive renders pure emissive colour.
+@fragment
+fn fs_unlit(in: VertexOutput) -> GBufferOutput {
+  var out: GBufferOutput;
+
+  let texColor = textureSample(baseColorTexture, baseColorSampler, in.uv);
+
+  out.albedo   = texColor;
+  out.normal   = vec4<f32>(vec3<f32>(0.0), 0.0);  // zero normal = unlit marker
+  out.worldPos = vec4<f32>(in.worldPosition, 1.0);
+
+  return out;
+}
 `;
+
+/** Fragment entry point for the unlit G-Buffer pipeline variant. */
+export const GBUFFER_UNLIT_ENTRY_POINT = 'fs_unlit';
 
 export default GBUFFER_SHADER;

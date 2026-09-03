@@ -2,7 +2,7 @@ import { Context } from '../renderer/Context';
 import { Matrix4 } from '../math/Matrix4';
 import { Cartesian3 } from '../math/Cartesian3';
 import { Color } from '../math/Color';
-import { GBUFFER_SHADER } from '../shaders/GBufferShader';
+import { GBUFFER_SHADER, GBUFFER_UNLIT_ENTRY_POINT } from '../shaders/GBufferShader';
 
 export interface PrimitiveOptions {
   /** Interleaved vertex buffer: [position(3), normal(3), uv(2)] per vertex */
@@ -18,6 +18,13 @@ export interface PrimitiveOptions {
   translucent?: boolean;
   /** Alpha for transparent primitives */
   alpha?: number;
+  /**
+   * Unlit (emissive) rendering: draw with the unlit G-Buffer pipeline variant.
+   * The G-Buffer fragment writes a zero-length normal marker which the
+   * lighting pass detects to output raw albedo (no shading).  pickId and
+   * bind-group structure are identical to lit primitives.
+   */
+  unlit?: boolean;
 }
 
 /**
@@ -25,14 +32,23 @@ export interface PrimitiveOptions {
  * Matches Cesium's Primitive API (simplified).
  */
 export class Primitive {
+  /** Global 24-bit pick-id allocator (id 0 is reserved for background). */
+  private static _nextPickId = 1;
+
   show: boolean = true;
   modelMatrix: Matrix4;
+
+  private readonly _pickId: number;
+
+  /** 24-bit GPU pick id (readonly, assigned once at construction). */
+  get pickId(): number { return this._pickId; }
 
   private _context: Context;
   private _vertexBuffer: GPUBuffer;
   private _indexBuffer: GPUBuffer;
   private _indexCount: number;
   private _translucent: boolean;
+  private readonly _unlit: boolean;
 
   private _modelUniformBuffer: GPUBuffer;
   private _materialUniformBuffer: GPUBuffer;
@@ -49,8 +65,15 @@ export class Primitive {
   constructor(context: Context, options: PrimitiveOptions) {
     this._context    = context;
     this._translucent = options.translucent ?? false;
+    this._unlit      = options.unlit ?? false;
     this._color      = options.color ?? Color.WHITE;
     this._alpha      = options.alpha ?? 1.0;
+
+    // Allocate the 24-bit GPU pick id (0 = background / no hit)
+    if (Primitive._nextPickId > 0xFFFFFF) {
+      throw new Error('Primitive: 24-bit pick id space exhausted');
+    }
+    this._pickId = Primitive._nextPickId++;
 
     const device = context.device;
 
@@ -130,6 +153,9 @@ export class Primitive {
   }
 
   get translucent(): boolean { return this._translucent; }
+
+  /** True when this primitive draws through the unlit (emissive) pipeline. */
+  get unlit(): boolean { return this._unlit; }
 
   set color(c: Color) {
     this._color = c;
@@ -361,6 +387,62 @@ export function buildOpaquePipeline(context: Context, depthFormat: GPUTextureFor
         { format: 'rgba8unorm'  }, // albedo
         { format: 'rgba16float' }, // normal
         { format: 'rgba32float' }, // worldPos
+      ],
+    },
+    primitive:    { topology: 'triangle-list', cullMode: 'back' },
+    depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' },
+  });
+}
+
+/**
+ * Build the unlit G-Buffer pipeline variant (T3.1) used by emissive effect
+ * geometry.  Same vertex layout, same G-Buffer targets and — crucially — the
+ * SAME bind group layouts as {@link buildOpaquePipeline}: the layouts are
+ * extracted from the opaque pipeline, so per-primitive bind groups built via
+ * `Primitive.buildOpaqueBindGroup` stay valid when Scene switches pipelines
+ * mid-pass for unlit primitives (WebGPU compares bind group layouts by
+ * object identity).
+ *
+ * @param context        - renderer context
+ * @param depthFormat    - depth format of the G-Buffer ('depth32float')
+ * @param opaquePipeline - the pipeline built by {@link buildOpaquePipeline}
+ */
+export function buildUnlitPipeline(
+  context: Context,
+  depthFormat: GPUTextureFormat,
+  opaquePipeline: GPURenderPipeline
+): GPURenderPipeline {
+  const device = context.device;
+  // Same shader module as the lit path; only the fragment entry differs
+  // (WGSL has no preprocessor, so the variant is a second entry point).
+  const shader = device.createShaderModule({ code: GBUFFER_SHADER, label: 'GBufferShader' });
+
+  // Identity-preserving layout reuse (see doc comment above).
+  const cameraBGL = opaquePipeline.getBindGroupLayout(0);
+  const modelBGL  = opaquePipeline.getBindGroupLayout(1);
+
+  return device.createRenderPipeline({
+    label:  'UnlitPipeline',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [cameraBGL, modelBGL] }),
+    vertex: {
+      module:     shader,
+      entryPoint: 'vs_main',
+      buffers: [{
+        arrayStride: 32, // 8 floats × 4 bytes
+        attributes: [
+          { shaderLocation: 0, offset: 0,  format: 'float32x3' }, // position
+          { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
+          { shaderLocation: 2, offset: 24, format: 'float32x2' }, // uv
+        ],
+      }],
+    },
+    fragment: {
+      module:     shader,
+      entryPoint: GBUFFER_UNLIT_ENTRY_POINT,
+      targets: [
+        { format: 'rgba8unorm'  }, // albedo   — base colour written as-is
+        { format: 'rgba16float' }, // normal   — zero vector (unlit marker)
+        { format: 'rgba32float' }, // worldPos — kept for picking / depth
       ],
     },
     primitive:    { topology: 'triangle-list', cullMode: 'back' },
