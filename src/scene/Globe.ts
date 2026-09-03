@@ -532,16 +532,30 @@ export class Globe {
         texture = this._getTerrainFallbackTexture();
       }
 
+      // The geometry cache key folds in the stitch signature: when the
+      // rendered neighbourhood changes (e.g. a coarse fallback neighbour is
+      // replaced by finer tiles) the stitched edge positions change and the
+      // primitive must rebuild even though its texture did not.
+      const geometryKey = this._terrainGeometryKey(tile, textureLevels);
       const entry = this._terrainPrimitives.get(key);
-      if (entry !== undefined && entry.texture !== texture) {
-        // Bound texture changed → rebuild with matching uv sub-rect geometry.
+      if (entry !== undefined && (entry.texture !== texture || entry.geometryKey !== geometryKey)) {
+        // Bound texture changed → rebuild with matching uv sub-rect geometry;
+        // stitch signature changed → rebuild with the re-stitched edges.
         this._destroyTilePrimitive(entry);
         this._terrainPrimitives.delete(key);
       }
       if (!this._terrainPrimitives.has(key)) {
-        this._terrainPrimitives.set(key, this._createTerrainPrimitive(tile, mesh, texture, textureLevels));
+        this._terrainPrimitives.set(
+          key,
+          this._createTerrainPrimitive(tile, mesh, texture, textureLevels, geometryKey)
+        );
       }
     }
+  }
+
+  /** Geometry cache key for a terrain render tile (includes the stitch signature). */
+  private _terrainGeometryKey(tile: TerrainRenderTile, textureLevels: number): string {
+    return `terrain:${tile.z}/${tile.x}/${tile.y}#${tile.ancestorLevels}#${textureLevels}#${tile.stitchSignature}`;
   }
 
   /** Build one terrain primitive (displaced mesh geometry + tile texture). */
@@ -549,7 +563,8 @@ export class Globe {
     tile: TerrainRenderTile,
     mesh: TerrainMeshData,
     texture: GPUTexture,
-    textureLevels: number
+    textureLevels: number,
+    geometryKey: string
   ): TilePrimitiveEntry {
     const uvRect = textureLevels > 0 ? this._tileUvRect(tile.x, tile.y, textureLevels) : undefined;
     const geometry = this._getTerrainGeometry(tile, mesh, uvRect, textureLevels);
@@ -563,17 +578,21 @@ export class Globe {
     Matrix4.identity(primitive.modelMatrix);
     primitive.setTexture(texture, this._getTileSampler());
     primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
-    return { primitive, texture };
+    return { primitive, texture, geometryKey };
   }
 
   /**
    * Cached (or newly generated) interleaved geometry for a terrain mesh.
    *
-   * Positions come verbatim from the mesh (normalised ECEF, height folded in).
-   * Normals are accumulated from face crosses (robust across skirts); zero-
-   * length sums fall back to the radial direction. UVs map each vertex's
-   * lon/lat linearly across the tile bounds — the same mapping
-   * `EllipsoidGeometry.createRegion` uses, so tile textures line up.
+   * Positions come from the layer's crack-stitched snapshot when present
+   * (edge vertices snapped onto the actually-rendered coarse neighbours —
+   * see `TerrainLayer._stitchRenderSet`), otherwise verbatim from the mesh
+   * (normalised ECEF, height folded in). Normals are accumulated from face
+   * crosses (robust across skirts); zero-length sums fall back to the radial
+   * direction. UVs map each vertex's lon/lat linearly across the tile bounds
+   * — the same mapping `EllipsoidGeometry.createRegion` uses, so tile
+   * textures line up. The cache key includes the stitch signature, so a
+   * changed rendered neighbourhood rebuilds instead of reusing stale edges.
    */
   private _getTerrainGeometry(
     tile: TerrainRenderTile,
@@ -581,7 +600,7 @@ export class Globe {
     uvRect: { u0: number; v0: number; u1: number; v1: number } | undefined,
     textureLevels: number
   ): CachedTileGeometry {
-    const cacheKey = `terrain:${tile.z}/${tile.x}/${tile.y}#${tile.ancestorLevels}#${textureLevels}`;
+    const cacheKey = this._terrainGeometryKey(tile, textureLevels);
     const cached = this._terrainGeometryCache.get(cacheKey);
     if (cached) return cached;
 
@@ -590,7 +609,7 @@ export class Globe {
       ? geographicTileBounds(tile.z, tile.x, tile.y)
       : webmercatorTileBounds(tile.z, tile.x, tile.y);
 
-    const positions = mesh.positions;
+    const positions = tile.stitchedPositions ?? mesh.positions;
     const indices   = Uint32Array.from(mesh.indices);
     const vertexCount = positions.length / 3;
     const vertices    = new Float32Array(vertexCount * 8); // [pos(3), normal(3), uv(2)]
@@ -766,6 +785,11 @@ interface TilePrimitiveEntry {
   primitive: Primitive;
   /** Texture reference used to detect bind-group-invalidating changes. */
   texture: GPUTexture;
+  /**
+   * Terrain only: geometry cache key the primitive was built from (detects
+   * stitch-signature changes that require a rebuild).
+   */
+  geometryKey?: string;
 }
 
 /** @internal Cached interleaved geometry for a tile (+ UV variant). */

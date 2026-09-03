@@ -43,6 +43,12 @@ export class TerrainLayer {
   /** LRU mesh cache keyed by `"{z}/{x}/{y}"` (insertion order = recency). */
   private readonly _meshes = new Map<string, TerrainCacheEntry>();
 
+  /**
+   * Stitch results keyed by tile key, reused while the neighbour-set
+   * signature is unchanged (see {@link _stitchRenderSet}).
+   */
+  private readonly _stitchCache = new Map<string, StitchCacheEntry>();
+
   /** Keys with a fetch in progress (dedup guard). */
   private readonly _inflight = new Set<string>();
 
@@ -140,6 +146,7 @@ export class TerrainLayer {
     if (this._destroyed) return;
     this._destroyed = true;
     this._meshes.clear();
+    this._stitchCache.clear();
     this._inflight.clear();
     this._failed.clear();
     this._selected = [];
@@ -286,7 +293,7 @@ export class TerrainLayer {
       if (this._touch(entry.key) !== null) {
         if (!seen.has(entry.key)) {
           seen.add(entry.key);
-          renderTiles.push({ z: entry.z, x: entry.x, y: entry.y, ancestorLevels: 0 });
+          renderTiles.push(emptyRenderTile(entry.z, entry.x, entry.y, 0));
         }
         continue;
       }
@@ -302,13 +309,277 @@ export class TerrainLayer {
         if (this._touch(key) === null) continue;
         if (!seen.has(key)) {
           seen.add(key);
-          renderTiles.push({ z, x, y, ancestorLevels: levels });
+          renderTiles.push(emptyRenderTile(z, x, y, levels));
         }
         break;
       }
     }
 
+    this._stitchRenderSet(renderTiles);
     this._renderTiles = renderTiles;
+  }
+
+  // ── Crack stitching (T-junction removal across LOD borders) ───────────────
+
+  /**
+   * Snap the rendered positions of every tile in the render set onto the
+   * actually-rendered neighbour surfaces.
+   *
+   * Adjacent tiles at different LODs do not share edge vertices: the fine
+   * tile's edge carries more samples than the coarse neighbour's edge grid,
+   * and the mismatching heights open hairline (T-junction) cracks between
+   * the triangle rows. For every rendered tile each of the four edges is
+   * matched against the *rendered* neighbour (same level first, then the
+   * nearest rendered ancestor — render-set fallbacks are indexed under the
+   * ancestor's own coordinates). A coarser neighbour means this tile is the
+   * fine side: its edge vertices are re-sampled from the neighbour's mesh
+   * surface, so the fine edge polyline lies exactly on the coarse surface
+   * and the two grids meet watertight.
+   *
+   * Same-level neighbours are skipped: their boundary vertices come from the
+   * same quantised grid edge and coincide by construction. Results are kept
+   * in {@link _stitchCache} keyed by a signature of the resolved
+   * coarse-neighbour set, so stitching recomputes only when the rendered
+   * neighbourhood actually changes — never per frame at a stable LOD.
+   */
+  private _stitchRenderSet(renderTiles: TerrainRenderTile[]): void {
+    const rendered = new Map<string, TerrainRenderTile>();
+    for (const tile of renderTiles) {
+      rendered.set(renderTileKey(tile.z, tile.x, tile.y), tile);
+    }
+
+    for (const tile of renderTiles) {
+      // Render-set entries are guaranteed resident (see _buildRenderSet);
+      // plain `get` avoids churning the LRU order from the stitch pass.
+      const self = this._meshes.get(renderTileKey(tile.z, tile.x, tile.y));
+      if (self === undefined) continue;
+
+      const west  = this._resolveStitchNeighbour(rendered, self, 'west');
+      const east  = this._resolveStitchNeighbour(rendered, self, 'east');
+      const south = this._resolveStitchNeighbour(rendered, self, 'south');
+      const north = this._resolveStitchNeighbour(rendered, self, 'north');
+      const part  = (n: StitchNeighbour): string => (n.entry === null ? '-' : n.entry.key);
+      const signature = `${part(west)}|${part(east)}|${part(south)}|${part(north)}`;
+
+      const cached = this._stitchCache.get(self.key);
+      if (cached !== undefined && cached.signature === signature) {
+        tile.stitchedPositions = cached.positions;
+        tile.stitchSignature = signature;
+        continue;
+      }
+
+      const positions = this._stitchTile(self, west, east, south, north);
+      tile.stitchedPositions = positions;
+      tile.stitchSignature = signature;
+
+      if (this._stitchCache.size >= STITCH_CACHE_CAPACITY) this._stitchCache.clear();
+      this._stitchCache.set(self.key, { signature, positions });
+    }
+  }
+
+  /**
+   * Walk up from the adjacent tile coordinates until a *rendered* tile is
+   * found (the render set indexes parent-fallback tiles under the ancestor's
+   * own coordinates, so the first hit is what is actually drawn across the
+   * edge). Returns `null` when nothing renders there.
+   */
+  private _findRenderedNeighbour(
+    rendered: Map<string, TerrainRenderTile>,
+    z: number,
+    x: number,
+    y: number
+  ): TerrainRenderTile | null {
+    if (y < 0 || y >= 2 ** z) return null; // no neighbour across the poles
+    const cols = this._columnsAtLevel(z);
+    x = ((x % cols) + cols) % cols;        // antimeridian wrap
+    for (; z >= 0; z--, x >>= 1, y >>= 1) {
+      const hit = rendered.get(renderTileKey(z, x, y));
+      if (hit !== undefined) return hit;
+    }
+    return null;
+  }
+
+  /**
+   * Resolve what to stitch against across one edge of `self`.
+   *
+   * Same-level neighbours (and missing ones) yield `entry: null` — their
+   * boundary grid coincides with this tile's by construction. A coarser
+   * neighbour yields its cache entry plus the neighbour boundary facing the
+   * edge, or `side: null` when the coarse mesh spans beyond the shared line
+   * (ancestor-fallback overlap draws the coarse mesh under this tile) and
+   * the full neighbour mesh must be scanned instead of just its edge strip.
+   */
+  private _resolveStitchNeighbour(
+    rendered: Map<string, TerrainRenderTile>,
+    self: TerrainCacheEntry,
+    dir: EdgeDirection
+  ): StitchNeighbour {
+    const neighbour = this._findRenderedNeighbour(
+      rendered,
+      self.z,
+      self.x + (dir === 'west' ? -1 : dir === 'east' ? 1 : 0),
+      self.y + (dir === 'south' ? -1 : dir === 'north' ? 1 : 0)
+    );
+    if (neighbour === null || neighbour.z >= self.z) return NO_STITCH_NEIGHBOUR;
+
+    const entry = this._meshes.get(renderTileKey(neighbour.z, neighbour.x, neighbour.y));
+    if (entry === undefined) return NO_STITCH_NEIGHBOUR; // evicted; nothing to sample
+
+    const b = self.bounds;
+    const n = entry.bounds;
+    const eps = 1e-6; // degrees; tile bounds are exact powers of two
+    let side: EdgeDirection | null = null;
+    if (dir === 'west'  && Math.abs(b.west  - n.east)  < eps) side = 'east';
+    else if (dir === 'east'  && Math.abs(b.east  - n.west)  < eps) side = 'west';
+    else if (dir === 'south' && Math.abs(b.south - n.north) < eps) side = 'north';
+    else if (dir === 'north' && Math.abs(b.north - n.south) < eps) side = 'south';
+    return { entry, side };
+  }
+
+  /**
+   * Snap `self`'s edge vertices onto the resolved coarse neighbour surfaces.
+   *
+   * Returns a render-only copy of the mesh positions with the snapped
+   * heights folded in as a radial rescale (the engine folds height into the
+   * position magnitude: new|p| = |p| × (1 + h_new / 6378137)), or `null`
+   * when nothing was snapped. The cached mesh is never touched —
+   * {@link sampleHeight} and picking keep reading the raw geometry.
+   *
+   * Edge vertices are grouped by quantised position: a grid rim vertex and
+   * its skirt copies share lon/lat but not height, and the whole group moves
+   * with one radial factor so the skirt keeps its depth below the snapped
+   * rim (residual-seam coverage is preserved).
+   */
+  private _stitchTile(
+    self: TerrainCacheEntry,
+    west: StitchNeighbour,
+    east: StitchNeighbour,
+    south: StitchNeighbour,
+    north: StitchNeighbour
+  ): Float32Array | null {
+    if (self.llh === null) self.llh = this._buildVertexLonLatHeight(self.mesh);
+    const llh     = self.llh;
+    const b       = self.bounds;
+    const lonEps  = (b.east - b.west) * EDGE_EPSILON;
+    const latEps  = (b.north - b.south) * EDGE_EPSILON;
+    const snapped = new Uint8Array(llh.length / 3); // a corner abuts two edges but snaps once
+    const out     = new Float32Array(self.mesh.positions); // render-only copy
+    let changed   = false;
+
+    const edges = [
+      ['west', west], ['east', east], ['south', south], ['north', north],
+    ] as const;
+
+    for (const [dir, neighbour] of edges) {
+      if (neighbour.entry === null) continue;
+
+      // Group this edge's vertices by representative position (linear scan —
+      // an edge holds ~grid-size groups; the tolerance sits far below the
+      // grid spacing and far above float32 lon/lat roundoff).
+      const groups: { lon: number; lat: number; rim: number; members: number[] }[] = [];
+      for (let i = 0; i < llh.length; i += 3) {
+        const vi = i / 3;
+        if (snapped[vi]) continue;
+        const lon = llh[i];
+        const lat = llh[i + 1];
+        const onEdge =
+          (dir === 'west'  && Math.abs(lon - b.west)  <= lonEps) ||
+          (dir === 'east'  && Math.abs(lon - b.east)  <= lonEps) ||
+          (dir === 'south' && Math.abs(lat - b.south) <= latEps) ||
+          (dir === 'north' && Math.abs(lat - b.north) <= latEps);
+        if (!onEdge) continue;
+
+        let gi = -1;
+        for (let g = 0; g < groups.length; g++) {
+          if (Math.abs(lon - groups[g].lon) <= lonEps && Math.abs(lat - groups[g].lat) <= latEps) {
+            gi = g;
+            break;
+          }
+        }
+        if (gi < 0) {
+          groups.push({ lon, lat, rim: vi, members: [] });
+          gi = groups.length - 1;
+        }
+        const group = groups[gi];
+        group.members.push(vi);
+        if (llh[i + 2] > llh[group.rim * 3 + 2]) group.rim = vi; // rim = surface copy
+      }
+      if (groups.length === 0) continue;
+
+      // A boundary-abutting neighbour only needs its edge strip scanned, and
+      // the sample sits exactly on the neighbour boundary (projection kills
+      // the float32 lon/lat roundoff of the duplicated vertices); a coarse
+      // mesh spanning the edge line is scanned in full.
+      const triangles = neighbour.side === null
+        ? null
+        : this._edgeTriangles(neighbour.entry)[neighbour.side];
+
+      for (const group of groups) {
+        let sampleLon = group.lon;
+        let sampleLat = group.lat;
+        if (neighbour.side === 'east')       sampleLon = neighbour.entry.bounds.east;
+        else if (neighbour.side === 'west')  sampleLon = neighbour.entry.bounds.west;
+        else if (neighbour.side === 'north') sampleLat = neighbour.entry.bounds.north;
+        else if (neighbour.side === 'south') sampleLat = neighbour.entry.bounds.south;
+
+        const newH = this._sampleMeshHeight(
+          neighbour.entry, sampleLon, sampleLat, triangles, STITCH_BARYCENTRIC_EPSILON
+        );
+        if (newH === null) continue; // no coarse coverage → keep heights (skirt still hides the seam)
+
+        // Radial rescale folding the sampled height in; applied to the whole
+        // group so rim + skirt copies translate together.
+        const factor = (1 + newH / WGS84_SEMI_MAJOR) / (1 + llh[group.rim * 3 + 2] / WGS84_SEMI_MAJOR);
+        if (!Number.isFinite(factor) || factor <= 0) continue;
+        for (const vi of group.members) {
+          snapped[vi] = 1;
+          out[vi * 3]     *= factor;
+          out[vi * 3 + 1] *= factor;
+          out[vi * 3 + 2] *= factor;
+        }
+        changed = true;
+      }
+    }
+
+    return changed ? out : null;
+  }
+
+  /**
+   * Per-side lists of triangle start indices touching each tile boundary
+   * (built lazily per mesh). Boundary stitching only needs these: a sample
+   * on the boundary falls into a triangle that has a vertex on that same
+   * boundary, which shrinks one edge's scan from the full grid (~8k
+   * triangles) to the edge strip (~2·grid-size).
+   */
+  private _edgeTriangles(entry: TerrainCacheEntry): EdgeTriangleLists {
+    if (entry.edgeTris !== null) return entry.edgeTris;
+    if (entry.llh === null) entry.llh = this._buildVertexLonLatHeight(entry.mesh);
+
+    const llh    = entry.llh;
+    const b      = entry.bounds;
+    const lonEps = (b.east - b.west) * EDGE_EPSILON;
+    const latEps = (b.north - b.south) * EDGE_EPSILON;
+    const lists: EdgeTriangleLists = { west: [], east: [], south: [], north: [] };
+    const indices = entry.mesh.indices;
+
+    for (let i = 0; i < indices.length; i += 3) {
+      let west = false, east = false, south = false, north = false;
+      for (let k = 0; k < 3; k++) {
+        const v = indices[i + k] * 3;
+        const lon = llh[v];
+        const lat = llh[v + 1];
+        if (Math.abs(lon - b.west)  <= lonEps) west = true;
+        if (Math.abs(lon - b.east)  <= lonEps) east = true;
+        if (Math.abs(lat - b.south) <= latEps) south = true;
+        if (Math.abs(lat - b.north) <= latEps) north = true;
+      }
+      if (west)  lists.west.push(i);
+      if (east)  lists.east.push(i);
+      if (south) lists.south.push(i);
+      if (north) lists.north.push(i);
+    }
+    entry.edgeTris = lists;
+    return lists;
   }
 
   /** LRU get: refreshes recency and evicts the oldest entry past capacity. */
@@ -333,20 +604,37 @@ export class TerrainLayer {
       z, x, y,
       mesh,
       bounds: this._boundsOf(z, x, y),
-      llh: null, // built lazily by sampleHeight
+      llh: null,       // built lazily by sampleHeight / stitching
+      edgeTris: null,  // built lazily by the stitch pass
     });
     this._onTileReady?.(z, x, y, mesh);
   }
 
+  /** Barycentric height over the tile's triangles (0 when nothing covers the point). */
+  private _interpolateHeight(entry: TerrainCacheEntry, lonDeg: number, latDeg: number): number {
+    return this._sampleMeshHeight(entry, lonDeg, latDeg, null) ?? 0;
+  }
+
   /**
-   * Barycentric height interpolation over the tile's triangles.
+   * Barycentric height interpolation over one tile's triangles; `null` when
+   * the point misses every non-degenerate triangle (outside the mesh, or
+   * inside a skirt seam). `triangles` optionally restricts the scan to
+   * pre-selected triangle start indices (edge lists, see
+   * {@link _edgeTriangles}); `epsilon` widens the barycentric tolerance for
+   * stitch samples sitting on (or a float32 hair outside) a boundary.
    *
    * Vertex lon/lat/height are derived from the normalised ECEF positions by
    * undoing the engine's polar squash (`y, z × polar ratio`), then height =
    * `(|pos| / |unit direction| - 1) × 6378137`. Skirt triangles project to
-   * (near-)degenerate 2D triangles and are rejected by the epsilon test.
+   * (near-)degenerate 2D triangles and are rejected by the denominator test.
    */
-  private _interpolateHeight(entry: TerrainCacheEntry, lonDeg: number, latDeg: number): number {
+  private _sampleMeshHeight(
+    entry: TerrainCacheEntry,
+    lonDeg: number,
+    latDeg: number,
+    triangles: ArrayLike<number> | null,
+    epsilon: number = -1e-6
+  ): number | null {
     if (entry.llh === null) entry.llh = this._buildVertexLonLatHeight(entry.mesh);
     const llh     = entry.llh;
     const indices = entry.mesh.indices;
@@ -359,7 +647,9 @@ export class TerrainLayer {
     const px = lonDeg - ox;
     const py = latDeg - oy;
 
-    for (let i = 0; i < indices.length; i += 3) {
+    const triCount = triangles === null ? indices.length / 3 : triangles.length;
+    for (let t = 0; t < triCount; t++) {
+      const i = triangles === null ? t * 3 : triangles[t];
       const a = indices[i]     * 3;
       const b = indices[i + 1] * 3;
       const c = indices[i + 2] * 3;
@@ -381,13 +671,12 @@ export class TerrainLayer {
 
       const u = (d11 * d20 - d01 * d21) / denom;
       const v = (d00 * d21 - d01 * d20) / denom;
-      const eps = -1e-6;
-      if (u < eps || v < eps || u + v > 1 - eps) continue;
+      if (u < epsilon || v < epsilon || u + v > 1 - epsilon) continue;
 
       const h = llh[a + 2] + u * (llh[b + 2] - llh[a + 2]) + v * (llh[c + 2] - llh[a + 2]);
-      return Number.isFinite(h) ? h : 0;
+      return Number.isFinite(h) ? h : null;
     }
-    return 0; // point fell in a skirt seam — approximate as ellipsoid level
+    return null; // point fell in a skirt seam / outside the mesh
   }
 
   /** Per-vertex [lonDeg, latDeg, heightM] triplets derived from positions. */
@@ -524,6 +813,8 @@ interface TerrainCacheEntry {
   bounds: TerrainTileBounds;
   /** Lazily built per-vertex [lonDeg, latDeg, heightM] triplets. */
   llh: Float64Array | null;
+  /** Lazily built per-boundary triangle lists (crack stitching). */
+  edgeTris: EdgeTriangleLists | null;
 }
 
 /** @internal CPU-side tile bounds used by the culling / LOD tests. */
@@ -536,6 +827,34 @@ interface TerrainTileVolume {
   worldSize: number;
 }
 
+/** @internal Tile edge names (both schemes count y northward). */
+type EdgeDirection = 'west' | 'east' | 'south' | 'north';
+
+/** @internal Resolved stitch source for one tile edge. */
+interface StitchNeighbour {
+  /** Neighbour mesh to sample heights from; `null` = nothing to stitch against. */
+  entry: TerrainCacheEntry | null;
+  /**
+   * Neighbour boundary facing the edge (edge-strip scan), or `null` when the
+   * coarse mesh spans past the shared line (full-mesh scan).
+   */
+  side: EdgeDirection | null;
+}
+
+/** @internal Per-tile stitch result, reused until the neighbour signature changes. */
+interface StitchCacheEntry {
+  signature: string;
+  positions: Float32Array | null;
+}
+
+/** @internal Per-boundary triangle start indices along a tile's four edges. */
+interface EdgeTriangleLists {
+  west: number[];
+  east: number[];
+  south: number[];
+  north: number[];
+}
+
 /** Tile bounds in degrees. */
 export interface TerrainTileBounds {
   west: number;
@@ -544,13 +863,31 @@ export interface TerrainTileBounds {
   north: number;
 }
 
-/** Tile selected for rendering (own mesh, or an ancestor's — see `ancestorLevels`). */
+/**
+ * Tile selected for rendering (own mesh, or an ancestor's — see
+ * `ancestorLevels`), plus the crack-stitching result for this frame's
+ * rendered neighbourhood.
+ */
 export interface TerrainRenderTile {
   z: number;
   x: number;
   y: number;
   /** Levels between this tile and the mesh actually rendered (0 = own mesh). */
   ancestorLevels: number;
+  /**
+   * Render positions with edge vertices snapped onto the actually-rendered
+   * coarser neighbours (crack stitching). `null` = nothing was snapped; use
+   * the mesh positions verbatim. Always a copy — the cached mesh in the LRU
+   * is never modified (sampleHeight / picking keep the raw geometry).
+   */
+  stitchedPositions: Float32Array | null;
+  /**
+   * Signature of the resolved coarse-neighbour set the stitched positions
+   * were computed from (`"westKey|eastKey|southKey|northKey"`, `-` = no
+   * coarse neighbour on that edge). Consumers must fold this into geometry
+   * cache keys so a changed neighbourhood rebuilds the primitive.
+   */
+  stitchSignature: string;
 }
 
 export interface TerrainLayerOptions {
@@ -600,6 +937,39 @@ const MAX_SELECTED_TILES = 512;
 
 /** Cap on the CPU bounding-volume cache. */
 const MAX_VOLUMES = 8192;
+
+/**
+ * Edge / vertex-group tolerance as a fraction of the tile span. Float32
+ * position roundoff puts a vertex ~1e-5 of a span off its exact boundary
+ * while the grid spacing is ~1/64 of the span, so anything in between
+ * classifies cleanly.
+ */
+const EDGE_EPSILON = 2e-3;
+
+/**
+ * Barycentric tolerance for stitch samples: boundary vertices may sit a
+ * float32 hair outside the neighbour's edge triangles, so the stitch scan
+ * tolerates points ~0.2 % beyond a triangle (heights extrapolate linearly;
+ * the error is negligible). Plain {@link sampleHeight} keeps the strict
+ * default of `-1e-6`.
+ */
+const STITCH_BARYCENTRIC_EPSILON = -2e-3;
+
+/** Cap on the stitch-result cache. */
+const STITCH_CACHE_CAPACITY = 512;
+
+/** Shared "nothing to stitch against" resolution. */
+const NO_STITCH_NEIGHBOUR: StitchNeighbour = { entry: null, side: null };
+
+/** `"{z}/{x}/{y}"` render-tile key (same format as the mesh cache keys). */
+function renderTileKey(z: number, x: number, y: number): string {
+  return `${z}/${x}/${y}`;
+}
+
+/** Render-set entry before its stitch result is computed for this frame. */
+function emptyRenderTile(z: number, x: number, y: number, ancestorLevels: number): TerrainRenderTile {
+  return { z, x, y, ancestorLevels, stitchedPositions: null, stitchSignature: '' };
+}
 
 /** WGS84 polar / equatorial ratio (matches EllipsoidGeometry normalisation). */
 const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
