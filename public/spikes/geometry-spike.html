@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Geometry Spike - GeometryPipeline / Polyline / Polygon / Rectangle</title>
+  <style>
+    body { margin: 0; background: #101418; color: #d8dee6; font: 13px/1.5 Consolas, monospace; }
+    h1 { font-size: 15px; padding: 10px 14px; margin: 0; color: #7ec8ff; }
+    #summary { padding: 0 14px 10px; white-space: pre-wrap; }
+    #summary.ok { color: #6ee787; }
+    #summary.bad { color: #ff7b72; }
+    canvas { display: block; margin: 0 auto 20px; background: #171c22; border: 1px solid #2a323c; }
+  </style>
+</head>
+<body>
+  <h1>Geometry spike — earcut 三角化 / 线宽展开 / 球面 patch（纯逻辑，无 GPU）</h1>
+  <div id="summary">运行中…</div>
+  <canvas id="c" width="920" height="1000"></canvas>
+
+  <script type="module">
+    import { GeometryPipeline } from '/src/geometry/GeometryPipeline.ts';
+    import { PolylineGeometry } from '/src/geometry/PolylineGeometry.ts';
+    import { PolygonGeometry, earcut2D } from '/src/geometry/PolygonGeometry.ts';
+    import { RectangleGeometry } from '/src/geometry/RectangleGeometry.ts';
+    import { Cartesian3 } from '/src/math/Cartesian3.ts';
+    import { Matrix4 } from '/src/math/Matrix4.ts';
+
+    // ── 断言工具 ─────────────────────────────────────────────────────────────
+    const results = [];
+    function check(name, cond, detail = '') {
+      results.push(!!cond);
+      console.log(`${cond ? '%cPASS' : '%cFAIL'}%c  ${name}${detail ? '  — ' + detail : ''}`,
+        `color:${cond ? '#6ee787' : '#ff7b72'};font-weight:bold`, 'color:inherit');
+    }
+    function approx(a, b, eps) { return Math.abs(a - b) <= (eps ?? 1e-6); }
+
+    // 归一化 ECEF（赤道半径 = 1），与引擎世界空间一致
+    function latLon(lonDeg, latDeg, heightNorm = 0) {
+      const lon = lonDeg * Math.PI / 180, lat = latDeg * Math.PI / 180;
+      const a = 6378137.0, b = 6356752.3142, e2 = 1 - (b * b) / (a * a);
+      const N = a / Math.sqrt(1 - e2 * Math.sin(lat) ** 2);
+      const h = heightNorm * a;
+      return new Cartesian3(
+        ((N + h) * Math.cos(lat) * Math.cos(lon)) / a,
+        ((N + h) * Math.cos(lat) * Math.sin(lon)) / a,
+        ((N * (1 - e2) + h) * Math.sin(lat)) / a
+      );
+    }
+    function toLonLat(p) {
+      const [x, y, z] = p.length !== undefined ? p : [p.x, p.y, p.z];
+      const r = Math.hypot(x, y, z);
+      return [
+        Math.atan2(y, x) * 180 / Math.PI,
+        Math.asin(Math.max(-1, Math.min(1, z / r))) * 180 / Math.PI,
+      ];
+    }
+    function radiusOf(p) {
+      const [x, y, z] = p.length !== undefined ? p : [p.x, p.y, p.z];
+      return Math.hypot(x, y, z);
+    }
+    function deinterleave(vertices) {
+      const n = vertices.length / 8;
+      const pos = [], nrm = [], uv = [];
+      for (let i = 0; i < n; i++) {
+        pos.push([vertices[i*8], vertices[i*8+1], vertices[i*8+2]]);
+        nrm.push([vertices[i*8+3], vertices[i*8+4], vertices[i*8+5]]);
+        uv.push([vertices[i*8+6], vertices[i*8+7]]);
+      }
+      return { pos, nrm, uv };
+    }
+
+    // ── 画板工具 ─────────────────────────────────────────────────────────────
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    function panel(col, row, title, drawFn) {
+      const w = 440, h = 230;
+      const x = 14 + col * (w + 12);
+      const y = 14 + row * (h + 12);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = '#1b2229';
+      ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = '#2a323c';
+      ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+      ctx.fillStyle = '#7ec8ff';
+      ctx.font = '12px Consolas, monospace';
+      ctx.fillText(title, 10, 18);
+      ctx.beginPath(); ctx.rect(0, 26, w, h - 26); ctx.clip();
+      ctx.translate(0, 26);
+      drawFn({ w, h: h - 26 });
+      ctx.restore();
+    }
+    function fitTransform(points, w, h, pad = 20) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const [x, y] of points) {
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      }
+      const sx = (w - 2 * pad) / Math.max(1e-9, maxX - minX);
+      const sy = (h - 2 * pad) / Math.max(1e-9, maxY - minY);
+      const s = Math.min(sx, sy);
+      const ox = pad + ((w - 2 * pad) - (maxX - minX) * s) / 2;
+      const oy = pad + ((h - 2 * pad) - (maxY - minY) * s) / 2;
+      return ([x, y]) => [ox + (x - minX) * s, h - (oy + (y - minY) * s)]; // y 翻转（数学坐标向上）
+    }
+    const TRI_COLORS = ['#e05c5c', '#e0a45c', '#c9e05c', '#5ce08a', '#5cd3e0', '#5c7ce0', '#a45ce0', '#e05cc9'];
+    function drawTriangles(tf, points, indices, alpha = 0.45) {
+      const triCount = indices.length / 3;
+      for (let t = 0; t < triCount; t++) {
+        ctx.beginPath();
+        for (let k = 0; k < 3; k++) {
+          const p = tf(points[indices[t * 3 + k]]);
+          k === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1]);
+        }
+        ctx.closePath();
+        ctx.fillStyle = TRI_COLORS[t % TRI_COLORS.length];
+        ctx.globalAlpha = alpha;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = TRI_COLORS[t % TRI_COLORS.length];
+        ctx.stroke();
+      }
+    }
+    function drawRing(tf, points, color = '#ffffff') {
+      ctx.beginPath();
+      points.forEach((p, i) => {
+        const q = tf(p);
+        i === 0 ? ctx.moveTo(q[0], q[1]) : ctx.lineTo(q[0], q[1]);
+      });
+      ctx.closePath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = color;
+      for (const p of points) {
+        const q = tf(p);
+        ctx.fillRect(q[0] - 1.5, q[1] - 1.5, 3, 3);
+      }
+      ctx.lineWidth = 1;
+    }
+
+    // ════════════════════════════ 1. GeometryPipeline 纯逻辑自测 ═══════════════
+    {
+      // interleave 布局：[px,py,pz,nx,ny,nz,u,v]（与 EllipsoidGeometry 一致，stride 8）
+      const pos = new Float32Array([1, 2, 3, 4, 5, 6]);
+      const nrm = new Float32Array([0, 0, 1, 0, 1, 0]);
+      const uv = new Float32Array([0.1, 0.2, 0.3, 0.4]);
+      const interleaved = GeometryPipeline.interleave(pos, nrm, uv);
+      const expect = [1,2,3,0,0,1,0.1,0.2, 4,5,6,0,1,0,0.3,0.4];
+      check('interleave: stride=8 且布局 [p3,n3,uv2]',
+        interleaved.length === 16 && expect.every((v, i) => approx(interleaved[i], v)));
+
+      // computeNormals：xy 平面 CCW 四边形 → +Z
+      const qPos = new Float32Array([0,0,0, 1,0,0, 1,1,0, 0,1,0]);
+      const qIdx = new Uint32Array([0,1,2, 0,2,3]);
+      const qNrm = GeometryPipeline.computeNormals(qPos, qIdx);
+      check('computeNormals: CCW 面 → (0,0,1)',
+        [0, 3, 6, 9].every(o => approx(qNrm[o], 0) && approx(qNrm[o+1], 0) && approx(qNrm[o+2], 1)));
+
+      // transformPositions：单位阵不变；平移矩阵生效（就地）
+      const tPos = new Float32Array([1, 0, 0, 0, 1, 0]);
+      GeometryPipeline.transformPositions(tPos, Matrix4.IDENTITY);
+      const t2 = new Float32Array([1, 0, 0]);
+      GeometryPipeline.transformPositions(t2, Matrix4.fromTranslation(new Cartesian3(10, 20, 30)));
+      check('transformPositions: IDENTITY 不变 / 平移正确（就地）',
+        approx(tPos[0], 1) && approx(tPos[1], 0) && approx(tPos[4], 1) &&
+        approx(t2[0], 11) && approx(t2[1], 20) && approx(t2[2], 30));
+    }
+
+    // ════════════════════════════ 2. earcut2D 平面三角化 ═══════════════════════
+    const ringTriangle = [[10, 10], [90, 20], [40, 90]];
+    const ringPentagon = [[50, 5], [95, 40], [78, 95], [22, 95], [5, 40]];
+    const ringStar = [[50,0],[61,35],[98,35],[68,57],[79,95],[50,72],[21,95],[32,57],[2,35],[39,35]];
+    const ringSquare = [[0,0],[100,0],[100,100],[0,100]];
+    const ringHole = [[35,35],[65,35],[65,65],[35,65]];
+
+    {
+      const tri = earcut2D(ringTriangle.flat());
+      check('earcut2D: 三角形 → 1 个三角形', tri.length === 3, `indices=${tri.length}`);
+
+      const pent = earcut2D(ringPentagon.flat());
+      check('earcut2D: 五边形 → 3 个三角形 (n-2)', pent.length === 9, `indices=${pent.length}`);
+
+      const star = earcut2D(ringStar.flat());
+      check('earcut2D: 凹多边形(星形,10点) → 8 个三角形', star.length === 24, `indices=${star.length}`);
+
+      // 洞：外环方形 + 内环方形 → n + 2h - 2 = 8 个三角形（桥接引入额外顶点）
+      const holeData = [...ringSquare.flat(), ...ringHole.flat()];
+      const withHole = earcut2D(holeData, [4], 2);
+      check('earcut2D: 带洞方形 → 8 个三角形 (n+2h-2)', withHole.length === 24, `indices=${withHole.length}`);
+
+      // 反向绕环输入（CW）结果一致
+      const pentCW = earcut2D([...ringPentagon].reverse().flat());
+      check('earcut2D: 输入绕向无关（CW 五边形 → 3 三角形）', pentCW.length === 9);
+    }
+
+    panel(0, 0, 'earcut2D: 三角形', () => {
+      const tf = fitTransform(ringTriangle, 440, 204);
+      drawTriangles(tf, ringTriangle, earcut2D(ringTriangle.flat()));
+      drawRing(tf, ringTriangle);
+    });
+    panel(1, 0, 'earcut2D: 五边形', () => {
+      const tf = fitTransform(ringPentagon, 440, 204);
+      drawTriangles(tf, ringPentagon, earcut2D(ringPentagon.flat()));
+      drawRing(tf, ringPentagon);
+    });
+    panel(0, 1, 'earcut2D: 凹多边形（星形）', () => {
+      const tf = fitTransform(ringStar, 440, 204);
+      drawTriangles(tf, ringStar, earcut2D(ringStar.flat()), 0.3);
+      drawRing(tf, ringStar);
+    });
+    panel(1, 1, 'earcut2D: 带洞（外环方形+内环方形）', () => {
+      const data = [...ringSquare.flat(), ...ringHole.flat()];
+      const idx = earcut2D(data, [4], 2);
+      const pts = [...ringSquare, ...ringHole];
+      const tf = fitTransform(pts, 440, 204);
+      drawTriangles(tf, pts, idx, 0.35);
+      drawRing(tf, ringSquare);
+      drawRing(tf, ringHole, '#ffd866');
+    });
+
+    // ════════════════════════════ 3. PolygonGeometry（球面凹多边形） ════════════
+    {
+      // 凹六边形（示意），不闭合（引擎输入约定）
+      const ring = [[100, 20], [104, 22], [106, 20], [108, 24], [104, 26], [100, 24]];
+      const cartRing = ring.map(([lo, la]) => latLon(lo, la));
+      const geo = PolygonGeometry.fromCartesianPositions(cartRing);
+
+      console.log(`[PolygonGeometry] vertexCount=${geo.vertexCount} indexCount=${geo.indexCount} triangles=${geo.indexCount / 3}`);
+      check('PolygonGeometry: 顶点数 = 环顶点数 (6)', geo.vertexCount === 6);
+      check('PolygonGeometry: 三角形数 = n-2 (4)', geo.indexCount === 12);
+
+      const d = deinterleave(geo.vertices);
+      const radiusOk = d.pos.every(p => approx(radiusOf(p), 1, 1e-5));
+      check('PolygonGeometry: height=0 时顶点半径 ≈ 1（球面还原）', radiusOk);
+
+      const outward = d.nrm.every((n, i) => {
+        const r = radiusOf(d.pos[i]);
+        return approx((n[0]*d.pos[i][0] + n[1]*d.pos[i][1] + n[2]*d.pos[i][2]) / r, 1, 1e-4);
+      });
+      check('PolygonGeometry: normal 朝外（n·p̂ ≈ 1）', outward);
+
+      // 首三角形绕向：与径向同向（外侧可见，backface culling 正确）
+      const [a, b, c] = [d.pos[geo.indices[0]], d.pos[geo.indices[1]], d.pos[geo.indices[2]]];
+      const e1 = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
+      const e2 = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
+      const n = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
+      const centroid = [(a[0]+b[0]+c[0])/3, (a[1]+b[1]+c[1])/3, (a[2]+b[2]+c[2])/3];
+      const dot = n[0]*centroid[0] + n[1]*centroid[1] + n[2]*centroid[2];
+      check('PolygonGeometry: 三角形外侧绕向（法线·质心 > 0）', dot > 0, `dot=${dot.toExponential(3)}`);
+
+      // height 抬升
+      const lifted = PolygonGeometry.fromCartesianPositions(cartRing, { height: 0.05 });
+      const dL = deinterleave(lifted.vertices);
+      check('PolygonGeometry: height=0.05 → 半径 ≈ 1.05', approx(radiusOf(dL.pos[0]), 1.05, 1e-5));
+
+      // 绘制
+      panel(0, 2, `PolygonGeometry: 球面凹多边形 (${geo.vertexCount}v / ${geo.indexCount}i)`, () => {
+        const pts = d.pos.map(p => toLonLat(p));
+        const tf = fitTransform(pts, 440, 204);
+        drawTriangles(tf, pts, Array.from(geo.indices), 0.4);
+        drawRing(tf, ring);
+      });
+    }
+
+    // ════════════════════════════ 4. PolylineGeometry（线宽展开） ═══════════════
+    {
+      const line = [[100, 30], [104, 34], [108, 31], [112, 35], [116, 32], [120, 34]];
+      const cartLine = line.map(([lo, la]) => latLon(lo, la));
+      const geo = PolylineGeometry.fromCartesianPositions(cartLine, { width: 0.05 });
+
+      console.log(`[PolylineGeometry] vertexCount=${geo.vertexCount} indexCount=${geo.indexCount} (期望 ${4 * (line.length - 1)}v / ${6 * (line.length - 1)}i)`);
+      check('PolylineGeometry: 每段 4 顶点', geo.vertexCount === 4 * (line.length - 1));
+      check('PolylineGeometry: 每段 2 三角形', geo.indexCount === 6 * (line.length - 1));
+
+      const d = deinterleave(geo.vertices);
+      const vOk = d.uv.every(u => u[1] === 0 || u[1] === 1);
+      const uMono = d.uv.every((u, i) => i === 0 || u[0] >= d.uv[i - 1][0] - 1e-9);
+      check('PolylineGeometry: v ∈ {0,1}，u 沿线长单调递增', vOk && uMono);
+
+      const degenerate = PolylineGeometry.fromCartesianPositions([cartLine[0]]);
+      check('PolylineGeometry: 少于 2 点 → 空 buffer', degenerate.vertexCount === 0);
+
+      panel(1, 2, `PolylineGeometry: 线宽展开 (${geo.vertexCount}v / ${geo.indexCount}i, width=0.05)`, () => {
+        const pts = d.pos.map(p => toLonLat(p));
+        const tf = fitTransform([...pts, ...line], 440, 204);
+        drawTriangles(tf, pts, Array.from(geo.indices), 0.35);
+        ctx.beginPath();
+        line.forEach((p, i) => { const q = tf(p); i === 0 ? ctx.moveTo(q[0], q[1]) : ctx.lineTo(q[0], q[1]); });
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.stroke();
+        ctx.setLineDash([]); ctx.lineWidth = 1;
+      });
+    }
+
+    // ════════════════════════════ 5. RectangleGeometry（球面 patch） ════════════
+    {
+      const geo = RectangleGeometry.fromDegrees(96, 18, 112, 30, { subdivisions: 8 });
+      console.log(`[RectangleGeometry] vertexCount=${geo.vertexCount} indexCount=${geo.indexCount} (期望 81v / 384i)`);
+      check('RectangleGeometry: 顶点数 = (subdiv+1)^2 (81)', geo.vertexCount === 81);
+      check('RectangleGeometry: 索引数 = subd^2*6 (384)', geo.indexCount === 384);
+
+      const d = deinterleave(geo.vertices);
+      const onSurface = d.pos.every(p => radiusOf(p) > 0.99 && radiusOf(p) <= 1.000001);
+      const normalsUp = d.nrm.every((n, i) => {
+        const r = radiusOf(d.pos[i]);
+        return (n[0]*d.pos[i][0] + n[1]*d.pos[i][1] + n[2]*d.pos[i][2]) / r > 0.99;
+      });
+      check('RectangleGeometry: 顶点位于归一化球面，法线近似朝外', onSurface && normalsUp);
+
+      const lifted = RectangleGeometry.fromDegrees(96, 18, 112, 30, { subdivisions: 1, height: 0.01 });
+      // height 为 geodetic 高度（沿法线）：lat 30 处径向半径 ≈ 1.0091
+      check('RectangleGeometry: height=0.01 → lat30 处径向半径 ≈ 1.0091',
+        approx(radiusOf(deinterleave(lifted.vertices).pos[0]), 1.009137, 1e-4));
+
+      panel(0, 3, `RectangleGeometry: 96E-112E / 18N-30N (${geo.vertexCount}v / ${geo.indexCount}i)`, () => {
+        const pts = d.pos.map(p => toLonLat(p));
+        const tf = fitTransform(pts, 440, 204);
+        drawTriangles(tf, pts, Array.from(geo.indices), 0.25);
+        ctx.strokeStyle = '#5cd3e0';
+        for (let row = 0; row < 9; row++) {
+          ctx.beginPath();
+          for (let col = 0; col < 9; col++) {
+            const q = tf(pts[row * 9 + col]);
+            col === 0 ? ctx.moveTo(q[0], q[1]) : ctx.lineTo(q[0], q[1]);
+          }
+          ctx.stroke();
+        }
+        for (let col = 0; col < 9; col++) {
+          ctx.beginPath();
+          for (let row = 0; row < 9; row++) {
+            const q = tf(pts[row * 9 + col]);
+            row === 0 ? ctx.moveTo(q[0], q[1]) : ctx.lineTo(q[0], q[1]);
+          }
+          ctx.stroke();
+        }
+      });
+    }
+
+    // ════════════════════════════ 6. 布局一致性：Primitive 对照 ════════════════
+    {
+      // 与 Primitive vertex state / EllipsoidGeometry.createInterleavedBuffer 相同布局
+      const g = GeometryPipeline.interleave(
+        new Float32Array([1, 0, 0]),
+        new Float32Array([1, 0, 0]),
+        new Float32Array([0, 0])
+      );
+      check('布局一致性: stride=8/32B，offset p=0 n=12 uv=24',
+        g.length === 8 && approx(g[6], 0) && approx(g[7], 0));
+
+      panel(1, 3, '布局: [p(0-11) n(12-23) uv(24-31)] × stride 32B', () => {
+        ctx.fillStyle = '#d8dee6';
+        ctx.font = '13px Consolas, monospace';
+        const lines = [
+          'vertex = px py pz | nx ny nz | u v',
+          'bytes  = 0..11    | 12..23   | 24..31',
+          'arrayStride = 32 bytes (8 floats)',
+          'indices = Uint32Array (triangle-list)',
+          '',
+          '与 Primitive vertex state 一致:',
+          '  loc0 float32x3 offset 0   (position)',
+          '  loc1 float32x3 offset 12  (normal)',
+          '  loc2 float32x2 offset 24  (uv)',
+        ];
+        lines.forEach((s, i) => ctx.fillText(s, 14, 24 + i * 20));
+      });
+    }
+
+    // ── 汇总 ────────────────────────────────────────────────────────────────
+    const passed = results.filter(Boolean).length;
+    const total = results.length;
+    const summary = document.getElementById('summary');
+    summary.textContent = `测试: ${passed}/${total} 通过 — 详见 console`;
+    summary.className = passed === total ? 'ok' : 'bad';
+    console.log(`%c${passed === total ? 'ALL TESTS PASSED' : 'FAILURES PRESENT'} (${passed}/${total})`,
+      `color:${passed === total ? '#6ee787' : '#ff7b72'};font-weight:bold;font-size:14px`);
+  </script>
+</body>
+</html>

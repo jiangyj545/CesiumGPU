@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Entity Spike - Entity / EntityCollection / GeoJsonDataSource（纯逻辑，无 GPU）</title>
+  <style>
+    body { margin: 0; background: #101418; color: #d8dee6; font: 13px/1.6 Consolas, monospace; }
+    h1 { font-size: 15px; padding: 10px 14px; margin: 0; color: #7ec8ff; }
+    #summary { padding: 0 14px 12px; white-space: pre-wrap; font-weight: bold; }
+    #summary.ok { color: #6ee787; }
+    #summary.bad { color: #ff7b72; }
+    #log { padding: 0 14px 20px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Entity spike — Entity / EntityCollection / GeoJsonDataSource（纯逻辑，无 GPU）</h1>
+  <div id="summary">运行中…</div>
+  <div id="log"></div>
+
+  <script type="module">
+    import { GeoJsonDataSource } from '/src/dataSource/GeoJsonDataSource.ts';
+    import { Entity } from '/src/dataSource/Entity.ts';
+    import { EntityCollection } from '/src/dataSource/EntityCollection.ts';
+    import { Cartesian3 } from '/src/math/Cartesian3.ts';
+
+    // ── 断言工具 ─────────────────────────────────────────────────────────
+    let passCount = 0, failCount = 0;
+    const logEl = document.getElementById('log');
+    function check(name, cond, detail = '') {
+      const ok = !!cond;
+      ok ? passCount++ : failCount++;
+      const line = `${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`;
+      logEl.innerHTML += `<span style="color:${ok ? '#6ee787' : '#ff7b72'};font-weight:${ok ? 'normal' : 'bold'}">${line}</span>\n`;
+      console.log(`${ok ? '%cPASS' : '%cFAIL'}%c  ${name}`, `color:${ok ? '#6ee787' : '#ff7b72'}`, 'color:inherit');
+    }
+    function approx(a, b, eps = 1e-9) { return Math.abs(a - b) <= eps; }
+
+    // ── 内置测试 FeatureCollection（合成数据） ───────────────────────────
+    // 含 Point / LineString / Polygon(带洞) / MultiPoint
+    const FC = {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: { name: '北京站', style: { color: '#ff0000', pixelSize: 14 } },
+          geometry: { type: 'Point', coordinates: [116, 39] }
+        },
+        {
+          type: 'Feature',
+          properties: { name: '路线A', style: { color: [0, 128, 255, 200], width: 3 } },
+          geometry: {
+            type: 'LineString',
+            coordinates: [[116, 39], [117, 39], [118, 39], [119, 39]]
+          }
+        },
+        {
+          type: 'Feature',
+          properties: { name: '环状区域', style: { color: '#00ff00' } },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [[100.0, 30.0], [104.0, 30.0], [104.0, 34.0], [100.0, 34.0], [100.0, 30.0]],
+              [[101.0, 31.0], [103.0, 31.0], [103.0, 33.0], [101.0, 33.0], [101.0, 31.0]]
+            ]
+          }
+        },
+        {
+          type: 'Feature',
+          properties: { name: '站点' },
+          geometry: { type: 'MultiPoint', coordinates: [[110, 20], [120, 25]] }
+        }
+      ]
+    };
+
+    try {
+      // ── 加载 ───────────────────────────────────────────────────────────
+      const changeEvents = [];
+      const ds = new GeoJsonDataSource('placeholder');
+
+      const loaded = await GeoJsonDataSource.load(FC, { name: 'Spike' });
+      const ds2 = loaded; // 同一实例
+      // load 内部创建新集合，remove/removeAll 事件在加载后的集合上监听
+      ds2.entities.collectionChanged.addListener((added, removed, moved) => {
+        changeEvents.push({ added, removed, moved });
+      });
+      check('load 返回 GeoJsonDataSource 实例', ds2 instanceof GeoJsonDataSource);
+      check('options.name 生效 (ds.name === "Spike")', ds2.name === 'Spike', `name=${ds2.name}`);
+      check('load 使用独立的新集合', ds2.entities !== ds.entities);
+
+      const entities = [...ds2.entities];
+      check('实体数 = 5 (Point 1 + LineString 1 + Polygon 1 + MultiPoint 2)',
+        entities.length === 5, `got ${entities.length}`);
+
+      // collectionChanged.add 事件：用受控集合验证（每次 add 触发一次）
+      const colA = new EntityCollection();
+      const addEvents = [];
+      colA.collectionChanged.addListener((added, removed, moved) => addEvents.push({ added, removed, moved }));
+      colA.add(new Entity()); colA.add(new Entity()); colA.add(new Entity());
+      const totalAdded = addEvents.reduce((n, e) => n + e.added.length, 0);
+      check('collectionChanged add 事件 (每次 add 触发, added=[entity])',
+        addEvents.length === 3 && totalAdded === 3 && addEvents.every((e) => e.added.length === 1),
+        `events=${addEvents.length}, added=${totalAdded}`);
+      check('collectionChanged 参数 (added/removed/moved 数组, moved 为空)',
+        addEvents.every((e) => Array.isArray(e.added) && Array.isArray(e.removed) && Array.isArray(e.moved) && e.moved.length === 0));
+
+      // ── 几何类型 ───────────────────────────────────────────────────────
+      const points    = entities.filter((e) => e.point);
+      const polylines = entities.filter((e) => e.polyline);
+      const polygons  = entities.filter((e) => e.polygon);
+      check('point 实体数 = 3 (Point + MultiPoint×2)', points.length === 3, `got ${points.length}`);
+      check('polyline 实体数 = 1', polylines.length === 1, `got ${polylines.length}`);
+      check('polygon 实体数 = 1', polygons.length === 1, `got ${polygons.length}`);
+
+      const byName = (n) => entities.find((e) => e.name === n);
+      const bj = byName('北京站');
+      const route = byName('路线A');
+      const ring = byName('环状区域');
+      const site0 = byName('站点 0');
+      const site1 = byName('站点 1');
+      check('properties.name → entity.name', !!bj && !!route && !!ring && !!site0 && !!site1);
+
+      // ── 坐标换算：归一化 ECEF，|p| = 1 (误差 < 1e-9) ────────────────────
+      const fromDegreesMeters = Cartesian3.fromDegrees(116, 39);
+      logEl.innerHTML += `<span style="color:#9ab">info  fromDegrees(116,39) 米制模长 = ${Cartesian3.magnitude(fromDegreesMeters).toFixed(3)} m (需归一化)</span>\n`;
+
+      const mag = (c) => Cartesian3.magnitude(c);
+      check('北京站 position 模长 = 1 (误差 <1e-9)', bj.position && approx(mag(bj.position), 1.0, 1e-9),
+        `|p|=${bj.position ? mag(bj.position).toExponential(3) : 'undefined'}`);
+      check('站点 0 position 模长 = 1', site0.position && approx(mag(site0.position), 1.0, 1e-9));
+      check('站点 1 position 模长 = 1', site1.position && approx(mag(site1.position), 1.0, 1e-9));
+
+      // 与 Cartesian3.fromDegrees(...).normalize 逐分量一致
+      const expected = Cartesian3.normalize(Cartesian3.fromDegrees(116, 39), new Cartesian3());
+      check('北京站 position 分量 = normalize(fromDegrees(116,39))',
+        approx(bj.position.x, expected.x, 1e-12) &&
+        approx(bj.position.y, expected.y, 1e-12) &&
+        approx(bj.position.z, expected.z, 1e-12),
+        `(${bj.position.x.toExponential(6)}, ${bj.position.y.toExponential(6)}, ${bj.position.z.toExponential(6)})`);
+
+      // ── style 覆盖 ─────────────────────────────────────────────────────
+      check('point 颜色 #ff0000 → red=1,green=0,blue=0',
+        bj.point.color.red === 1 && bj.point.color.green === 0 && bj.point.color.blue === 0);
+      check('point pixelSize 覆盖 = 14', bj.point.pixelSize === 14, `got ${bj.point.pixelSize}`);
+      check('point 附带 label (text=name)', bj.label && bj.label.text === '北京站');
+
+      const pc = route.polyline.color;
+      check('polyline 颜色 [0,128,255,200] → 字节换算',
+        route.polyline.positions.length === 4 &&
+        pc.red === 0 && approx(pc.green, 128 / 255, 1e-6) && approx(pc.blue, 1, 1e-6) && approx(pc.alpha, 200 / 255, 1e-6),
+        `width=${route.polyline.width}, positions=${route.polyline.positions.length}`);
+      check('polyline width 覆盖 = 3', route.polyline.width === 3);
+
+      check('polyline positions 模长均为 1', route.polyline.positions.every((p) => approx(mag(p), 1.0, 1e-9)));
+
+      // ── Polygon 外环/内环 ──────────────────────────────────────────────
+      const hier = ring.polygon.hierarchy;
+      check('polygon 外环 → hierarchy.positions (5 点)', hier.positions.length === 5, `got ${hier.positions.length}`);
+      check('polygon 内环 → hierarchy.holes (1 洞, 5 点)',
+        Array.isArray(hier.holes) && hier.holes.length === 1 && hier.holes[0].length === 5,
+        `holes=${hier.holes ? hier.holes.length : 'undefined'}`);
+      check('polygon 颜色 #00ff00 → green=1', ring.polygon.color.green === 1 && ring.polygon.color.red === 0);
+      check('polygon positions 模长均为 1',
+        hier.positions.every((p) => approx(mag(p), 1.0, 1e-9)) &&
+        hier.holes[0].every((p) => approx(mag(p), 1.0, 1e-9)));
+
+      // ── EntityCollection API ───────────────────────────────────────────
+      check('getById 命中', ds2.entities.getById(bj.id) === bj);
+      check('for...of 迭代数量一致', [...ds2.entities].length === 5);
+
+      changeEvents.length = 0;
+      check('remove 命中返回 true', ds2.entities.remove(bj) === true);
+      check('remove 后数量 = 4', ds2.entities.length === 4);
+      check('remove 重复返回 false', ds2.entities.remove(bj) === false);
+      check('remove 触发 collectionChanged(removed=1)',
+        changeEvents.length === 1 && changeEvents[0].removed.length === 1 && changeEvents[0].removed[0] === bj);
+      check('getById 移除后未命中', ds2.entities.getById(bj.id) === undefined);
+
+      changeEvents.length = 0;
+      ds2.entities.removeAll();
+      check('removeAll 清空且一次性触发 (removed=4)',
+        ds2.entities.length === 0 && changeEvents.length === 1 && changeEvents[0].removed.length === 4);
+      changeEvents.length = 0;
+      ds2.entities.removeAll();
+      check('removeAll 空集合再调用不触发事件', changeEvents.length === 0);
+
+      // add(entity) 与 add(options) 双形态 + 重复 id 抛错
+      const col = new EntityCollection();
+      const e1 = col.add(new Entity({ id: 'fixed-id', name: 'manual' }));
+      const e2 = col.add({ name: 'from-options' });
+      check('add(entity|options) 双形态', col.length === 2 && e1.id === 'fixed-id' && !!e2.id && e1.id !== e2.id);
+      let threw = false;
+      try { col.add(new Entity({ id: 'fixed-id' })); } catch { threw = true; }
+      check('重复 id add 抛错', threw);
+
+      // ── definitionChanged / Event ──────────────────────────────────────
+      const ent = new Entity({ name: '初始' });
+      const changes = [];
+      ent.definitionChanged.addListener((e, prop) => changes.push(`${e.id}:${prop}`));
+      ent.position = expected;
+      ent.name = '改名';
+      ent.show = false;
+      ent.show = false; // 同值不触发
+      check('definitionChanged 触发 (position/name/show)',
+        changes.length === 3 && changes[0].endsWith(':position') && changes[1].endsWith(':name') && changes[2].endsWith(':show'),
+        changes.join(', '));
+
+      let calls = 0;
+      const listener = () => calls++;
+      // 用全新实体的 Event 验证生命周期，避免残留监听器被无参 raiseEvent 触发
+      const evt = new Entity().definitionChanged;
+      evt.addListener(listener);
+      evt.raiseEvent();
+      const removedOk = evt.removeCallback(listener);
+      evt.raiseEvent();
+      check('Event addListener/removeCallback/raiseEvent', removedOk === true && calls === 1);
+      check('entity 默认 id 为 uuid 格式',
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ent.id), ent.id);
+
+      // ── 汇总 ───────────────────────────────────────────────────────────
+      const summary = document.getElementById('summary');
+      if (failCount === 0) {
+        summary.textContent = `ALL PASS — ${passCount} 项断言全部通过`;
+        summary.className = 'ok';
+      } else {
+        summary.textContent = `FAILED — ${failCount} 项失败 / ${passCount + failCount} 项断言`;
+        summary.className = 'bad';
+      }
+    } catch (err) {
+      const summary = document.getElementById('summary');
+      summary.textContent = `FAILED — 未捕获异常: ${err && err.message}`;
+      summary.className = 'bad';
+      console.error(err);
+    }
+  </script>
+</body>
+</html>

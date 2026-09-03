@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spike: 空间量测纯逻辑验证 (Measure / 无 GPU)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #0a0e14; color: #d8e0e8; }
+    body { font: 13px/1.7 Consolas, Monaco, monospace; padding: 24px; }
+    h1 { font-size: 15px; color: #7fd4a8; margin-bottom: 12px; }
+    #results {
+      white-space: pre;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
+      padding: 14px 18px;
+    }
+    .pass { color: #7fd4a8; }
+    .fail { color: #ff7b7b; font-weight: bold; }
+    #summary { margin-top: 14px; font-size: 14px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Spike: 空间量测纯逻辑验证 (无 GPU)</h1>
+  <div id="results"></div>
+  <div id="summary"></div>
+
+  <script type="module">
+    import { Measure, MeasureCollection } from '/src/analysis/Measure.ts';
+    import { Cartesian3 } from '/src/math/Cartesian3.ts';
+
+    const out = document.getElementById('results');
+    const summaryEl = document.getElementById('summary');
+    let passCount = 0;
+    let failCount = 0;
+    const lines = [];
+
+    function check(name, condition, detail) {
+      const ok = !!condition;
+      if (ok) passCount++; else failCount++;
+      lines.push(`${ok ? '[PASS]' : '[FAIL]'} ${name}` + (detail ? `\n       ${detail}` : ''));
+    }
+
+    /** 归一化 ECEF：米制 ECEF / 赤道半径 */
+    function toNormalized(cartesian) {
+      return new Cartesian3(
+        cartesian.x / Measure.EARTH_SCALE,
+        cartesian.y / Measure.EARTH_SCALE,
+        cartesian.z / Measure.EARTH_SCALE
+      );
+    }
+
+    // ---------------------------------------------------------------
+    // 1. 北京 -> 上海 大圆（测地线）距离 ≈ 1067 km，误差 < 0.5%
+    // ---------------------------------------------------------------
+    const beijing = toNormalized(Cartesian3.fromDegrees(116.407, 39.904, 0));
+    const shanghai = toNormalized(Cartesian3.fromDegrees(121.474, 31.230, 0));
+    const distRef = 1067000; // 参考值（米）
+    const dClamped = Measure.distance([beijing, shanghai], true);
+    const dFree = Measure.distance([beijing, shanghai]);
+    const errDist = Math.abs(dClamped - distRef) / distRef;
+    check(
+      '北京→上海 测地线距离 ≈ 1067 km（误差 < 0.5%）',
+      errDist < 0.005,
+      `clamped=${(dClamped / 1000).toFixed(2)} km, ` +
+        `unclamped=${(dFree / 1000).toFixed(2)} km, 误差=${(errDist * 100).toFixed(3)}%`
+    );
+
+    // 折线分段累加（北京 -> 济南 -> 上海）应大于两点直达
+    const jinan = toNormalized(Cartesian3.fromDegrees(117.120, 36.651, 0));
+    const dVia = Measure.distance([beijing, jinan, shanghai], true);
+    check(
+      '折线分段累加单调性（绕行 > 直达）',
+      dVia > dClamped,
+      `via 济南=${(dVia / 1000).toFixed(2)} km > 直达=${(dClamped / 1000).toFixed(2)} km`
+    );
+
+    // ---------------------------------------------------------------
+    // 2. 赤道 1°×1° 球面四边形面积 ≈ 12308 km²，误差 < 1%
+    // ---------------------------------------------------------------
+    const quad = [
+      toNormalized(Cartesian3.fromDegrees(0, 0, 0)),
+      toNormalized(Cartesian3.fromDegrees(1, 0, 0)),
+      toNormalized(Cartesian3.fromDegrees(1, 1, 0)),
+      toNormalized(Cartesian3.fromDegrees(0, 1, 0)),
+    ];
+    const areaRef = 1.2308e10; // ~12308 km²（米²）
+    const areaQuad = Measure.area(quad);
+    const errArea = Math.abs(areaQuad - areaRef) / areaRef;
+    check(
+      '赤道 1°×1° 四边形面积 ≈ 12308 km²（误差 < 1%）',
+      errArea < 0.01,
+      `area=${(areaQuad / 1e6).toFixed(1)} km², 误差=${(errArea * 100).toFixed(3)}%`
+    );
+
+    // 逆序（顺时针）顶点序面积一致
+    const areaQuadReversed = Measure.area([...quad].reverse());
+    check(
+      '顶点顺序无关性（顺/逆时针面积相同）',
+      Math.abs(areaQuadReversed - areaQuad) / areaQuad < 1e-9,
+      `reversed=${(areaQuadReversed / 1e6).toFixed(1)} km²`
+    );
+
+    // 八分球三角形（三直角）面积 = πR²/2
+    const octant = [new Cartesian3(1, 0, 0), new Cartesian3(0, 1, 0), new Cartesian3(0, 0, 1)];
+    const areaOctantRef = (Math.PI / 2) * Measure.MEAN_RADIUS * Measure.MEAN_RADIUS;
+    const areaOctant = Measure.area(octant);
+    check(
+      '八分球三角形面积 = πR²/2（误差 < 0.1%）',
+      Math.abs(areaOctant - areaOctantRef) / areaOctantRef < 0.001,
+      `area=${(areaOctant / 1e12).toFixed(4)} e12 m², ref=${(areaOctantRef / 1e12).toFixed(4)} e12 m²`
+    );
+
+    // ---------------------------------------------------------------
+    // 3. 高度差：fromDegrees(116,39,0) vs (116,39,5000) → 5000 m
+    // ---------------------------------------------------------------
+    const h0 = toNormalized(Cartesian3.fromDegrees(116, 39, 0));
+    const h1 = toNormalized(Cartesian3.fromDegrees(116, 39, 5000));
+    const { deltaHeight } = Measure.height(h0, h1);
+    check(
+      '高度差 = 5000 m',
+      Math.abs(deltaHeight - 5000) < 1e-4,
+      `deltaHeight=${deltaHeight.toFixed(6)} m`
+    );
+
+    // ---------------------------------------------------------------
+    // 4. 射线求交：(0,0,3) 向 (0,0,-1) → 北极点 (0,0,1)±ε
+    //    （归一化椭球北极点在 (0,0,b)，b = 6356752.3142/6378137 ≈ 0.99665）
+    // ---------------------------------------------------------------
+    const hit = Measure.rayEllipsoid(
+      new Cartesian3(0, 0, 3),
+      new Cartesian3(0, 0, -1)
+    );
+    const hitOk =
+      hit !== null &&
+      Math.abs(hit.x) < 1e-12 &&
+      Math.abs(hit.y) < 1e-12 &&
+      Math.abs(hit.z - 1.0) < 0.0034 &&             // 北极点 ±ε
+      Math.abs(hit.z - Measure.POLAR_RATIO) < 1e-9; // 精确落在椭球极点
+    check(
+      '射线 (0,0,3)→(0,0,-1) 交于北极点 (0,0,1)±ε',
+      hitOk,
+      hit ? `hit=${hit.toString()}` : 'hit=null'
+    );
+
+    // 赤道命中：从 (2,0,0) 指向原点 → (1,0,0)
+    const hitEq = Measure.rayEllipsoid(new Cartesian3(2, 0, 0), new Cartesian3(-1, 0, 0));
+    const eqOk =
+      hitEq !== null &&
+      Math.abs(hitEq.x - 1) < 1e-12 &&
+      Math.abs(hitEq.y) < 1e-12 &&
+      Math.abs(hitEq.z) < 1e-12;
+    check('射线 (2,0,0)→(-1,0,0) 交于 (1,0,0)', eqOk, hitEq ? `hit=${hitEq.toString()}` : 'hit=null');
+
+    // 脱靶射线 → null
+    const miss = Measure.rayEllipsoid(new Cartesian3(0, 2, 0), new Cartesian3(0, 0, -1));
+    check('脱靶射线返回 null', miss === null, miss ? `hit=${miss.toString()}` : 'hit=null');
+
+    // ---------------------------------------------------------------
+    // 5. MeasureCollection：label 文本生成与管理
+    // ---------------------------------------------------------------
+    check('label "1,234.5 m"', MeasureCollection.formatDistance(1234.5) === '1,234.5 m',
+      `got "${MeasureCollection.formatDistance(1234.5)}"`);
+    check('label "12.3 km"', MeasureCollection.formatDistance(12345) === '12.3 km',
+      `got "${MeasureCollection.formatDistance(12345)}"`);
+    check('label "1.2 万 m²"', MeasureCollection.formatArea(12345.6) === '1.2 万 m²',
+      `got "${MeasureCollection.formatArea(12345.6)}"`);
+    check('label "1,234.5 m²"', MeasureCollection.formatArea(1234.5) === '1,234.5 m²',
+      `got "${MeasureCollection.formatArea(1234.5)}"`);
+
+    const collection = new MeasureCollection();
+    const item = collection.createMeasurement('distance', [beijing, shanghai], true);
+    const areaItem = collection.createMeasurement('area', quad);
+    check('createMeasurement(distance) 生成 id/value/label',
+      item.id === 'measure-1' &&
+      Math.abs(item.value - dClamped) < 1e-6 &&
+      item.label === MeasureCollection.formatDistance(item.value) &&
+      item.type === 'distance',
+      `id=${item.id}, label=${item.label}`);
+
+    const removedOk =
+      collection.count === 2 &&
+      collection.get(item.id) === item &&
+      collection.remove(areaItem.id) === true &&
+      collection.count === 1 &&
+      collection.getAll()[0] === item;
+    collection.clear();
+    check('count/get/remove/getAll/clear', removedOk && collection.count === 0,
+      `area label=${areaItem.label}`);
+
+    // ---------------------------------------------------------------
+    // 汇总
+    // ---------------------------------------------------------------
+    const total = passCount + failCount;
+    out.textContent = lines.join('\n');
+    summaryEl.textContent = `结果: ${passCount}/${total} PASS`;
+    summaryEl.className = failCount === 0 ? 'pass' : 'fail';
+    console.log(lines.join('\n'));
+    console.log(`结果: ${passCount}/${total} PASS`);
+
+    // 供无头验证读取
+    window.__measureSpikeResult = { passCount, failCount, total, lines };
+  </script>
+</body>
+</html>

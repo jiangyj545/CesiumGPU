@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spike: 影像瓦片体系 (T1.1) — 四叉树 LOD + 流式上传</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #cesiumContainer {
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+    #stats {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      padding: 10px 14px;
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #d8f0d8;
+      font: 12px/1.7 Consolas, Monaco, monospace;
+      white-space: pre;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #toolbar {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 10;
+    }
+    #toolbar button {
+      padding: 6px 14px;
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 6px;
+      color: #eee;
+      font: 12px/1.4 Consolas, Monaco, monospace;
+      cursor: pointer;
+      text-align: right;
+    }
+    #toolbar button:hover { background: rgba(60, 90, 60, 0.75); }
+    #title {
+      position: absolute;
+      bottom: 12px;
+      right: 12px;
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #aaa;
+      font: 11px/1.6 Consolas, Monaco, monospace;
+      text-align: right;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #error {
+      display: none;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 16px 24px;
+      background: rgba(80, 0, 0, 0.9);
+      color: #ffdddd;
+      border-radius: 8px;
+      font: 13px/1.6 Consolas, monospace;
+      max-width: 70%;
+      z-index: 20;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <pre id="stats">initialising...</pre>
+  <div id="toolbar">
+    <button data-alt="20000000">全球 · 20 000 km</button>
+    <button data-alt="4000000">洲际 · 4 000 km</button>
+    <button data-alt="800000">区域 · 800 km</button>
+    <button data-alt="100000">城市 · 100 km</button>
+    <button data-alt="10000">街道 · 10 km</button>
+  </div>
+  <div id="title">
+    SPIKE — imagery tile LOD (T1.1)<br />
+    quadtree SSE · frustum + horizon cull<br />
+    10 uploads/frame · LRU texture pool<br />
+    Imagery © OpenStreetMap contributors
+  </div>
+  <div id="error"></div>
+  <!-- Vite dev server transforms /src/** TS on request (same pattern as /src/main.ts) -->
+  <script type="module" src="/src/spikes/tile-lod-spike.ts"></script>
+</body>
+</html>

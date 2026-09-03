@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spike: 动态墙特效 DynamicWall (T3.2)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #cesiumContainer { width: 100%; height: 100%; position: relative; }
+    #toolbar {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+    }
+    #toolbar button {
+      padding: 6px 12px;
+      background: rgba(0, 0, 0, 0.65);
+      color: #9fe8ff;
+      border: 1px solid rgba(120, 220, 255, 0.4);
+      border-radius: 4px;
+      font: 12px/1.4 Consolas, Monaco, monospace;
+      cursor: pointer;
+    }
+    #toolbar button:hover { background: rgba(30, 80, 110, 0.8); }
+    #stats {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #cfe;
+      font: 12px/1.7 Consolas, Monaco, monospace;
+      pointer-events: none;
+      z-index: 10;
+      white-space: pre;
+    }
+    /* Viewer 渲染循环自动刷新本元素（document.getElementById('fps')） */
+    #fps {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      padding: 6px 10px;
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #6ee787;
+      font: bold 12px/1.4 Consolas, Monaco, monospace;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="toolbar">
+    <button id="btn-ring">环形墙: 开</button>
+    <button id="btn-border">折线墙: 开</button>
+  </div>
+  <div id="stats">初始化中…</div>
+  <div id="fps">-- FPS</div>
+  <script type="module" src="/src/spikes/wall-spike.ts"></script>
+</body>
+</html>

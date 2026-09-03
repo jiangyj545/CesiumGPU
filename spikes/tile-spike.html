@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spike - 瓦片纹理 + Mipmap + LRU 纹理池</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0e16;
+      color: #cde;
+      font-family: Consolas, monospace;
+      padding: 24px;
+    }
+    h1 { font-size: 1.1rem; color: #fff; margin-bottom: 4px; }
+    .sub { color: #789; font-size: 0.8rem; margin-bottom: 16px; }
+    canvas {
+      display: block;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 6px;
+      margin-bottom: 16px;
+    }
+    table {
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      min-width: 720px;
+    }
+    th, td {
+      text-align: left;
+      padding: 6px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    th { color: #9ab; font-weight: normal; }
+    td.value { color: #7df; }
+    .pass { color: #4f8; font-weight: bold; }
+    .fail { color: #f66; font-weight: bold; }
+    #verdict {
+      margin-top: 16px;
+      padding: 12px 16px;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px;
+      background: rgba(255,255,255,0.04);
+      font-size: 0.85rem;
+      line-height: 1.6;
+      max-width: 760px;
+    }
+    button {
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.25);
+      color: #fff;
+      border-radius: 4px;
+      padding: 6px 14px;
+      cursor: pointer;
+      font-family: inherit;
+      margin-bottom: 12px;
+    }
+    button:hover { background: rgba(255,255,255,0.22); }
+  </style>
+</head>
+<body>
+  <h1>Spike：瓦片纹理（texture-per-tile + mip 链 + LRU 池）</h1>
+  <div class="sub">
+    单张 OSM 瓦片上传 → render-based mipmap 生成（下方为 mip0..mip8 链）→ 200 张连发帧尖峰 → LRU evict/destroy 验证
+  </div>
+  <button id="rerun">重新运行</button>
+  <canvas id="tileCanvas" width="1024" height="320"></canvas>
+  <table>
+    <thead>
+      <tr><th>验证项</th><th>结果</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>OSM 真实瓦片</td><td class="value" id="r-osm">…</td><td id="d-osm">tile.openstreetmap.org z=10 x=843 y=388</td></tr>
+      <tr><td>mip 链层数</td><td class="value" id="r-mips">…</td><td>256×256 → floor(log2(256))+1 = 9</td></tr>
+      <tr><td>单张上传耗时（冷）</td><td class="value" id="r-cold">…</td><td>含首次 pipeline 编译</td></tr>
+      <tr><td>单张上传耗时（热均）</td><td class="value" id="r-single">…</td><td>20 次 create+copy+genMips 平均</td></tr>
+      <tr><td>200 张连发：同步总耗时</td><td class="value" id="r-burst-sync">…</td><td>单帧内 create+upload+mip×200</td></tr>
+      <tr><td>200 张连发：rAF 间隔（burst）</td><td class="value" id="r-burst-frame">…</td><td>全部塞进一帧的帧尖峰</td></tr>
+      <tr><td>200 张流送：最大 rAF 间隔</td><td class="value" id="r-stream-frame">…</td><td>20 帧 × 10 张/帧</td></tr>
+      <tr><td>200 张流送：单张均摊</td><td class="value" id="r-stream-tile">…</td><td>流送期间 per-tile 平均</td></tr>
+      <tr><td>LRU evict + destroy</td><td class="value" id="r-lru">…</td><td id="d-lru">容量 8，放入 20 张</td></tr>
+    </tbody>
+  </table>
+  <div id="verdict">运行中…</div>
+  <script type="module" src="./ts/tile-spike.ts"></script>
+</body>
+</html>

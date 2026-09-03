@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>T3.1 验证: unlit G-Buffer 管线变体 + IPass/EffectManager 地基</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #cesiumContainer { width: 100%; height: 100%; }
+    #title {
+      position: fixed; top: 10px; left: 10px;
+      color: #7ec8ff; background: rgba(0, 0, 0, 0.65);
+      padding: 8px 12px; border-radius: 6px;
+      font: 12px/1.6 Consolas, Monaco, monospace;
+      pointer-events: none; z-index: 10; white-space: pre;
+    }
+    #stats {
+      position: fixed; bottom: 10px; left: 10px;
+      color: #d8dee6; background: rgba(0, 0, 0, 0.65);
+      padding: 6px 10px; border-radius: 6px;
+      font: 12px/1.5 Consolas, Monaco, monospace;
+      pointer-events: none; z-index: 10; white-space: pre;
+    }
+    #error {
+      position: fixed; top: 10px; right: 10px; max-width: 45%;
+      color: #ff7b72; background: rgba(0, 0, 0, 0.8);
+      padding: 8px 12px; border-radius: 6px;
+      font: 12px/1.5 Consolas, Monaco, monospace;
+      display: none; z-index: 20; white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="title">T3.1: unlit G-Buffer 管线变体验证
+左侧红色球  = unlit（fs_unlit → 零法线 → LightingPass 直通 albedo）
+右侧白色球  = 普通 lit（Blinn-Phong 明暗）
+src/scene/passes/IPass.ts · src/effect/EffectManager.ts · src/scene/Primitive.ts (buildUnlitPipeline)</div>
+  <div id="stats">初始化中…</div>
+  <div id="error"></div>
+  <script type="module" src="/src/spikes/unlit-spike.ts"></script>
+</body>
+</html>

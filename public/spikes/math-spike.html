@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spike: 数学库纯逻辑验证 (Cartographic / Easing / Spline)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #0a0e14; color: #d8e0e8; }
+    body {
+      font: 13px/1.7 Consolas, Monaco, monospace;
+      padding: 24px;
+    }
+    h1 { font-size: 15px; color: #7fd4a8; margin-bottom: 12px; }
+    #results {
+      white-space: pre;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
+      padding: 14px 18px;
+    }
+    .pass { color: #7fd4a8; }
+    .fail { color: #ff7b7b; font-weight: bold; }
+    #summary { margin-top: 14px; font-size: 14px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Spike: 数学库纯逻辑验证 (无 GPU)</h1>
+  <div id="results"></div>
+  <div id="summary"></div>
+
+  <script type="module">
+    import { Cartesian3 } from '/src/math/Cartesian3.ts';
+    import { Cartographic } from '/src/math/Cartographic.ts';
+    import { EasingFunction } from '/src/math/EasingFunction.ts';
+    import { HermiteSpline, CatmullRomSpline } from '/src/math/Spline.ts';
+    import { CesiumMath } from '/src/math/CesiumMath.ts';
+
+    const out = document.getElementById('results');
+    let passCount = 0;
+    let failCount = 0;
+
+    function log(line, isPass) {
+      const div = document.createElement('div');
+      div.textContent = line;
+      if (isPass === true) div.className = 'pass';
+      else if (isPass === false) div.className = 'fail';
+      out.appendChild(div);
+      console.log(line);
+    }
+
+    function assert(name, cond, detail = '') {
+      if (cond) { passCount++; log(`  PASS  ${name}`, true); }
+      else { failCount++; log(`  FAIL  ${name}  ${detail}`, false); }
+    }
+
+    // -----------------------------------------------------------------
+    // 1. Easing 边界值: f(0) -> 0, f(1) -> 1
+    // -----------------------------------------------------------------
+    log('[1] EasingFunction 边界值 (0 -> 0, 1 -> 1)');
+    const easings = {
+      LINEAR_NONE: EasingFunction.LINEAR_NONE,
+      QUADRATIC_IN_OUT: EasingFunction.QUADRATIC_IN_OUT,
+      CUBIC_IN_OUT: EasingFunction.CUBIC_IN_OUT,
+      QUINTIC_IN_OUT: EasingFunction.QUINTIC_IN_OUT,
+      SINUSOIDAL_IN_OUT: EasingFunction.SINUSOIDAL_IN_OUT,
+    };
+    for (const [name, fn] of Object.entries(easings)) {
+      const f0 = fn(0.0);
+      const f1 = fn(1.0);
+      assert(`${name}(0) === 0`, Math.abs(f0) < 1e-12, `got ${f0}`);
+      assert(`${name}(1) === 1`, Math.abs(f1 - 1.0) < 1e-12, `got ${f1}`);
+      const half = fn(0.5);
+      assert(`${name}(0.5) in (0,1)`, half > 0.0 && half < 1.0, `got ${half}`);
+    }
+
+    // -----------------------------------------------------------------
+    // 2. Hermite 过控制点
+    // -----------------------------------------------------------------
+    log('[2] HermiteSpline 过控制点 + findSegment');
+    const hTimes = [0.0, 1.0, 2.0, 4.0];
+    const hPoints = [
+      new Cartesian3(0, 0, 0),
+      new Cartesian3(1, 2, 0),
+      new Cartesian3(3, 1, 2),
+      new Cartesian3(5, 4, 1),
+    ];
+    const hTangents = [
+      new Cartesian3(1, 0, 0),
+      new Cartesian3(2, 1, 0),
+      new Cartesian3(1, 1, 1),
+      new Cartesian3(0, 1, 0),
+    ];
+    const hermite = new HermiteSpline({ times: hTimes, points: hPoints, tangents: hTangents });
+    for (let i = 0; i < hTimes.length; i++) {
+      const p = hermite.evaluate(hTimes[i]);
+      assert(`evaluate(times[${i}]) 过控制点`, Cartesian3.equalsEpsilon(p, hPoints[i], 0, 1e-12),
+        `got ${p.toString()} want ${hPoints[i].toString()}`);
+    }
+    // findSegment 二分: time=3.0 落在段 [2,4], 局部 t=0.5
+    const seg = hermite.findSegment(3.0);
+    assert('findSegment(3.0).index === 2', seg.index === 2, `got ${seg.index}`);
+    assert('findSegment(3.0).t === 0.5', Math.abs(seg.t - 0.5) < 1e-12, `got ${seg.t}`);
+    // 越界钳制
+    const segLow = hermite.findSegment(-1.0);
+    const segHigh = hermite.findSegment(99.0);
+    assert('findSegment(-1) 钳制到首段', segLow.index === 0 && segLow.t === 0.0);
+    assert('findSegment(99) 钳制到末段', segHigh.index === hTimes.length - 2 && segHigh.t === 1.0);
+    // 中点值: u=0.5、零切线时应为线性中点 (单独构造零切线样条)
+    const zeroTan = hPoints.map(() => new Cartesian3(0, 0, 0));
+    const linear = new HermiteSpline({ times: hTimes, points: hPoints, tangents: zeroTan });
+    const mid = linear.evaluate(3.0);
+    const want = Cartesian3.lerp(hPoints[2], hPoints[3], 0.5, new Cartesian3());
+    assert('零切线 u=0.5 为线性中点', Cartesian3.equalsEpsilon(mid, want, 0, 1e-12),
+      `got ${mid.toString()} want ${want.toString()}`);
+
+    // -----------------------------------------------------------------
+    // 3. CatmullRom 连续性: 相邻段在节点处值相同 (C0) 且导数一致 (C1)
+    // -----------------------------------------------------------------
+    log('[3] CatmullRomSpline 连续性');
+    const crTimes = [0.0, 1.0, 2.5, 4.0, 6.0];
+    const crPoints = [
+      new Cartesian3(0, 0, 0),
+      new Cartesian3(1, 3, -1),
+      new Cartesian3(4, 2, 2),
+      new Cartesian3(2, -1, 5),
+      new Cartesian3(-2, 0, 3),
+    ];
+    const cr = new CatmullRomSpline({ times: crTimes, points: crPoints });
+    let allOnNode = true;
+    let allC0 = true;
+    let allC1 = true;
+    const EPS = 1e-9;      // 节点两侧采样偏移
+    const TOL_V = 1e-6;    // C0 容差
+    const TOL_D = 1e-5;    // C1 数值导数容差
+    for (let i = 1; i < crTimes.length - 1; i++) {
+      const tn = crTimes[i];
+      const onNode = cr.evaluate(tn);
+      if (!Cartesian3.equalsEpsilon(onNode, crPoints[i], 0, 1e-12)) {
+        allOnNode = false;
+        log(`    node ${tn}: ${onNode.toString()} != ${crPoints[i].toString()}`);
+      }
+      const left = cr.evaluate(tn - EPS);
+      const right = cr.evaluate(tn + EPS);
+      if (Math.abs(left.x - right.x) + Math.abs(left.y - right.y) + Math.abs(left.z - right.z) > TOL_V) {
+        allC0 = false;
+      }
+      // 数值导数左右极限 (一阶差分)
+      const dl = Cartesian3.subtract(onNode, left, new Cartesian3());
+      const dr = Cartesian3.subtract(right, onNode, new Cartesian3());
+      if (Math.abs(dl.x - dr.x) + Math.abs(dl.y - dr.y) + Math.abs(dl.z - dr.z) > TOL_D) {
+        allC1 = false;
+      }
+    }
+    assert('CatmullRom evaluate 节点处精确过控制点', allOnNode);
+    assert('CatmullRom 相邻段节点处值相同 (C0)', allC0);
+    assert('CatmullRom 节点处一阶导连续 (C1)', allC1);
+    // 继承关系 + 自动切线
+    assert('CatmullRomSpline extends HermiteSpline', cr instanceof HermiteSpline);
+    const autoTan = HermiteSpline.computeTangents(crPoints);
+    // i=2: (p[3] - p[1]) / 2
+    const expectMid = Cartesian3.subtract(crPoints[3], crPoints[1], new Cartesian3());
+    Cartesian3.multiplyByScalar(expectMid, 0.5, expectMid);
+    assert('自动切线 (p[i+1]-p[i-1])/2', Cartesian3.equalsEpsilon(autoTan[2], expectMid, 0, 1e-12),
+      `got ${autoTan[2].toString()} want ${expectMid.toString()}`);
+
+    // -----------------------------------------------------------------
+    // 4. Cartographic 往返: fromDegrees(116,39,100) -> toCartesian -> fromCartesian
+    // -----------------------------------------------------------------
+    log('[4] Cartographic 往返精度');
+    const carto = Cartographic.fromDegrees(116.0, 39.0, 100.0);
+    assert('fromDegrees 弧度转换正确',
+      Math.abs(carto.longitude - CesiumMath.toRadians(116.0)) < 1e-15 &&
+      Math.abs(carto.latitude - CesiumMath.toRadians(39.0)) < 1e-15 &&
+      carto.height === 100.0);
+    const ecef = carto.toCartesian();
+    // 与 Cartesian3 米制 ECEF 对照 (height 归一化 -> 乘 EARTH_SCALE 转米)
+    const expectEcef = Cartesian3.fromRadians(
+      CesiumMath.toRadians(116.0), CesiumMath.toRadians(39.0), 100.0 * Cartographic.EARTH_SCALE);
+    assert('toCartesian 与 Cartesian3.fromRadians 米制一致', Cartesian3.equalsEpsilon(ecef, expectEcef, 0, 1e-6));
+    const round = Cartographic.fromCartesian(ecef);
+    const dLon = Math.abs(round.longitude - carto.longitude);
+    const dLat = Math.abs(round.latitude - carto.latitude);
+    const dH = Math.abs(round.height - carto.height);
+    assert('往返误差 < 1e-9 (lon/lat/height)', dLon < 1e-9 && dLat < 1e-9 && dH < 1e-9,
+      `dLon=${dLon.toExponential(3)} dLat=${dLat.toExponential(3)} dH=${dH.toExponential(3)}`);
+    log(`    lon: ${carto.longitude} -> ${round.longitude}`);
+    log(`    lat: ${carto.latitude} -> ${round.latitude}`);
+    log(`    h:   ${carto.height} -> ${round.height}`);
+    // 椭球面 (h=0) 与高空点往返
+    for (const [lonD, latD, hN] of [[0, 0, 0], [-73.9857, 40.7484, 0.0005], [180, -89.5, 0.002]]) {
+      const c1 = Cartographic.fromDegrees(lonD, latD, hN);
+      const c2 = Cartographic.fromCartesian(c1.toCartesian());
+      const ok =
+        Math.abs(c2.longitude - c1.longitude) < 1e-9 &&
+        Math.abs(c2.latitude - c1.latitude) < 1e-9 &&
+        Math.abs(c2.height - c1.height) < 1e-9;
+      assert(`往返 (${lonD}, ${latD}, ${hN}) < 1e-9`, ok);
+    }
+    // result 出参风格
+    const resCarto = Cartographic.fromCartesian(ecef, new Cartographic());
+    const resEcef = resCarto.toCartesian(new Cartesian3());
+    assert('result 出参复用一致', resCarto.equalsEpsilon(round, 0, 0) && Cartesian3.equalsEpsilon(resEcef, ecef, 0, 0));
+
+    // -----------------------------------------------------------------
+    // 汇总
+    // -----------------------------------------------------------------
+    const summary = document.getElementById('summary');
+    const allPass = failCount === 0;
+    summary.textContent = allPass
+      ? `ALL PASS  (${passCount} assertions)`
+      : `FAILED  (${failCount} failed / ${passCount} passed)`;
+    summary.className = allPass ? 'pass' : 'fail';
+    console.log(allPass ? `ALL PASS (${passCount})` : `FAILED (${failCount} failed, ${passCount} passed)`);
+    document.title = allPass ? 'PASS - math-spike' : 'FAIL - math-spike';
+  </script>
+</body>
+</html>

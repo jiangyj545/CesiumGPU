@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spike: 相机 flyTo 动画 (CameraFlightPath)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #cesiumContainer { width: 100%; height: 100%; position: relative; }
+    #stats {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      padding: 10px 14px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #d8f0d8;
+      font: 12px/1.7 Consolas, Monaco, monospace;
+      white-space: pre;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #title {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #aaa;
+      font: 11px/1.6 Consolas, Monaco, monospace;
+      text-align: right;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #controls {
+      position: absolute;
+      bottom: 16px;
+      left: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 10;
+    }
+    #controls button {
+      padding: 8px 14px;
+      background: rgba(20, 40, 20, 0.85);
+      border: 1px solid rgba(120, 255, 120, 0.35);
+      border-radius: 6px;
+      color: #cfc;
+      font: 12px/1.4 Consolas, Monaco, monospace;
+      cursor: pointer;
+      text-align: left;
+      min-width: 280px;
+    }
+    #controls button:hover { background: rgba(40, 80, 40, 0.9); }
+    #controls button:active { background: rgba(60, 120, 60, 0.9); }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="stats">初始化中…</div>
+  <div id="title">Spike: Camera flyTo Animation<br />src/core/CameraFlightPath.ts</div>
+  <div id="controls">
+    <button id="btn-shanghai">1. flyTo 上海 (3s)</button>
+    <button id="btn-newyork">2. flyTo 纽约 (5s, 长弧)</button>
+    <button id="btn-lowalt">3. flyTo 北京低空 1km 俯视 pitch=-60°</button>
+    <button id="btn-reset">0. 回到北京上空 20000km</button>
+  </div>
+  <script type="module" src="/src/spikes/flyto-spike.ts"></script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ParticleSystem 正式版验证 (T3.4) — 四模式 + 深度遮挡</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #cesiumContainer {
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+    #stats {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      padding: 10px 14px;
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #d8f0d8;
+      font: 12px/1.7 Consolas, Monaco, monospace;
+      white-space: pre;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #title {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #aaa;
+      font: 11px/1.6 Consolas, Monaco, monospace;
+      text-align: right;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #controls {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      padding: 8px;
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 8px;
+      z-index: 10;
+    }
+    #controls button {
+      padding: 8px 18px;
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #eee;
+      font: 13px Consolas, Monaco, monospace;
+      cursor: pointer;
+    }
+    #controls button:hover { background: rgba(255, 255, 255, 0.18); }
+    #controls button.active {
+      background: rgba(80, 180, 255, 0.35);
+      border-color: rgba(120, 200, 255, 0.8);
+      color: #fff;
+    }
+    #error {
+      display: none;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 16px 24px;
+      background: rgba(80, 0, 0, 0.9);
+      color: #ffdddd;
+      border-radius: 8px;
+      font: 13px/1.6 Consolas, monospace;
+      max-width: 70%;
+      z-index: 20;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <pre id="stats">initialising...</pre>
+  <div id="title">
+    ParticleSystem (T3.4) — EffectManager + G-Buffer depth test<br />
+    compute pass + depth-tested render pass<br />
+    in the scene's command encoder<br />
+    origin: 北京 (116.391E, 39.907N)<br />
+    ?count=10000&amp;mode=fire&amp;cam=4000000
+  </div>
+  <div id="controls">
+    <button data-mode="fire">fire</button>
+    <button data-mode="fountain">fountain</button>
+    <button data-mode="fireworks">fireworks</button>
+    <button data-mode="smoke">smoke</button>
+  </div>
+  <div id="error"></div>
+  <!-- Vite dev server transforms /src/** TS on request (same pattern as /src/main.ts) -->
+  <script type="module" src="/src/spikes/psystem-spike.ts"></script>
+</body>
+</html>

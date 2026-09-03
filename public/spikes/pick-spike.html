@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spike: GPU 拾取回读 (id-encode + mapAsync readback)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #cesiumContainer { width: 100%; height: 100%; position: relative; }
+    #stats {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      padding: 10px 14px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #d8f0d8;
+      font: 12px/1.7 Consolas, Monaco, monospace;
+      white-space: pre;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #title {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: #aaa;
+      font: 11px/1.6 Consolas, Monaco, monospace;
+      text-align: right;
+      pointer-events: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="stats">初始化中…</div>
+  <div id="title">Spike: GPU Picking Readback<br />src/picking/PickPass.ts</div>
+  <script type="module" src="/src/spikes/pick-spike.ts"></script>
+</body>
+</html>
