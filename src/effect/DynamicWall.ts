@@ -4,6 +4,7 @@ import type { Context } from '../renderer/Context';
 import { Cartesian3 } from '../math/Cartesian3';
 import { GeometryPipeline } from '../geometry/GeometryPipeline';
 import { DYNAMIC_WALL_SHADER } from '../shaders/DynamicWallShader';
+import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 
 /** 与 PolylineGeometry 一致的退化段阈值（长度平方）。 */
 const DEGENERATE_EPSILON_SQ = 1e-20;
@@ -82,7 +83,7 @@ export class DynamicWall implements IPass {
   private _paramsUBO: GPUBuffer | null = null;
 
   /** 与 Scene._uploadCameraUBO 相同的 256B 布局。 */
-  private static readonly CAMERA_UBO_BYTES = 256;
+  private static readonly CAMERA_UBO_BYTES = CAMERA_UBO_SIZE;
   /** color(16) + speed/time/repeat/pad(16)。 */
   private static readonly PARAMS_UBO_BYTES = 32;
 
@@ -195,20 +196,19 @@ export class DynamicWall implements IPass {
     this.prepare();
     if (!this._pipeline || !this._bindGroup || this._geometry.indexCount === 0) return;
 
-    // ── Camera UBO（256B，布局同 Scene._uploadCameraUBO）─────────────────
+    // ── Camera UBO（布局单一来源：src/renderer/CameraUniforms.ts）─────────
     const cam = this._camera;
-    const camData = new Float32Array(DynamicWall.CAMERA_UBO_BYTES / 4);
-    camData.set(cam.viewMatrix.values, 0);
-    camData.set(cam.projectionMatrix.values, 16);
-    camData.set(cam.viewProjectionMatrix.values, 32);
-    camData[48] = cam.position.x;
-    camData[49] = cam.position.y;
-    camData[50] = cam.position.z;
-    camData[51] = 1.0;
-    camData[52] = this._context.drawingBufferWidth;
-    camData[53] = this._context.drawingBufferHeight;
-    camData[54] = cam.frustum.near;
-    camData[55] = cam.frustum.far;
+    const camData = new Float32Array(CAMERA_UBO_SIZE / 4);
+    writeCameraUniforms(camData, {
+      viewMatrix:           cam.viewMatrix.values,
+      projectionMatrix:     cam.projectionMatrix.values,
+      viewProjectionMatrix: cam.viewProjectionMatrix.values,
+      position:             cam.position,
+      viewportWidth:        this._context.drawingBufferWidth,
+      viewportHeight:       this._context.drawingBufferHeight,
+      near:                 cam.frustum.near,
+      far:                  cam.frustum.far,
+    });
     this._context.writeBuffer(this._cameraUBO!, 0, camData);
 
     // ── Params UBO（32B）──────────────────────────────────────────────────

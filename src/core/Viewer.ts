@@ -139,6 +139,14 @@ export class Viewer {
 
     this._initPromise = (async () => {
       await this._context.initialize();
+
+      // Stop the render loop and surface a message as soon as the device is lost.
+      this._context.onDeviceLost = () => {
+        if (this._destroyed) return; // deliberate destroy() also resolves device.lost
+        this._stopRenderLoop();
+        this._showDeviceLostMessage();
+      };
+
       this._resizeCanvas();
       await this._scene.initialize();
 
@@ -180,11 +188,42 @@ export class Viewer {
     this._scene.resize(this._canvas.width, this._canvas.height);
   }
 
+  /** Cancel the pending animation frame so no further frames are rendered. */
+  private _stopRenderLoop(): void {
+    if (this._animFrameId !== null) {
+      cancelAnimationFrame(this._animFrameId);
+      this._animFrameId = null;
+    }
+  }
+
+  /** Show a device-lost overlay in the container (created once). */
+  private _showDeviceLostMessage(): void {
+    if (this._container.querySelector('[data-gpu-lost]')) return;
+    const el = document.createElement('div');
+    el.setAttribute('data-gpu-lost', '');
+    el.style.cssText =
+      'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+      'background:rgba(0,0,0,0.75);color:#fff;font:14px/1.5 system-ui,sans-serif;' +
+      'text-align:center;padding:16px;z-index:10;';
+    el.textContent = 'WebGPU device lost — rendering stopped. Reload the page to recover.';
+    this._container.appendChild(el);
+  }
+
   private _startRenderLoop(): void {
     this._fpsInterval = performance.now();
 
     const loop = (now: number) => {
       if (this._destroyed) return;
+
+      // Stop the loop once the GPU device is lost (further frames would only
+      // keep failing on getCurrentTexture / command submission).
+      if (this._context.deviceLost) {
+        console.error('[Viewer] WebGPU device lost — rendering stopped. Reload the page to recover.');
+        this._stopRenderLoop();
+        this._showDeviceLostMessage();
+        return;
+      }
+
       this._animFrameId = requestAnimationFrame(loop);
 
       // Pre-render hook (clock tick, sun direction update, etc.)

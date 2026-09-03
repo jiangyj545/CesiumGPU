@@ -4,6 +4,7 @@ import {
   TRANSPARENT_ACCUMULATION_SHADER,
   TRANSPARENT_COMPOSITE_SHADER,
 } from '../../shaders/TransparentShader';
+import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../../renderer/CameraUniforms';
 
 /**
  * TransparentPass - Weighted Blended Order-Independent Transparency (WBOIT).
@@ -47,7 +48,7 @@ export class TransparentPass {
 
     this.cameraUniformBuffer = context.device.createBuffer({
       label: 'TransparentPass.CameraUBO',
-      size:  256,
+      size:  CAMERA_UBO_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -84,18 +85,18 @@ export class TransparentPass {
    * Update the camera UBO (called once per frame by Scene).
    */
   updateCamera(camera: Camera): void {
-    const data = new Float32Array(64);
-    data.set(camera.viewMatrix.values,           0);
-    data.set(camera.projectionMatrix.values,    16);
-    data.set(camera.viewProjectionMatrix.values, 32);
-    data[48] = camera.position.x;
-    data[49] = camera.position.y;
-    data[50] = camera.position.z;
-    data[51] = 1.0;
-    data[52] = this._context.drawingBufferWidth;
-    data[53] = this._context.drawingBufferHeight;
-    data[54] = camera.frustum.near;
-    data[55] = camera.frustum.far;
+    const data = new Float32Array(CAMERA_UBO_SIZE / 4);
+    // Layout lives in src/renderer/CameraUniforms.ts (single source of truth).
+    writeCameraUniforms(data, {
+      viewMatrix:           camera.viewMatrix.values,
+      projectionMatrix:     camera.projectionMatrix.values,
+      viewProjectionMatrix: camera.viewProjectionMatrix.values,
+      position:             camera.position,
+      viewportWidth:        this._context.drawingBufferWidth,
+      viewportHeight:       this._context.drawingBufferHeight,
+      near:                 camera.frustum.near,
+      far:                  camera.frustum.far,
+    });
     this._context.writeBuffer(this.cameraUniformBuffer, 0, data);
   }
 

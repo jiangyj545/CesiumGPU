@@ -2,6 +2,7 @@ import { Scene } from '../scene/Scene';
 import { Primitive } from '../scene/Primitive';
 import { Cartesian3 } from '../math/Cartesian3';
 import { PICK_SHADER, PICK_ID_TEST_SHADER } from '../shaders/PickShader';
+import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 
 /**
  * Result of a single GPU pick.
@@ -112,6 +113,9 @@ export class PickPass {
   /** Registered once into `scene.frameHooks`; encodes the pick view. */
   private readonly _frameHook: (encoder: GPUCommandEncoder) => void;
 
+  /** Diagnostic listener for uncaptured GPU errors; removed in destroy(). */
+  private readonly _errorListener: (event: Event) => void;
+
   constructor(scene: Scene) {
     this._scene = scene;
 
@@ -119,7 +123,7 @@ export class PickPass {
 
     this._cameraUbo = device.createBuffer({
       label: 'PickPass.CameraUBO',
-      size:  256,
+      size:  CAMERA_UBO_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -137,10 +141,11 @@ export class PickPass {
     };
     scene.frameHooks.push(this._frameHook);
 
-    device.addEventListener('uncapturederror', (event) => {
+    this._errorListener = (event: Event) => {
       this.debug.gpuErrors += 1;
       console.error('[PickPass] GPU uncaptured error:', (event as GPUUncapturedErrorEvent).error.message);
-    });
+    };
+    device.addEventListener('uncapturederror', this._errorListener as EventListener);
   }
 
   // ── Registration (primitives outside the scene graph) ────────────────────────
@@ -309,6 +314,8 @@ export class PickPass {
     const idx = this._scene.frameHooks.indexOf(this._frameHook);
     if (idx !== -1) this._scene.frameHooks.splice(idx, 1);
 
+    this._scene.context.device.removeEventListener('uncapturederror', this._errorListener as EventListener);
+
     // Reject any in-flight pick so awaiting callers do not hang forever
     // (the frame hook is gone, so the job could never be flushed).
     if (this._pending) {
@@ -469,22 +476,21 @@ export class PickPass {
     this._targetHeight = h;
   }
 
-  /** Upload camera uniforms (same 256-byte layout as Scene._uploadCameraUBO). */
+  /** Upload camera uniforms (layout defined in src/renderer/CameraUniforms.ts). */
   private _uploadCamera(): void {
     const cam  = this._scene.camera;
-    const data = new Float32Array(64); // 256 bytes / 4
+    const data = new Float32Array(CAMERA_UBO_SIZE / 4);
 
-    data.set(cam.viewMatrix.values,            0);
-    data.set(cam.projectionMatrix.values,     16);
-    data.set(cam.viewProjectionMatrix.values, 32);
-    data[48] = cam.position.x;
-    data[49] = cam.position.y;
-    data[50] = cam.position.z;
-    data[51] = 1.0;
-    data[52] = this._targetWidth;
-    data[53] = this._targetHeight;
-    data[54] = cam.frustum.near;
-    data[55] = cam.frustum.far;
+    writeCameraUniforms(data, {
+      viewMatrix:           cam.viewMatrix.values,
+      projectionMatrix:     cam.projectionMatrix.values,
+      viewProjectionMatrix: cam.viewProjectionMatrix.values,
+      position:             cam.position,
+      viewportWidth:        this._targetWidth,
+      viewportHeight:       this._targetHeight,
+      near:                 cam.frustum.near,
+      far:                  cam.frustum.far,
+    });
 
     this._scene.context.writeBuffer(this._cameraUbo, 0, data);
   }

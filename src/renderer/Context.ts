@@ -14,6 +14,14 @@ export class Context {
   private _context!: GPUCanvasContext;
   private _format!: GPUTextureFormat;
   private _initialized = false;
+  private _deviceLost = false;
+  private _errorListener: ((event: Event) => void) | null = null;
+
+  /**
+   * Optional callback invoked once when the WebGPU device is lost.
+   * `reason` combines the GPUDeviceLostInfo reason with the browser message.
+   */
+  onDeviceLost: ((reason: string) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this._canvas = canvas;
@@ -25,6 +33,8 @@ export class Context {
   get gpuContext(): GPUCanvasContext { return this._context; }
   get preferredFormat(): GPUTextureFormat { return this._format; }
   get initialized(): boolean { return this._initialized; }
+  /** True once the GPU device has been lost (rendering is no longer possible). */
+  get deviceLost(): boolean { return this._deviceLost; }
 
   get drawingBufferWidth(): number { return this._canvas.width; }
   get drawingBufferHeight(): number { return this._canvas.height; }
@@ -60,8 +70,16 @@ export class Context {
     });
 
     this._device.lost.then((info) => {
+      this._deviceLost = true;
       console.error(`WebGPU device lost: ${info.message}`);
+      this.onDeviceLost?.(info.message);
     });
+
+    // Surface async GPU validation / OutOfMemory errors (diagnostic only).
+    this._errorListener = (event: Event) => {
+      console.error('WebGPU uncaptured error:', (event as GPUUncapturedErrorEvent).error.message);
+    };
+    this._device.addEventListener('uncapturederror', this._errorListener as EventListener);
 
     this._context = this._canvas.getContext('webgpu') as GPUCanvasContext;
     if (!this._context) {
@@ -136,6 +154,10 @@ export class Context {
   }
 
   destroy(): void {
+    if (this._errorListener) {
+      this._device?.removeEventListener('uncapturederror', this._errorListener as EventListener);
+      this._errorListener = null;
+    }
     this._device?.destroy();
   }
 }

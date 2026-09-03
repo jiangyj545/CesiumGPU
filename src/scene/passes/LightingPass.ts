@@ -2,6 +2,7 @@ import { Context } from '../../renderer/Context';
 import { GBufferPass } from './GBufferPass';
 import { DirectionalLight } from '../DirectionalLight';
 import { Camera } from '../Camera';
+import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../../renderer/CameraUniforms';
 import { LIGHTING_SHADER } from '../../shaders/LightingShader';
 
 /** Maximum directional lights supported in the WGSL shader. */
@@ -34,10 +35,11 @@ export class LightingPass {
 
     const device = context.device;
 
-    // Camera UBO: 3×mat4 (192 bytes) + vec4 + vec2 + vec2 = 224 bytes → pad to 256
+    // Camera UBO: 3×mat4 (192) + vec4 (16) + vec2 + vec2 (uniform vec2 aligns
+    // to 16 → nearFar @224) = 232 bytes → pad to struct align 64 = 256 bytes
     this._cameraUniformBuffer = device.createBuffer({
       label: 'LightingPass.CameraUBO',
-      size:  256,
+      size:  CAMERA_UBO_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -113,28 +115,18 @@ export class LightingPass {
    * Update camera uniform buffer.
    */
   updateCamera(camera: Camera): void {
-    const data = new Float32Array(64); // 256 bytes / 4
-    const vp = camera.viewProjectionMatrix.values;
-    const v  = camera.viewMatrix.values;
-    const p  = camera.projectionMatrix.values;
-
-    data.set(v,  0);   // viewMatrix     at offset 0
-    data.set(p,  16);  // projMatrix     at offset 64
-    data.set(vp, 32);  // viewProjMatrix at offset 128
-
-    // cameraPosition at offset 192
-    data[48] = camera.position.x;
-    data[49] = camera.position.y;
-    data[50] = camera.position.z;
-    data[51] = 1.0;
-
-    // viewportSize at offset 208
-    data[52] = this._context.drawingBufferWidth;
-    data[53] = this._context.drawingBufferHeight;
-
-    // nearFar at offset 216
-    data[54] = camera.frustum.near;
-    data[55] = camera.frustum.far;
+    const data = new Float32Array(CAMERA_UBO_SIZE / 4);
+    // Layout lives in src/renderer/CameraUniforms.ts (single source of truth).
+    writeCameraUniforms(data, {
+      viewMatrix:           camera.viewMatrix.values,
+      projectionMatrix:     camera.projectionMatrix.values,
+      viewProjectionMatrix: camera.viewProjectionMatrix.values,
+      position:             camera.position,
+      viewportWidth:        this._context.drawingBufferWidth,
+      viewportHeight:       this._context.drawingBufferHeight,
+      near:                 camera.frustum.near,
+      far:                  camera.frustum.far,
+    });
 
     this._context.writeBuffer(this._cameraUniformBuffer, 0, data);
   }

@@ -3,13 +3,15 @@
  * Renders a space background with stars and atmospheric glow.
  */
 export const SKYBOX_SHADER = /* wgsl */`
+// 256B camera UBO — layout single source of truth: src/renderer/CameraUniforms.ts
+// (uniform vec2 aligns to 16 → viewportSize @208, nearFar @224 — NOT @216)
 struct CameraUniforms {
-  viewMatrix      : mat4x4<f32>,
-  projMatrix      : mat4x4<f32>,
-  viewProjMatrix  : mat4x4<f32>,
-  cameraPosition  : vec4<f32>,
-  viewportSize    : vec2<f32>,
-  nearFar         : vec2<f32>,
+  viewMatrix      : mat4x4<f32>,   // @0   (64B)
+  projMatrix      : mat4x4<f32>,   // @64  (64B)
+  viewProjMatrix  : mat4x4<f32>,   // @128 (64B)
+  cameraPosition  : vec4<f32>,     // @192 (16B)
+  viewportSize    : vec2<f32>,     // @208 (8B)
+  nearFar         : vec2<f32>,     // @224 (8B) x = near, y = far
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;

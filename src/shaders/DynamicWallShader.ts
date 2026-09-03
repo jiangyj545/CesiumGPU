@@ -17,14 +17,15 @@
 export const DYNAMIC_WALL_SHADER = /* wgsl */`
 // ── Uniforms ──────────────────────────────────────────────────────────────────
 
-// 与 Scene._uploadCameraUBO 的 256B 布局一致。
+// 256B 相机 UBO — 布局单一来源：src/renderer/CameraUniforms.ts
+//（uniform 下 vec2 按 16 对齐 → viewportSize @208，nearFar @224 —— 非 @216）
 struct CameraUniforms {
-  viewMatrix      : mat4x4<f32>,
-  projMatrix      : mat4x4<f32>,
-  viewProjMatrix  : mat4x4<f32>,
-  cameraPosition  : vec4<f32>,
-  viewportSize    : vec2<f32>,
-  nearFar         : vec2<f32>,
+  viewMatrix      : mat4x4<f32>,   // @0   (64B)
+  projMatrix      : mat4x4<f32>,   // @64  (64B)
+  viewProjMatrix  : mat4x4<f32>,   // @128 (64B)
+  cameraPosition  : vec4<f32>,     // @192 (16B)
+  viewportSize    : vec2<f32>,     // @208 (8B)
+  nearFar         : vec2<f32>,     // @224 (8B) x = near, y = far
 }
 
 // 32B：color(16) + speed/time/repeat/pad(16)。

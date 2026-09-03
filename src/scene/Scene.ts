@@ -17,6 +17,7 @@ import { OverlayPass } from './passes/OverlayPass';
 import { EntityVisualizer } from './EntityVisualizer';
 import { EntityCollection } from '../dataSource/EntityCollection';
 import { EffectManager } from '../effect/EffectManager';
+import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 import { GBUFFER_SHADER } from '../shaders/GBufferShader';
 
 /**
@@ -131,7 +132,7 @@ export class Scene {
       // Shared camera UBO for the G-Buffer pass
       this._cameraUniformBuffer = this._context.device.createBuffer({
         label: 'Scene.CameraUBO',
-        size:  256,
+        size:  CAMERA_UBO_SIZE,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
 
@@ -248,6 +249,9 @@ export class Scene {
    * Render one frame.
    */
   render(): void {
+    // No point encoding frames against a lost device (validation errors only).
+    if (this._context.deviceLost) return;
+
     if (
       !this._prepared ||
       !this._opaquePipeline ||
@@ -356,19 +360,19 @@ export class Scene {
   private _uploadCameraUBO(): void {
     if (!this._cameraUniformBuffer) return;
     const cam = this.camera;
-    const data = new Float32Array(64); // 256 bytes / 4
+    const data = new Float32Array(CAMERA_UBO_SIZE / 4);
 
-    data.set(cam.viewMatrix.values,            0);   // viewMatrix (offset 0)
-    data.set(cam.projectionMatrix.values,     16);   // projMatrix (offset 64)
-    data.set(cam.viewProjectionMatrix.values, 32);   // viewProjMatrix (offset 128)
-    data[48] = cam.position.x;                       // cameraPosition.x
-    data[49] = cam.position.y;
-    data[50] = cam.position.z;
-    data[51] = 1.0;
-    data[52] = this._width;                          // viewportSize
-    data[53] = this._height;
-    data[54] = cam.frustum.near;                     // nearFar
-    data[55] = cam.frustum.far;
+    // Layout lives in src/renderer/CameraUniforms.ts (single source of truth).
+    writeCameraUniforms(data, {
+      viewMatrix:           cam.viewMatrix.values,
+      projectionMatrix:     cam.projectionMatrix.values,
+      viewProjectionMatrix: cam.viewProjectionMatrix.values,
+      position:             cam.position,
+      viewportWidth:        this._width,
+      viewportHeight:       this._height,
+      near:                 cam.frustum.near,
+      far:                  cam.frustum.far,
+    });
 
     this._context.writeBuffer(this._cameraUniformBuffer, 0, data);
   }
