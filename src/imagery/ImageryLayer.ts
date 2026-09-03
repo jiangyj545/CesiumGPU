@@ -1,0 +1,496 @@
+import { TileKey } from './TileKey';
+import { ImageryProvider } from './ImageryProvider';
+import { TileTextureCache, TileTextureCacheStats } from './TileTextureCache';
+import { MipmapGenerator } from '../renderer/MipmapGenerator';
+import { Camera } from '../scene/Camera';
+import { Cartesian3 } from '../math/Cartesian3';
+
+/**
+ * ImageryLayer - One imagery source composited onto the globe, owning the
+ * quadtree tile selection for T1.1.
+ *
+ * Per update (called once per frame by {@link Globe.update}):
+ * 1. Quadtree selection from z = {@link ImageryLayer.ROOT_LEVEL} roots:
+ *    `sse = (tileWorldSize / tileSize) * viewportHeight / (distance * 2 tan(fov/2))`;
+ *    subdivide while `sse > maximumScreenSpaceError` and below max level.
+ * 2. View-frustum culling (6 planes extracted from the viewProj rows) and
+ *    simplified horizon culling (tiles beyond the horizon cone are dropped).
+ * 3. Request queue for selected-but-unloaded tiles: deduped, sorted by
+ *    distance, bounded in-flight fetches; at most `uploadsPerFrame` texture
+ *    uploads per frame (see docs/decisions/0001-tile-texture-pool.md).
+ * 4. Ready textures land in the {@link TileTextureCache}; while a tile's own
+ *    texture is missing the caller renders with an ancestor tile's texture
+ *    (upsampled via the UV sub-rect).
+ */
+export class ImageryLayer {
+  /** Show/hide this layer. */
+  show: boolean = true;
+
+  /**
+   * Layer opacity in [0, 1]. Reserved for future group-uniform compositing;
+   * the current opaque G-Buffer path always renders at full opacity.
+   */
+  alpha: number = 1.0;
+
+  /** The imagery source backing this layer. */
+  readonly provider: ImageryProvider;
+
+  /** Root level the quadtree selection starts from. */
+  static readonly ROOT_LEVEL = 2;
+
+  /** Aggregate counters for HUD/debug (selected tiles, cache, queue). */
+  get stats(): ImageryLayerStats {
+    return {
+      selectedTiles:    this._selected.length,
+      inFlightRequests: this._inflight.size,
+      pendingUploads:   this._uploadQueue.length,
+      failedTiles:      this._failed.size,
+      cache:            this._cache.stats,
+    };
+  }
+
+  /** The LRU texture pool backing this layer (exposed for debugging). */
+  get textureCache(): TileTextureCache {
+    return this._cache;
+  }
+
+  private readonly _cache: TileTextureCache;
+  private readonly _mipmapGenerator = new MipmapGenerator();
+  private readonly _maximumScreenSpaceError: number;
+  private readonly _maximumLevel: number;
+  private readonly _uploadsPerFrame: number;
+  private readonly _maxConcurrentRequests: number;
+
+  /** Last selection result with camera distance (for request ordering). */
+  private _selected: SelectedTile[] = [];
+
+  /** Keys with a fetch in progress (dedup guard). */
+  private _inflight = new Set<string>();
+
+  /** Bitmaps fetched but not yet uploaded to the GPU, upload-ordered. */
+  private _uploadQueue: UploadItem[] = [];
+
+  /** Keys whose fetch failed; not retried this session (null → parent fallback). */
+  private _failed = new Set<string>();
+
+  /** CPU-side tile bounding volumes, keyed by tile key. */
+  private _volumes = new Map<string, TileVolume>();
+
+  /** Frustum planes (a, b, c, d) × 6, normalised, refreshed per update. */
+  private readonly _frustumPlanes = new Float32Array(24);
+
+  private _sampler: GPUSampler | null = null;
+  private _destroyed = false;
+
+  constructor(options: ImageryLayerOptions) {
+    this.provider                 = options.provider;
+    this.show                     = options.show ?? true;
+    this.alpha                    = options.alpha ?? 1.0;
+    this._maximumScreenSpaceError = options.maximumScreenSpaceError ?? 2.0;
+    this._maximumLevel            = options.maximumLevel ?? options.provider.maximumLevel;
+    this._uploadsPerFrame         = options.uploadsPerFrame ?? UPLOADS_PER_FRAME;
+    this._maxConcurrentRequests   = options.maxConcurrentRequests ?? 10;
+    this._cache                   = new TileTextureCache({ capacity: options.textureCacheCapacity ?? 200 });
+  }
+
+  /**
+   * One frame of work: reselect tiles, launch bounded requests, upload at
+   * most `uploadsPerFrame` textures.
+   */
+  update(device: GPUDevice, camera: Camera, viewportHeight: number): void {
+    // Drain the deferred texture-destroy queue first: entries have now been
+    // untouched for 2 full frames (their referencing command buffers have all
+    // been submitted), so destroying them here — before this frame's encode —
+    // can no longer invalidate a submit.
+    this._cache.onFrameEnd();
+
+    if (this._destroyed || !this.show) return;
+
+    this._selectTiles(camera, viewportHeight);
+    this._launchRequests();
+    this._flushUploads(device);
+  }
+
+  /** The tiles selected by the last {@link update} (unsorted, culled set). */
+  get selectedTiles(): readonly TileKey[] {
+    return this._selected.map(entry => entry.tile);
+  }
+
+  /**
+   * Best available texture for a tile: its own, or the nearest loaded
+   * ancestor's (upsampling fallback). The returned `ancestorLevels` tells the
+   * caller which UV sub-rect of the texture covers this tile
+   * (`u = x / 2^ancestorLevels … (x+1) / 2^ancestorLevels`).
+   */
+  resolveTexture(tile: TileKey): ResolvedTileTexture | null {
+    if (this._destroyed) return null;
+
+    // `has()` first so the per-frame polling of not-yet-loaded tiles does
+    // not pollute the cache hit/miss statistics; `get()` on a hit refreshes
+    // LRU recency (keeping selected tiles resident).
+    if (this._cache.has(tile.key)) {
+      const own = this._cache.get(tile.key);
+      if (own) return { texture: own, ancestorLevels: 0 };
+    }
+
+    let ancestor = tile.parent();
+    let levels   = 1;
+    while (ancestor !== null && levels <= MAX_FALLBACK_LEVELS) {
+      if (this._cache.has(ancestor.key)) {
+        const texture = this._cache.get(ancestor.key);
+        if (texture) return { texture, ancestorLevels: levels };
+      }
+      ancestor = ancestor.parent();
+      levels++;
+    }
+    return null;
+  }
+
+  /** Shared clamp-to-edge trilinear sampler for this layer's tile textures. */
+  getSampler(device: GPUDevice): GPUSampler {
+    if (this._sampler === null) {
+      this._sampler = device.createSampler({
+        minFilter:     'linear',
+        magFilter:     'linear',
+        mipmapFilter:  'linear',
+        addressModeU:  'clamp-to-edge',
+        addressModeV:  'clamp-to-edge',
+        maxAnisotropy: 4,
+      });
+    }
+    return this._sampler;
+  }
+
+  /** Release GPU textures and stop all activity. In-flight fetches drain to no-ops. */
+  destroy(): void {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    this._cache.clear();
+    for (const item of this._uploadQueue) item.bitmap.close();
+    this._uploadQueue.length = 0;
+    this._selected = [];
+    this._inflight.clear();
+    this._failed.clear();
+    this._volumes.clear();
+  }
+
+  // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * Quadtree selection with view-frustum and horizon culling, iterative
+   * (explicit stack) so depth never blows the call stack at high levels.
+   */
+  private _selectTiles(camera: Camera, viewportHeight: number): void {
+    const planes  = this._extractFrustumPlanes(camera.viewProjectionMatrix.values);
+    const camPos  = camera.position;
+    const camDir  = Cartesian3.normalize(camPos, new Cartesian3());
+    const camDist = Cartesian3.magnitude(camPos);
+
+    // Horizon cone: surface points P stay visible while
+    // dot(normalize(P), camDir) >= cos(θh), with cos(θh) = R / |cam|, R = 1.
+    const horizonCos = Math.min(1.0, 1.0 / Math.max(camDist, 1.000001));
+    const horizonSin = Math.sqrt(Math.max(0.0, 1.0 - horizonCos * horizonCos));
+
+    const maxLevel   = Math.min(this._maximumLevel, this.provider.maximumLevel);
+    const rootLevel  = Math.min(ImageryLayer.ROOT_LEVEL, maxLevel);
+    const tanHalfFov = Math.tan(camera.frustum.fov * 0.5);
+
+    const selected: SelectedTile[] = [];
+    const stack: TileKey[] = [];
+
+    const rootCount = 2 ** rootLevel;
+    for (let y = 0; y < rootCount; y++) {
+      for (let x = 0; x < rootCount; x++) {
+        stack.push(new TileKey(rootLevel, x, y));
+      }
+    }
+
+    while (stack.length > 0) {
+      const tile   = stack.pop() as TileKey;
+      const volume = this._getVolume(tile);
+
+      // ── View-frustum culling (6 planes) ────────────────────────────────
+      let outside = false;
+      for (let i = 0; i < 6; i++) {
+        const o = i * 4;
+        const d = planes[o]     * volume.center.x +
+                  planes[o + 1] * volume.center.y +
+                  planes[o + 2] * volume.center.z +
+                  planes[o + 3];
+        if (d < -volume.radius) {
+          outside = true;
+          break;
+        }
+      }
+      if (outside) continue;
+
+      // ── Horizon culling (simplified cone test with tile angular margin) ─
+      const centerLen = Cartesian3.magnitude(volume.center);
+      const facingDot = Cartesian3.dot(volume.center, camDir) / Math.max(centerLen, 1e-9);
+      const sinAngle  = Math.min(0.99, volume.radius);
+      const cosAngle  = Math.sqrt(Math.max(0.0, 1.0 - sinAngle * sinAngle));
+      if (facingDot < horizonCos * cosAngle - horizonSin * sinAngle) continue;
+
+      // ── Screen-space error refinement ──────────────────────────────────
+      const distance = Math.max(Cartesian3.distance(camPos, volume.center), 1e-3);
+      const sse =
+        (volume.worldSize / this.provider.tileSize) *
+        (viewportHeight / (distance * 2.0 * tanHalfFov));
+
+      if (
+        sse > this._maximumScreenSpaceError &&
+        tile.level < maxLevel &&
+        selected.length < MAX_SELECTED_TILES
+      ) {
+        for (const child of tile.children()) stack.push(child);
+      } else {
+        selected.push({ tile, distance });
+      }
+    }
+
+    this._selected = selected;
+  }
+
+  /**
+   * Enqueue fetches for selected tiles missing a texture: deduped against
+   * in-flight/failed sets, nearest-first, bounded in-flight count.
+   */
+  private _launchRequests(): void {
+    const queue: SelectedTile[] = [];
+    for (const entry of this._selected) {
+      const key = entry.tile.key;
+      if (this._cache.has(key)) continue;
+      if (this._inflight.has(key)) continue;
+      if (this._failed.has(key)) continue;
+      queue.push(entry);
+    }
+    queue.sort((a, b) => a.distance - b.distance);
+
+    for (const item of queue) {
+      if (this._inflight.size >= this._maxConcurrentRequests) break;
+
+      const key  = item.tile.key;
+      const tile = item.tile;
+      this._inflight.add(key);
+
+      void this.provider.requestTile(tile).then(bitmap => {
+        this._inflight.delete(key);
+        if (this._destroyed) {
+          bitmap?.close();
+          return;
+        }
+        if (bitmap !== null) {
+          // Bound the backlog: drop (and free) the oldest entries when the
+          // camera has outrun the uploader.
+          while (this._uploadQueue.length >= MAX_UPLOAD_QUEUE) {
+            this._uploadQueue.shift()?.bitmap.close();
+          }
+          this._uploadQueue.push({ key, bitmap, distance: item.distance });
+        } else {
+          // Failed tiles are skipped (no retry); parent fallback renders instead.
+          this._failed.add(key);
+        }
+      }).catch((error: unknown) => {
+        this._inflight.delete(key);
+        this._failed.add(key);
+        console.warn(`ImageryLayer: request for tile ${key} failed`, error);
+      });
+    }
+  }
+
+  /** Upload at most `uploadsPerFrame` fetched bitmaps to the GPU per frame. */
+  private _flushUploads(device: GPUDevice): void {
+    if (this._uploadQueue.length === 0) return;
+    this._uploadQueue.sort((a, b) => a.distance - b.distance);
+
+    let uploaded = 0;
+    while (uploaded < this._uploadsPerFrame && this._uploadQueue.length > 0) {
+      const item = this._uploadQueue.shift() as UploadItem;
+      this._cache.put(item.key, this._createTileTexture(device, item.key, item.bitmap));
+      uploaded++;
+    }
+  }
+
+  /** Create a mipmapped rgba8unorm texture from a decoded tile bitmap. */
+  private _createTileTexture(device: GPUDevice, key: string, bitmap: ImageBitmap): GPUTexture {
+    const width  = bitmap.width;
+    const height = bitmap.height;
+    const texture = device.createTexture({
+      label:  `Imagery.Tile.${key.replace(/\//g, '_')}`,
+      size:   { width, height },
+      format: 'rgba8unorm',
+      usage:  GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      mipLevelCount: MipmapGenerator.requiredMipLevelCount(width, height),
+    });
+    device.queue.copyExternalImageToTexture(
+      { source: bitmap },
+      { texture },
+      { width, height }
+    );
+    this._mipmapGenerator.generateMips(device, texture, 'rgba8unorm');
+    bitmap.close();
+    return texture;
+  }
+
+  /** Bounding sphere + world size for a tile (computed once, then cached). */
+  private _getVolume(tile: TileKey): TileVolume {
+    const cached = this._volumes.get(tile.key);
+    if (cached) return cached;
+
+    const rect      = tile.rectangle();
+    const centerLat = (rect.north + rect.south) / 2.0;
+    const centerLon = (rect.west + rect.east) / 2.0;
+    const center    = surfacePosition(centerLat, centerLon, new Cartesian3());
+
+    let radius = 0.0;
+    const corners: Array<[number, number]> = [
+      [rect.north, rect.west],
+      [rect.north, rect.east],
+      [rect.south, rect.west],
+      [rect.south, rect.east],
+    ];
+    const scratch = new Cartesian3();
+    for (const [lat, lon] of corners) {
+      const d = Cartesian3.distance(center, surfacePosition(lat, lon, scratch));
+      if (d > radius) radius = d;
+    }
+    radius *= 1.05; // margin for the plane / horizon tests
+
+    const width  = (rect.east - rect.west) * Math.cos(centerLat) * WGS84_POLAR_RATIO;
+    const height = (rect.north - rect.south) * WGS84_POLAR_RATIO;
+
+    const volume: TileVolume = {
+      center,
+      radius,
+      worldSize: Math.max(width, height),
+    };
+
+    if (this._volumes.size > MAX_VOLUMES) this._volumes.clear();
+    this._volumes.set(tile.key, volume);
+    return volume;
+  }
+
+  /**
+   * Extract the 6 view-frustum planes from the viewProj matrix (WebGPU
+   * clip space: x,y ∈ [-w, w], z ∈ [0, w]). `values` is column-major, so
+   * matrix row `r` is `[v[r], v[4+r], v[8+r], v[12+r]]`.
+   */
+  private _extractFrustumPlanes(values: Float32Array): Float32Array {
+    const p  = this._frustumPlanes;
+    const a0 = values[0], a1 = values[4], a2 = values[8],  a3 = values[12]; // row 0
+    const b0 = values[1], b1 = values[5], b2 = values[9],  b3 = values[13]; // row 1
+    const c0 = values[2], c1 = values[6], c2 = values[10], c3 = values[14]; // row 2
+    const d0 = values[3], d1 = values[7], d2 = values[11], d3 = values[15]; // row 3
+
+    const set = (i: number, x: number, y: number, z: number, w: number): void => {
+      const len = Math.hypot(x, y, z) || 1.0;
+      p[i * 4]     = x / len;
+      p[i * 4 + 1] = y / len;
+      p[i * 4 + 2] = z / len;
+      p[i * 4 + 3] = w / len;
+    };
+
+    set(0, d0 + a0, d1 + a1, d2 + a2, d3 + a3); // left   ( x >= -w)
+    set(1, d0 - a0, d1 - a1, d2 - a2, d3 - a3); // right  ( x <=  w)
+    set(2, d0 + b0, d1 + b1, d2 + b2, d3 + b3); // bottom ( y >= -w)
+    set(3, d0 - b0, d1 - b1, d2 - b2, d3 - b3); // top    ( y <=  w)
+    set(4, c0,      c1,      c2,      c3     ); // near   ( z >=  0)
+    set(5, d0 - c0, d1 - c1, d2 - c2, d3 - c3); // far    ( z <=  w)
+
+    return p;
+  }
+}
+
+/** @internal Selected tile plus the camera distance used for ordering. */
+interface SelectedTile {
+  tile: TileKey;
+  distance: number;
+}
+
+/** @internal Fetched bitmap awaiting its frame-budgeted GPU upload. */
+interface UploadItem {
+  key: string;
+  bitmap: ImageBitmap;
+  distance: number;
+}
+
+/** @internal CPU-side tile bounds used by the culling / LOD tests. */
+interface TileVolume {
+  /** Surface point at the tile centre (normalised ECEF, radius ≈ 1). */
+  center: Cartesian3;
+  /** Bounding-sphere radius around `center` (normalised units). */
+  radius: number;
+  /** Largest tile edge length (normalised units) for the SSE test. */
+  worldSize: number;
+}
+
+/** Texture resolved for rendering: own tile texture or an ancestor's. */
+export interface ResolvedTileTexture {
+  texture: GPUTexture;
+  /** Levels between the tile and the texture's level (0 = own texture). */
+  ancestorLevels: number;
+}
+
+export interface ImageryLayerStats {
+  /** Tiles selected by the last update. */
+  selectedTiles: number;
+  /** Fetches currently in flight. */
+  inFlightRequests: number;
+  /** Fetched bitmaps waiting for their upload frame budget. */
+  pendingUploads: number;
+  /** Tiles whose fetch failed (not retried). */
+  failedTiles: number;
+  /** LRU texture pool counters. */
+  cache: TileTextureCacheStats;
+}
+
+export interface ImageryLayerOptions {
+  /** The imagery source for this layer. */
+  provider: ImageryProvider;
+  /** Initial visibility. Default: true */
+  show?: boolean;
+  /** Initial opacity in [0, 1] (reserved; see {@link ImageryLayer.alpha}). Default: 1 */
+  alpha?: number;
+  /** Refine tiles while their SSE exceeds this. Default: 2 */
+  maximumScreenSpaceError?: number;
+  /** Highest level to refine to. Default: provider.maximumLevel */
+  maximumLevel?: number;
+  /** Texture uploads per frame. Default: 10 (see decision 0001) */
+  uploadsPerFrame?: number;
+  /** Concurrent fetch cap. Default: 10 */
+  maxConcurrentRequests?: number;
+  /** LRU texture pool capacity. Default: 200 */
+  textureCacheCapacity?: number;
+}
+
+/** Upload budget per frame (docs/decisions/0001-tile-texture-pool.md). */
+const UPLOADS_PER_FRAME = 10;
+
+/** Fetch backlog cap; older bitmaps are closed when the camera outruns upload. */
+const MAX_UPLOAD_QUEUE = 256;
+
+/** Ancestor levels walked for the upsampling fallback. */
+const MAX_FALLBACK_LEVELS = 6;
+
+/** Safety cap on the selected set (guards against SSE blowups). */
+const MAX_SELECTED_TILES = 512;
+
+/** Cap on the CPU bounding-volume cache. */
+const MAX_VOLUMES = 8192;
+
+/** WGS84 polar / equatorial ratio (matches EllipsoidGeometry normalisation). */
+const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
+
+/**
+ * Surface point (normalised ECEF, EllipsoidGeometry convention:
+ * x = cos(lat)·cos(lon), y and z scaled by the polar ratio).
+ */
+function surfacePosition(latitude: number, longitude: number, result: Cartesian3): Cartesian3 {
+  const cosLat = Math.cos(latitude);
+  result.x = cosLat * Math.cos(longitude);
+  result.y = cosLat * Math.sin(longitude) * WGS84_POLAR_RATIO;
+  result.z = Math.sin(latitude) * WGS84_POLAR_RATIO;
+  return result;
+}
+
+export default ImageryLayer;
