@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 10：距离/面积量测 Measure - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:260px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>10 距离/面积量测</h1>
+    <p class="desc">DrawHandler 画线测距（Measure.distance）、画面测面积（Measure.area）。
+      左键取点，右键/双击结束；结果以 "1,234.5 m" 格式的标签钉在图形上。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+      function setActive(typeLabel) {
+        for (const btn of controls.querySelectorAll('button[data-type]')) {
+          btn.classList.toggle('active', btn.dataset.type === typeLabel);
+        }
+      }
+
+      // ── DrawHandler：绘制完成后实体自动进入 scene.entities ─────────────
+      const draw = new engine.DrawHandler(viewer);
+      let drawType = null;   // 当前量测类型 'polyline' | 'polygon'
+      const records = [];    // 量测记录
+
+      function refresh(detail) {
+        result.textContent =
+          `模式: ${drawType ? (drawType === 'polygon' ? '测面积（绘制中…）' : '测距离（绘制中…）') : '空闲'}\n` +
+          `量测记录 ${records.length} 条:\n${records.join('\n') || '(无)'}` +
+          (detail ? `\n${detail}` : '');
+      }
+
+      /** 折线中点 / 多边形顶点均值中心（归一化 ECEF） */
+      function anchorOf(positions, isArea) {
+        if (!isArea) return positions[Math.floor(positions.length / 2)];
+        const c = new engine.Cartesian3(0, 0, 0);
+        for (const p of positions) { c.x += p.x; c.y += p.y; c.z += p.z; }
+        const n = engine.Cartesian3.normalize(c, new engine.Cartesian3());
+        return engine.Cartesian3.multiplyByScalar(n, 1.0005, new engine.Cartesian3());
+      }
+
+      // ── 完成一次绘制 → 计算量测值 → 标签钉在图形上 ─────────────────────
+      draw.drawEnd.addListener(({ positions }) => {
+        const isArea = drawType === 'polygon';
+        const value = isArea
+          ? engine.Measure.area(positions)
+          : engine.Measure.distance(positions);
+        // 千分位格式："< 1万 → 1,234.5 m/m²；否则 km / 万 m²"
+        const text = isArea
+          ? engine.MeasureCollection.formatArea(value)
+          : engine.MeasureCollection.formatDistance(value);
+        const label = isArea ? `面积: ${text}` : `距离: ${text}`;
+
+        viewer.scene.entities.add({
+          name: `量测#${records.length + 1}`,
+          position: anchorOf(positions, isArea),
+          label: { text, fillColor: new engine.Color(0.72, 1.0, 0.72, 1.0) },
+        });
+
+        records.push(`#${records.length + 1} ${isArea ? '面积' : '距离'} ${text}  (${positions.length} 点)`);
+        drawType = null;
+        setActive(null);
+        refresh('本次量测完成，可继续绘制');
+      });
+
+      addBtn('测距离', () => { drawType = 'polyline'; draw.start('polyline'); setActive('polyline'); refresh(); }).dataset.type = 'polyline';
+      addBtn('测面积', () => { drawType = 'polygon'; draw.start('polygon'); setActive('polygon'); refresh(); }).dataset.type = 'polygon';
+      addBtn('停止绘制', () => { draw.stop(); drawType = null; setActive(null); refresh(); });
+      addBtn('清除全部', () => {
+        draw.stop();
+        viewer.scene.entities.removeAll();
+        records.length = 0;
+        drawType = null;
+        setActive(null);
+        refresh('已清空所有量测');
+      });
+
+      viewer.camera.setView({
+        destination: { lon: 116.39, lat: 39.9, height: 1_500_000 },
+      });
+      refresh('提示：点击「测距离」或「测面积」开始');
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.39, 39.9, 1_500_000],
+          imagery: 'gaode-sat',
+          title: '10 · 距离/面积量测 Measure',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '10 距离/面积量测 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CesiumGPU 示例门户 - 欢迎</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: auto; background: #05080d; color: #d8e0e8; }
+    body {
+      font: 14px/1.75 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      padding: 40px 48px 64px;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; }
+
+    /* ── Hero ─────────────────────────────────────────────── */
+    .hero { margin-bottom: 36px; }
+    .hero h1 {
+      font-size: 30px; font-weight: 700; letter-spacing: 1px;
+      color: #fff; margin-bottom: 10px;
+    }
+    .hero h1 .accent { color: #5cd8ff; }
+    .hero p { color: #9ab; max-width: 760px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .badge {
+      font: 12px/1 Consolas, Monaco, monospace;
+      color: #8ee6ff; background: rgba(92, 207, 255, 0.1);
+      border: 1px solid rgba(92, 207, 255, 0.35);
+      border-radius: 20px; padding: 5px 12px;
+    }
+    .badge.bad { color: #ff8f94; background: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.4); }
+
+    /* ── 章节 ─────────────────────────────────────────────── */
+    h2 {
+      font-size: 18px; color: #8ee6ff; margin: 34px 0 12px;
+      padding-left: 10px; border-left: 3px solid #5cd8ff;
+    }
+    h2 small { color: #667; font-size: 12px; font-weight: normal; margin-left: 10px; }
+
+    /* ── 代码块 ───────────────────────────────────────────── */
+    .codewrap {
+      background: rgba(8, 12, 18, 0.92);
+      border: 1px solid rgba(92, 207, 255, 0.25);
+      border-radius: 8px; overflow: auto; margin-top: 12px;
+    }
+    .codewrap pre { padding: 14px 18px; }
+    .codewrap code { font: 12.5px/1.7 Consolas, Monaco, monospace; color: #d8e0e8; white-space: pre; }
+    .tok-kw { color: #5cd8ff; } .tok-str { color: #ffb86c; }
+    .tok-num { color: #c792ea; } .tok-com { color: #5f7a5f; font-style: italic; }
+
+    /* ── 功能矩阵表 ───────────────────────────────────────── */
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+    th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+    th {
+      color: #8ee6ff; background: rgba(92, 207, 255, 0.08);
+      font-weight: 600; white-space: nowrap;
+    }
+    td { color: #b9c6d2; vertical-align: top; }
+    td.mod { color: #e8f2fa; white-space: nowrap; font-weight: 500; }
+    td.ref { white-space: nowrap; font: 12px/1.9 Consolas, Monaco, monospace; }
+    tr:hover td { background: rgba(92, 207, 255, 0.05); }
+
+    .tips { color: #7a8a99; font-size: 13px; margin-top: 10px; }
+    .tips b { color: #9ecfef; font-weight: 600; }
+    a { color: #5cd8ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font: 12.5px/1.6 Consolas, Monaco, monospace; color: #8ee6ff; }
+    footer { margin-top: 48px; color: #556; font-size: 12px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ── Hero ─────────────────────────────────────────────── -->
+    <div class="hero">
+      <h1>CesiumGPU <span class="accent">示例门户</span></h1>
+      <p>
+        自研 WebGPU 三维地球渲染引擎 —— 延迟渲染管线、XYZ 瓦片影像流式加载、Entity/GeoJSON
+        矢量体系、交互绘制与 GPU 拾取、空间量测、动态特效与粒子/天气系统。左侧菜单选择分类下的
+        示例，此处 iframe 区实时预览；顶部工具条支持新标签页打开、刷新与查看示例源码。
+      </p>
+      <div class="badges">
+        <span class="badge" id="gpuBadge">WebGPU 检测中…</span>
+        <span class="badge">渲染: WebGPU / WGSL</span>
+        <span class="badge">构建: TypeScript + Vite</span>
+        <span class="badge">延迟渲染 + 透明物体排序</span>
+      </div>
+    </div>
+
+    <!-- ── 快速开始 ─────────────────────────────────────────── -->
+    <h2>快速开始 <small>每个示例的标准骨架</small></h2>
+    <p>示例页引入公共工具 <code>./js/demo-utils.js</code>，用
+      <code>DemoUtils.startup()</code> 一行完成引擎初始化（Viewer 创建、
+      高德/OSM 底图、常用视角、FPS HUD、错误面板），再以
+      <code>DemoUtils.showCode(fn)</code> 展示源码。</p>
+    <div class="codewrap"><pre><code id="quickStart"></code></pre></div>
+    <p class="tips">演示数据统一放在 <b>./data/demo-data.js</b>（<b>DemoData</b>：城市坐标、中国边界简化
+      GeoJSON、飞行路径），分类树配置在 <b>./config.js</b>。</p>
+
+    <!-- ── 功能矩阵 ─────────────────────────────────────────── -->
+    <h2>功能矩阵 <small>点击"示例"列可在新标签页打开</small></h2>
+    <table>
+      <thead>
+        <tr><th>功能模块</th><th>能力说明</th><th>相关示例</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mod">渲染核心</td>
+          <td>WebGPU 设备管理、延迟渲染管线（G-Buffer + 光照阶段）、透明物体排序、太阳方位光照、时间轴昼夜模拟</td>
+          <td class="ref">/ （引擎主页）</td>
+        </tr>
+        <tr>
+          <td class="mod">影像图层</td>
+          <td>XYZ 瓦片流式加载（高德卫星/矢量、OSM），LOD 调度、子域轮询、纹理缓存</td>
+          <td class="ref"><a href="./01_imagery.html" target="_blank">01_imagery</a></td>
+        </tr>
+        <tr>
+          <td class="mod">相机与视角</td>
+          <td>setView 即时定位、flyTo 飞行动画（缓动）、路径飞行漫游（样条插值）</td>
+          <td class="ref"><a href="./02_camera.html" target="_blank">02_camera</a> ·
+            <a href="./07_flyRoute.html" target="_blank">07_flyRoute</a></td>
+        </tr>
+        <tr>
+          <td class="mod">矢量数据</td>
+          <td>Entity 体系、GeoJSON 数据源加载（点/线/面）、Primitive 几何体（体/墙/面等）</td>
+          <td class="ref"><a href="./03_geojson.html" target="_blank">03_geojson</a> ·
+            <a href="./04_geometry.html" target="_blank">04_geometry</a></td>
+        </tr>
+        <tr>
+          <td class="mod">交互</td>
+          <td>DrawHandler 绘制（点/线/面/矩形，实时预览）、GPU 拾取（pickPass / 颜色编码拾取）</td>
+          <td class="ref"><a href="./05_draw.html" target="_blank">05_draw</a> ·
+            <a href="./06_pick.html" target="_blank">06_pick</a></td>
+        </tr>
+        <tr>
+          <td class="mod">空间分析</td>
+          <td>空间距离 / 贴地面积 / 高度量测，实时预览与结果标注</td>
+          <td class="ref"><a href="./10_measure.html" target="_blank">10_measure</a></td>
+        </tr>
+        <tr>
+          <td class="mod">特效</td>
+          <td>动态墙（流光材质）、圆形扫描（扩散波纹），EffectManager 统一调度</td>
+          <td class="ref"><a href="./08_dynamicWall.html" target="_blank">08_dynamicWall</a> ·
+            <a href="./08_circleScan.html" target="_blank">08_circleScan</a></td>
+        </tr>
+        <tr>
+          <td class="mod">粒子系统</td>
+          <td>GPU 粒子发射器（喷泉/火焰/烟雾），生命周期与外力场更新</td>
+          <td class="ref"><a href="./09_particle.html" target="_blank">09_particle</a></td>
+        </tr>
+        <tr>
+          <td class="mod">天气</td>
+          <td>雨/雪天气粒子渲染，强度调节</td>
+          <td class="ref"><a href="./11_weather.html" target="_blank">11_weather</a></td>
+        </tr>
+        <tr>
+          <td class="mod">模型加载</td>
+          <td>GLB/glTF 解析与渲染，ENU 参考架摆放（Y-up → Z-up）</td>
+          <td class="ref">/models/cone4-red.glb（主页演示）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="tips" style="margin-top: 18px">
+      <b>提示</b>：所有示例需要支持 WebGPU 的浏览器（Chrome / Edge 113+）。尚在编写中的示例点击后会
+      显示"示例编写中"占位，代码会随后续任务（T4.2）逐个补齐。
+    </p>
+
+    <footer>CesiumGPU — WebGPU 3D Earth Engine · Examples Portal</footer>
+  </div>
+
+  <script>
+    (function () {
+      // WebGPU 检测
+      var badge = document.getElementById('gpuBadge');
+      if (navigator.gpu) {
+        navigator.gpu.requestAdapter().then(function (adapter) {
+          if (adapter) {
+            badge.textContent = 'WebGPU 可用';
+          } else {
+            badge.textContent = 'WebGPU 存在但无可用适配器';
+            badge.classList.add('bad');
+          }
+        }).catch(function (err) {
+          badge.textContent = 'WebGPU 适配器查询失败';
+          badge.classList.add('bad');
+          console.error('[welcome] requestAdapter failed', err);
+        });
+      } else {
+        badge.textContent = '当前浏览器不支持 WebGPU';
+        badge.classList.add('bad');
+      }
+
+      // ── 极简 JS 高亮（与 demo-utils.js 同配色） ─────────────────────
+      var KW = 'const|let|var|function|return|if|else|for|while|of|in|new|async|await|import|from|export|default|try|catch|finally|throw|this|null|undefined|true|false';
+      var RE = new RegExp(
+        '(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)' +
+        "|('(?:\\\\.|[^'\\\\\\n])*'|\"(?:\\\\.|[^\"\\\\\\n])*\"|`(?:\\\\.|[^`\\\\])*`)" +
+        '|(\\b\\d+(?:\\.\\d+)?(?:_\\d+)*\\b)' +
+        '|\\b(' + KW + ')\\b', 'g');
+      function esc(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+      function highlight(code) {
+        var out = '', last = 0, m;
+        RE.lastIndex = 0;
+        while ((m = RE.exec(code)) !== null) {
+          out += esc(code.slice(last, m.index));
+          if (m[1]) out += '<span class="tok-com">' + esc(m[1]) + '</span>';
+          else if (m[2]) out += '<span class="tok-str">' + esc(m[2]) + '</span>';
+          else if (m[3]) out += '<span class="tok-num">' + esc(m[3]) + '</span>';
+          else out += '<span class="tok-kw">' + esc(m[4]) + '</span>';
+          last = m.index + m[0].length;
+        }
+        out += esc(code.slice(last));
+        return out;
+      }
+
+      var QUICK_START = [
+        '<!DOCTYPE html>',
+        '<html lang="zh-CN">',
+        '<head>',
+        '  <meta charset="UTF-8" />',
+        '  <title>示例：xxx</title>',
+        '</head>',
+        '<body>',
+        '  <div id="cesiumContainer"></div>',
+        '  <script src="./js/demo-utils.js"><' + '/script>',
+        '  <script type="module">',
+        "    import * as engine from '/src/index.ts';",
+        '',
+        '    async function demo(viewer, engine) {',
+        '      // ── 示例核心代码 ──',
+        '    }',
+        '',
+        '    const { viewer } = await DemoUtils.startup({',
+        '      engine,                              // 引擎命名空间',
+        '      view: [116.39, 39.9, 1_500_000],     // 初始视角 [经度, 纬度, 高度m]',
+        "      imagery: 'gaode-sat',                // 底图: gaode-sat | gaode-vec | osm | none",
+        "      title: '示例名称',                    // 右下角徽标",
+        '    });',
+        '    await demo(viewer, engine);',
+        "    DemoUtils.showCode(demo, '示例源码');   // 源码面板（高亮 + 复制）",
+        '  <' + '/script>',
+        '</body>',
+        '</html>',
+      ].join('\n');
+      document.getElementById('quickStart').innerHTML = highlight(QUICK_START);
+    })();
+  </script>
+</body>
+</html>

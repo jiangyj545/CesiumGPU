@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 01：影像图层切换与叠放 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:340px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+    .cg-panel .row{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;}
+    .cg-panel input[type=range]{flex:1;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>01 影像图层切换与叠放</h1>
+    <p class="desc">XyzImageryProvider 加载多底图：高德卫星 / 高德矢量 / OSM。
+      切换显隐、调整透明度、raiseToTop 改变叠放顺序。</p>
+    <div id="controls"></div>
+    <div class="row">透明度<input id="alpha" type="range" min="0" max="1" step="0.05" value="1" /><span id="alphaVal">100%</span></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const P = DemoUtils.IMAGERY_PRESETS;
+      const layers = viewer.globe.layers;
+
+      // ── 三个影像图层：叠放顺序 = 添加顺序（后添加的在栈顶）────────────
+      const satLayer = layers.addImageryProvider(new engine.XyzImageryProvider(P['gaode-sat']));
+      const vecLayer = layers.addImageryProvider(new engine.XyzImageryProvider(P['gaode-vec']));
+      const osmLayer = layers.addImageryProvider(new engine.XyzImageryProvider(P.osm));
+
+      const NAMES = [[satLayer, '高德卫星'], [vecLayer, '高德矢量'], [osmLayer, 'OSM']];
+      const nameOf = (l) => NAMES.find(([x]) => x === l)[1];
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      function refresh() {
+        const lines = [...layers].map(
+          (l, i) => `栈${i}  ${nameOf(l)}  show=${l.show}  alpha=${l.alpha.toFixed(2)}`
+        );
+        const active = layers.activeLayer; // 引擎渲染栈顶可见层
+        result.textContent =
+          lines.join('\n') +
+          '\n当前渲染图层: ' + (active ? nameOf(active) : '无（全部隐藏）');
+        for (const btn of controls.querySelectorAll('button[data-layer]')) {
+          btn.classList.toggle(
+            'active',
+            active === NAMES.find(([, n]) => n === btn.dataset.layer)[0]
+          );
+        }
+      }
+
+      // ── 独显：只显示选中的图层 ──────────────────────────────────────
+      for (const [layer, label] of NAMES) {
+        addBtn(label, () => {
+          for (const [l] of NAMES) l.show = l === layer;
+          refresh();
+        }).dataset.layer = label;
+      }
+
+      // ── 叠加模式：全部可见（引擎渲染栈顶可见层）─────────────────────
+      addBtn('叠加模式', () => {
+        for (const [l] of NAMES) l.show = true;
+        refresh();
+      });
+
+      // ── raiseToTop：把高德卫星提到栈顶（叠加模式下生效）─────────────
+      addBtn('高德卫星置顶', () => {
+        layers.raiseToTop(satLayer);
+        for (const [l] of NAMES) l.show = true;
+        refresh();
+      });
+
+      // ── 显隐切换当前渲染层 ──────────────────────────────────────────
+      addBtn('显隐切换', () => {
+        const active = layers.activeLayer || satLayer;
+        active.show = !active.show;
+        refresh();
+      });
+
+      // ── 透明度（写入图层 alpha；引擎按每层 alpha 参与合成）──────────
+      const slider = document.getElementById('alpha');
+      const alphaVal = document.getElementById('alphaVal');
+      slider.addEventListener('input', () => {
+        const active = layers.activeLayer;
+        const v = Number(slider.value);
+        alphaVal.textContent = Math.round(v * 100) + '%';
+        if (active) active.alpha = v;
+        refresh();
+      });
+
+      // 初始：独显高德卫星
+      vecLayer.show = false;
+      osmLayer.show = false;
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 9_000_000],
+          imagery: 'none', // 底图由示例自行管理
+          title: '01 · 影像图层切换与叠放',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '01 影像图层 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 09：粒子系统 ParticleSystem - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>09 粒子系统</h1>
+    <p class="desc">10000 粒子 GPU 计算粒子系统（北京地表发射），四种模式切换：
+      火焰 / 喷泉 / 烟花 / 烟雾。切换即销毁旧实例重建（GPU buffer 全量释放），
+      粒子经 G-Buffer 深度测试被地球正确遮挡。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+
+      const COUNT = 10_000;
+      const EMITTER = { lon: 116.391, lat: 39.907 };
+      const MODES = [
+        { mode: 'fire', name: '火焰' },
+        { mode: 'fountain', name: '喷泉' },
+        { mode: 'fireworks', name: '烟花' },
+        { mode: 'smoke', name: '烟雾' },
+      ];
+
+      let current = null;
+      let destroyed = 0;
+      let currentMode = null;
+
+      // ── 模式切换：销毁旧实例（destroy 释放 particle/params/quad buffer）──
+      function setMode(mode) {
+        if (current) {
+          viewer.scene.effects.remove(current);
+          current.destroy();
+          destroyed++;
+        }
+        current = new engine.ParticleSystem(viewer.context, {
+          scene: viewer.scene,
+          count: COUNT,
+          origin: { lon: EMITTER.lon, lat: EMITTER.lat, height: 0 },
+          mode,
+        });
+        viewer.scene.effects.add(current); // EffectManager: composite 之后 execute
+        currentMode = mode;
+        for (const btn of controls.querySelectorAll('button[data-mode]')) {
+          btn.classList.toggle('active', btn.dataset.mode === mode);
+        }
+        refresh();
+      }
+
+      function refresh() {
+        result.textContent =
+          `粒子数: ${COUNT.toLocaleString()}   模式: ${currentMode}\n` +
+          `切换次数: ${destroyed}（旧实例已销毁）\n` +
+          '深度测试: G-Buffer depthView（粒子被地球遮挡）';
+      }
+
+      for (const { mode, name } of MODES) {
+        const btn = document.createElement('button');
+        btn.textContent = name;
+        btn.dataset.mode = mode;
+        btn.addEventListener('click', () => setMode(mode));
+        controls.appendChild(btn);
+      }
+
+      // 相机自发射点以西 30° 侧视（正俯视会压扁粒子柱）
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(EMITTER.lon - 30, EMITTER.lat, 4_000_000),
+      });
+
+      setMode('fire');
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [86.391, 39.907, 4_000_000],
+          imagery: 'gaode-sat',
+          title: '09 · 粒子系统 ParticleSystem',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '09 粒子系统 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

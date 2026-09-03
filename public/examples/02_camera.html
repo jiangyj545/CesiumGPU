@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 02：相机 setView 与 flyTo - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:340px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel h2{font-size:12px;color:#7fb0e0;margin:6px 0 4px;font-weight:600;}
+    .cg-panel #controls,.cg-panel #controls2{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:200px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>02 相机 setView 与 flyTo</h1>
+    <p class="desc">setView 即时切换视角；flyTo 沿大圆弧线飞行，
+      支持 duration / easingFunction / orientation(pitch)。</p>
+    <h2>setView 快捷视角</h2>
+    <div id="controls"></div>
+    <h2>flyTo 动画</h2>
+    <div id="controls2"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const R = C3.EARTH_RADIUS;
+      const controls = document.getElementById('controls');
+      const controls2 = document.getElementById('controls2');
+      const result = document.getElementById('result');
+
+      function addBtn(parent, label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        parent.appendChild(btn);
+        return btn;
+      }
+
+      const CITIES = {
+        beijing:  { name: '北京', lon: 116.407, lat: 39.904 },
+        shanghai: { name: '上海', lon: 121.474, lat: 31.230 },
+        newyork:  { name: '纽约', lon: -74.006, lat: 40.713 },
+        sydney:   { name: '悉尼', lon: 151.209, lat: -33.869 },
+      };
+
+      let status = '就绪（拖拽/滚轮可打断飞行）';
+      const setStatus = (s) => { status = s; };
+
+      // ── setView：即时切换（无动画）──────────────────────────────────
+      addBtn(controls, '北京 2000km', () => {
+        viewer.camera.setView({
+          destination: { lon: CITIES.beijing.lon, lat: CITIES.beijing.lat, height: 2_000_000 },
+        });
+        setStatus('setView 北京');
+      });
+      addBtn(controls, '纽约 10000km', () => {
+        viewer.camera.setView({
+          destination: { lon: CITIES.newyork.lon, lat: CITIES.newyork.lat, height: 10_000_000 },
+        });
+        setStatus('setView 纽约');
+      });
+      addBtn(controls, '悉尼 8000km', () => {
+        viewer.camera.setView({
+          destination: { lon: CITIES.sydney.lon, lat: CITIES.sydney.lat, height: 8_000_000 },
+        });
+        setStatus('setView 悉尼');
+      });
+
+      // ── flyTo：不同 duration / easing / pitch ───────────────────────
+      const E = engine.EasingFunction;
+      addBtn(controls2, '上海 3s 默认缓动', () => {
+        viewer.camera.flyTo({
+          destination: { lon: CITIES.shanghai.lon, lat: CITIES.shanghai.lat, height: 2_000_000 },
+          duration: 3,
+          complete: () => setStatus('flyTo 上海 3s 完成'),
+          cancel: () => setStatus('flyTo 上海 被打断'),
+        });
+        setStatus('flyTo 上海 3s（QUINTIC_IN_OUT）…');
+      });
+      addBtn(controls2, '纽约 6s 线性', () => {
+        viewer.camera.flyTo({
+          destination: { lon: CITIES.newyork.lon, lat: CITIES.newyork.lat, height: 15_000_000 },
+          duration: 6,
+          easingFunction: E.LINEAR_NONE, // 长弧线：线性匀速对比
+          complete: () => setStatus('flyTo 纽约 6s 线性完成'),
+          cancel: () => setStatus('flyTo 纽约 被打断'),
+        });
+        setStatus('flyTo 纽约 6s（LINEAR_NONE）…');
+      });
+      addBtn(controls2, '北京低空 1km pitch-45°', () => {
+        viewer.camera.flyTo({
+          destination: { lon: CITIES.beijing.lon, lat: CITIES.beijing.lat, height: 1_000 },
+          duration: 4,
+          easingFunction: E.QUADRATIC_IN_OUT,
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-45) },
+          complete: () => setStatus('flyTo 北京低空完成（pitch=-45°）'),
+          cancel: () => setStatus('flyTo 北京低空被打断'),
+        });
+        setStatus('flyTo 北京低空 1km（QUADRATIC_IN_OUT）…');
+      });
+      addBtn(controls2, '悉尼 4s CUBIC', () => {
+        viewer.camera.flyTo({
+          destination: { lon: CITIES.sydney.lon, lat: CITIES.sydney.lat, height: 3_000_000 },
+          duration: 4,
+          easingFunction: E.CUBIC_IN_OUT,
+          complete: () => setStatus('flyTo 悉尼 4s 完成'),
+          cancel: () => setStatus('flyTo 悉尼 被打断'),
+        });
+        setStatus('flyTo 悉尼 4s（CUBIC_IN_OUT）…');
+      });
+      addBtn(controls2, '回到中国上空 3s', () => {
+        viewer.camera.flyTo({
+          destination: { lon: 105, lat: 36, height: 12_000_000 },
+          duration: 3,
+          complete: () => setStatus('flyTo 中国上空完成'),
+          cancel: () => setStatus('flyTo 中国上空被打断'),
+        });
+        setStatus('flyTo 中国上空（QUINTIC_IN_OUT）…');
+      });
+
+      // ── 相机位置实时读数 ────────────────────────────────────────────
+      viewer.preRender = () => {
+        const cam = viewer.camera;
+        const r = C3.magnitude(cam.position);
+        const lon = (Math.atan2(cam.position.y, cam.position.x) * 180) / Math.PI;
+        const lat = (Math.asin(Math.max(-1, Math.min(1, cam.position.z / r))) * 180) / Math.PI;
+        const altKm = ((r - 1) * R) / 1000;
+        result.textContent =
+          `经度 ${lon.toFixed(2)}°  纬度 ${lat.toFixed(2)}°\n` +
+          `高度 ${altKm.toFixed(1)} km  ${cam.inFlight ? '[飞行中]' : '[空闲]'}\n` +
+          status;
+      };
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 12_000_000],
+          imagery: 'gaode-sat',
+          title: '02 · 相机 setView 与 flyTo',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '02 相机 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 06：GPU 拾取 Pick - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:260px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>06 GPU 拾取</h1>
+    <p class="desc">viewer.onPick 点击拾取 + scene.pick(px,py) 主动拾取。
+      点击地球 / 多边形 / GLB 模型，显示拾取对象 id、类型、经纬高程与延迟。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 贴地多边形（三角扇，抬升 100 km 避免边缘沉入椭球）──────────────
+      function makeSurfacePolygon(context, centerLon, centerLat, halfDeg, color) {
+        const toUnit = (lon, lat) => {
+          const p = engine.Cartesian3.fromDegrees(lon, lat, 100_000);
+          return new engine.Cartesian3(p.x / S, p.y / S, p.z / S);
+        };
+        const center = toUnit(centerLon, centerLat);
+        const corners = [
+          toUnit(centerLon - halfDeg, centerLat - halfDeg),
+          toUnit(centerLon + halfDeg, centerLat - halfDeg),
+          toUnit(centerLon + halfDeg, centerLat + halfDeg),
+          toUnit(centerLon - halfDeg, centerLat + halfDeg),
+        ];
+        const verts = [];
+        const push = (v) => {
+          const n = engine.Cartesian3.normalize(v, new engine.Cartesian3());
+          verts.push(v.x, v.y, v.z, n.x, n.y, n.z, 0, 0);
+        };
+        push(center);
+        for (const c of corners) push(c);
+        const indices = [];
+        for (let i = 1; i <= 4; i++) indices.push(0, i, (i % 4) + 1);
+        return new engine.Primitive(context, {
+          vertices: new Float32Array(verts),
+          indices: new Uint32Array(indices),
+          color,
+          translucent: false,
+        });
+      }
+
+      const polyA = makeSurfacePolygon(viewer.context, 113.0, 42.8, 2.5, new engine.Color(1.0, 0.55, 0.10, 1.0));
+      const polyB = makeSurfacePolygon(viewer.context, 119.8, 37.0, 2.5, new engine.Color(0.62, 0.30, 0.92, 1.0));
+      const polyC = makeSurfacePolygon(viewer.context, 103.0, 36.5, 2.5, new engine.Color(0.20, 0.85, 0.55, 1.0));
+      viewer.scene.addPrimitive(polyA);
+      viewer.scene.addPrimitive(polyB);
+      viewer.scene.addPrimitive(polyC);
+
+      // ── 北京附近的 GLB 模型（可拾取对象）────────────────────────────────
+      const ecef = engine.Cartesian3.fromDegrees(116.4, 39.9, 0);
+      const enu = engine.Transforms.eastNorthUpToFixedFrame(ecef);
+      const yUpToZUp = engine.Matrix4.fromRotationX(Math.PI / 2);
+      const placement = engine.Matrix4.multiply(enu, yUpToZUp, new engine.Matrix4());
+      await engine.Model.fromGltfAsync({
+        url: '/models/cone4-red.glb',
+        scene: viewer.scene,
+        modelMatrix: placement,
+        scale: 500_000 / S,
+      });
+
+      // ── primitive → 展示名映射（所有场景 primitive 自动可拾取）──────────
+      const labels = new Map();
+      const globePrim = viewer.scene.globe.primitive;
+      if (globePrim) labels.set(globePrim, '地球');
+      for (const prim of viewer.scene.primitives) {
+        if (prim === polyA) labels.set(prim, '多边形 A');
+        else if (prim === polyB) labels.set(prim, '多边形 B');
+        else if (prim === polyC) labels.set(prim, '多边形 C');
+        else labels.set(prim, 'GLB 模型');
+      }
+      const typeOf = (r) => (r.id === 0 ? '背景' : (r.primitive && labels.get(r.primitive)) || `未知(id=${r.id})`);
+
+      /** 归一化 ECEF → 经纬高程（度 / 米） */
+      function toLonLatHeight(p) {
+        const mag = engine.Cartesian3.magnitude(p);
+        return {
+          lon: (Math.atan2(p.y, p.x) * 180) / Math.PI,
+          lat: (Math.atan2(p.z, Math.hypot(p.x, p.y)) * 180) / Math.PI,
+          heightM: (mag - 1.0) * S,
+        };
+      }
+
+      function fmt(r) {
+        const lines = [`类型: ${typeOf(r)}   id: ${r.id}`];
+        if (r.worldPosition) {
+          const g = toLonLatHeight(r.worldPosition);
+          lines.push(`经纬: ${g.lon.toFixed(4)}°E, ${g.lat.toFixed(4)}°N  高程: ${g.heightM.toFixed(0)} m`);
+        }
+        lines.push(`延迟: encode=${r.timing.encodeMs.toFixed(2)}ms  readback=${r.timing.readbackMs.toFixed(2)}ms`);
+        return lines;
+      }
+
+      let clickCount = 0;
+      let lastLines = ['(尚未拾取)'];
+      function refresh(extra) {
+        result.textContent =
+          `点击次数: ${clickCount}\n── 最近拾取 ──\n${lastLines.join('\n')}` +
+          (extra ? `\n${extra}` : '');
+      }
+
+      // ── 交互拾取：注册 onPick 后每次左键单击自动做一次 GPU 拾取 ─────────
+      viewer.onPick = (r) => {
+        clickCount++;
+        lastLines = r ? fmt(r) : ['未命中（场景未就绪或点击了空白）'];
+        refresh();
+      };
+
+      // ── 主动拾取：scene.pick(px, py)（canvas 设备像素，异步 readback）────
+      function projectToPixel(world) {
+        const vp = viewer.scene.camera.viewProjectionMatrix.values; // column-major
+        const clipX = vp[0] * world.x + vp[4] * world.y + vp[8] * world.z + vp[12];
+        const clipY = vp[1] * world.x + vp[5] * world.y + vp[9] * world.z + vp[13];
+        const clipW = vp[3] * world.x + vp[7] * world.y + vp[11] * world.z + vp[15];
+        return [
+          ((clipX / clipW) * 0.5 + 0.5) * viewer.canvas.width,
+          (0.5 - (clipY / clipW) * 0.5) * viewer.canvas.height,
+        ];
+      }
+      async function autoPick(world, wantType) {
+        const cw = viewer.canvas.width;
+        const ch = viewer.canvas.height;
+        let [px, py] = projectToPixel(world);
+        px = Math.min(Math.max(Math.round(px), 0), cw - 1);
+        py = Math.min(Math.max(Math.round(py), 0), ch - 1);
+        // 以投影点为圆心螺旋扫描，找到目标类型即停
+        const offsets = [[0, 0]];
+        for (let ring = 1; ring <= 6; ring++) {
+          for (let a = 0; a < 12; a++) {
+            const ang = (a / 12) * Math.PI * 2;
+            offsets.push([Math.cos(ang) * ring * 15, Math.sin(ang) * ring * 15]);
+          }
+        }
+        for (const [dx, dy] of offsets) {
+          const tx = Math.min(Math.max(Math.round(px + dx), 0), cw - 1);
+          const ty = Math.min(Math.max(Math.round(py + dy), 0), ch - 1);
+          const r = await viewer.scene.pick(tx, ty);
+          if (r && typeOf(r) === wantType) {
+            lastLines = [`scene.pick(${tx}, ${ty}) →`, ...fmt(r)];
+            refresh();
+            return;
+          }
+        }
+        lastLines = [`scene.pick: 未找到「${wantType}」（可能不在当前视野内）`];
+        refresh();
+      }
+      addBtn('自动拾取：多边形A', () => autoPick(engine.Cartesian3.fromDegrees(113.0, 42.8, 100_000), '多边形 A'));
+      addBtn('自动拾取：多边形B', () => autoPick(engine.Cartesian3.fromDegrees(119.8, 37.0, 100_000), '多边形 B'));
+      addBtn('自动拾取：多边形C', () => autoPick(engine.Cartesian3.fromDegrees(103.0, 36.5, 100_000), '多边形 C'));
+      addBtn('自动拾取：地球', () => autoPick(engine.Cartesian3.fromDegrees(100.0, 30.0, 0), '地球'));
+
+      refresh('提示：直接点击地球 / 多边形 / 模型即可拾取');
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.4, 39.9, 6_000_000],
+          imagery: 'gaode-sat',
+          title: '06 · GPU 拾取 Pick',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '06 GPU 拾取 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

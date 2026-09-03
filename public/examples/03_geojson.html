@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 03：GeoJSON 数据加载 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:340px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>03 GeoJSON 数据加载</h1>
+    <p class="desc">GeoJsonDataSource.load 加载内嵌的中国简化边界
+      （区域面 + 边界线 + 3 个城市点），实体转入 scene.entities 渲染。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 内嵌 GeoJSON：中国简化边界（合成示意数据）────────────────────
+      const chinaGeoJson = {
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            properties: { name: '中国（简化）', style: { color: '#ff9f1c' } },
+            geometry: {
+              type: 'Polygon',
+              coordinates: [[
+                [73.5, 39.0], [74.8, 42.8], [80.3, 45.0], [85.5, 47.0],
+                [87.3, 49.1], [96.3, 42.8], [105.0, 41.8], [112.0, 45.1],
+                [119.5, 47.5], [126.0, 52.5], [131.0, 45.1], [134.3, 48.4],
+                [130.5, 42.5], [126.9, 41.7], [121.5, 39.5], [121.5, 32.0],
+                [121.9, 29.5], [118.0, 24.5], [114.0, 22.4], [109.5, 20.2],
+                [108.5, 21.5], [105.5, 23.0], [101.0, 21.2], [97.8, 23.9],
+                [91.0, 27.8], [85.5, 28.3], [81.0, 30.2], [76.0, 35.5],
+                [73.5, 39.0]
+              ]]
+            }
+          },
+          {
+            type: 'Feature',
+            properties: { name: '北部示意边界线', style: { color: '#4dd0ff', width: 2 } },
+            geometry: {
+              type: 'LineString',
+              coordinates: [
+                [100.0, 38.0], [104.0, 37.5], [108.0, 37.0],
+                [112.0, 37.5], [116.0, 38.2], [120.0, 38.8]
+              ]
+            }
+          },
+          {
+            type: 'Feature',
+            properties: { name: '北京', style: { color: '#ff3030', pixelSize: 14 } },
+            geometry: { type: 'Point', coordinates: [116.407, 39.904] }
+          },
+          {
+            type: 'Feature',
+            properties: { name: '上海', style: { color: '#ffb703', pixelSize: 14 } },
+            geometry: { type: 'Point', coordinates: [121.474, 31.230] }
+          },
+          {
+            type: 'Feature',
+            properties: { name: '广州', style: { color: '#4ade80', pixelSize: 14 } },
+            geometry: { type: 'Point', coordinates: [113.264, 23.129] }
+          }
+        ]
+      };
+
+      // ── 加载并转入 scene.entities ──────────────────────────────────
+      const scene = viewer.scene;
+      const dataSource = await engine.GeoJsonDataSource.load(chinaGeoJson, { name: '中国简化边界' });
+
+      let nPoint = 0, nLine = 0, nPoly = 0, nLabel = 0;
+      for (const entity of [...dataSource.entities]) {
+        scene.entities.add(entity);
+        if (entity.point) {
+          nPoint++;
+          // 城市标注点：GeoJSON 点位附带 name 标签
+          if (!entity.label) {
+            scene.entities.add(new engine.Entity({
+              name: entity.name,
+              position: entity.position,
+              label: {
+                text: entity.name || '城市',
+                font: '16px sans-serif',
+                fillColor: engine.Color.WHITE,
+              },
+            }));
+            nLabel++;
+          }
+        } else if (entity.polyline) {
+          nLine++;
+        } else if (entity.polygon) {
+          nPoly++;
+        }
+      }
+
+      // ── 飞到范围 + 信息面板 ────────────────────────────────────────
+      viewer.camera.setView({
+        destination: { lon: 105, lat: 36, height: 8_500_000 },
+      });
+
+      addBtn('飞回中国全境', () => {
+        viewer.camera.flyTo({
+          destination: { lon: 105, lat: 36, height: 8_500_000 },
+          duration: 2,
+        });
+      });
+
+      result.textContent =
+        `GeoJSON 加载完成: ${dataSource.name}\n` +
+        `实体总数 ${scene.entities.length}（区域面 ${nPoly} / 线 ${nLine} / 点 ${nPoint}）\n` +
+        `城市标注 ${nLabel} 个：北京、上海、广州`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 8_500_000],
+          imagery: 'gaode-sat',
+          title: '03 · GeoJSON 数据加载',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '03 GeoJSON · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

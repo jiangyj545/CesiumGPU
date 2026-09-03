@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 08：动态墙 DynamicWall - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>08 动态墙 DynamicWall</h1>
+    <p class="desc">两实例：北京周边闭环墙（青蓝）+ 西北边界折线墙（橙红）。
+      横向光带自下而上涌动、顶部渐隐；旋转到地球远侧的墙段被正确遮挡。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      /** 米制经纬高 → 归一化 ECEF（Earth radius = 1） */
+      function lonLat(lon, lat, heightMetres = 0) {
+        const p = engine.Cartesian3.fromDegrees(lon, lat, heightMetres);
+        return new engine.Cartesian3(p.x / S, p.y / S, p.z / S);
+      }
+
+      /** 北京周边一圈不规则闭合路径（首尾相接成环） */
+      const BEIJING_RING = [
+        [116.0, 40.25], [116.95, 40.5], [117.9, 40.15], [118.35, 39.4],
+        [117.6, 38.75], [116.5, 38.55], [115.45, 38.9], [115.05, 39.75],
+        [115.7, 40.3], [116.0, 40.25], // 闭合
+      ];
+      /** 折线形墙：模拟一条边界线（不闭合） */
+      const BORDER_LINE = [
+        [110.0, 41.4], [111.4, 40.9], [112.8, 41.6], [114.3, 41.1],
+        [115.8, 41.8], [117.4, 41.2], [119.0, 41.9],
+      ];
+
+      // ── 两个 DynamicWall 实例（scene.effects 挂载，composite 后执行）─────
+      const ringWall = viewer.scene.effects.add(new engine.DynamicWall(viewer.context, {
+        positions: BEIJING_RING.map(([lon, lat]) => lonLat(lon, lat)),
+        height: 0.02,                       // 归一化高度 ≈ 127 km
+        color: [0.25, 0.75, 1.0, 0.9],      // 青蓝
+        speed: 0.5,
+        repeat: 3,
+        camera: viewer.scene.camera,
+      }));
+
+      const borderWall = viewer.scene.effects.add(new engine.DynamicWall(viewer.context, {
+        positions: BORDER_LINE.map(([lon, lat]) => lonLat(lon, lat)),
+        height: 0.012,                      // ≈ 76 km
+        color: [1.0, 0.45, 0.15, 0.85],     // 橙红
+        speed: 0.8,
+        repeat: 2,
+        camera: viewer.scene.camera,
+      }));
+
+      // ── 显隐开关 ──────────────────────────────────────────────────────
+      let ringOn = true;
+      let borderOn = true;
+      function refresh() {
+        result.textContent =
+          `环形墙: ${ringOn ? '开' : '关'}  (10 段, h≈127km, speed=0.5, repeat=3)\n` +
+          `折线墙: ${borderOn ? '开' : '关'}  (6 段, h≈76km, speed=0.8, repeat=2)\n` +
+          '提示: 拖动旋转 / 滚轮缩放，转到地球背面侧墙段应被遮挡';
+      }
+      const ringBtn = addBtn('环形墙: 开', () => {
+        ringOn = !ringOn;
+        ringWall.show = ringOn;
+        ringBtn.textContent = `环形墙: ${ringOn ? '开' : '关'}`;
+        ringBtn.classList.toggle('active', ringOn);
+        refresh();
+      });
+      ringBtn.classList.add('active');
+      const borderBtn = addBtn('折线墙: 开', () => {
+        borderOn = !borderOn;
+        borderWall.show = borderOn;
+        borderBtn.textContent = `折线墙: ${borderOn ? '开' : '关'}`;
+        borderBtn.classList.toggle('active', borderOn);
+        refresh();
+      });
+      borderBtn.classList.add('active');
+
+      // 相机俯视北京周边
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(117.0, 37.5, 2_000_000),
+      });
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [117.0, 37.5, 2_000_000],
+          imagery: 'gaode-sat',
+          title: '08 · 动态墙 DynamicWall',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '08 动态墙 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

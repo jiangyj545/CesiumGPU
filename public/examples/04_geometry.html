@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 04：手工构造几何体实体 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:340px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>04 手工构造几何体实体</h1>
+    <p class="desc">scene.entities.add 手工构造：点×5（不同色）、
+      航线折线、半透明区域面、经纬矩形面。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      /** lon/lat(度) + height(米) → 引擎归一化 ECEF（与 GeoJSON 实体同约定） */
+      function lonLat(lon, lat, heightMetres = 0) {
+        const dir = C3.normalize(C3.fromDegrees(lon, lat, 0), new C3());
+        const s = 1 + heightMetres / C3.EARTH_RADIUS;
+        return new C3(dir.x * s, dir.y * s, dir.z * s);
+      }
+      const css = (str, alpha = 1) => {
+        const c = engine.Color.fromCssColorString(str);
+        c.alpha = alpha;
+        return c;
+      };
+
+      const entities = viewer.scene.entities;
+
+      // ── 点 ×5（不同颜色 + 标签）────────────────────────────────────
+      const CITIES = [
+        { name: '北京',     lon: 116.407, lat: 39.904, color: '#ff3030' },
+        { name: '上海',     lon: 121.474, lat: 31.230, color: '#ffb703' },
+        { name: '广州',     lon: 113.264, lat: 23.129, color: '#4ade80' },
+        { name: '成都',     lon: 104.066, lat: 30.572, color: '#4dd0ff' },
+        { name: '乌鲁木齐', lon: 87.617,  lat: 43.793, color: '#e879f9' },
+      ];
+      for (const city of CITIES) {
+        entities.add(new engine.Entity({
+          name: city.name,
+          position: lonLat(city.lon, city.lat),
+          point: { color: css(city.color), pixelSize: 12 },
+          label: { text: city.name, font: '14px sans-serif', fillColor: engine.Color.WHITE },
+        }));
+      }
+
+      // ── 折线：京沪航线（抬高 120km，弧线过渡）──────────────────────
+      const ROUTE = [
+        [116.407, 39.904], [117.8, 38.2], [119.2, 36.0],
+        [120.6, 33.8], [121.474, 31.230],
+      ];
+      entities.add(new engine.Entity({
+        name: '京沪航线',
+        polyline: {
+          positions: ROUTE.map(([lon, lat]) => lonLat(lon, lat, 120_000)),
+          width: 3,
+          color: css('#ff4040'),
+        },
+      }));
+
+      // ── 多边形：华北半透明区域面 ───────────────────────────────────
+      const REGION = [[110.0, 33.0], [120.0, 33.0], [120.0, 40.0], [110.0, 40.0]];
+      entities.add(new engine.Entity({
+        name: '华北区域（半透明）',
+        polygon: {
+          hierarchy: { positions: REGION.map(([lon, lat]) => lonLat(lon, lat)) },
+          color: css('#2f6fed', 0.35),
+        },
+        polyline: {
+          positions: [...REGION, REGION[0]].map(([lon, lat]) => lonLat(lon, lat)),
+          width: 2,
+          color: css('#7fb0ff'),
+        },
+      }));
+
+      // ── 矩形：经纬对齐矩形面（四川一带）───────────────────────────
+      const RECT = [[100.0, 28.0], [104.0, 28.0], [104.0, 32.0], [100.0, 32.0]];
+      entities.add(new engine.Entity({
+        name: '经纬矩形',
+        polygon: {
+          hierarchy: { positions: RECT.map(([lon, lat]) => lonLat(lon, lat)) },
+          color: css('#22c55e', 0.4),
+        },
+      }));
+
+      // ── 透视按钮 + 统计 ────────────────────────────────────────────
+      addBtn('中国全境', () => viewer.camera.flyTo({
+        destination: { lon: 105, lat: 35, height: 7_000_000 }, duration: 2,
+      }));
+      addBtn('京沪航线', () => viewer.camera.flyTo({
+        destination: { lon: 119, lat: 35.5, height: 3_000_000 }, duration: 2,
+      }));
+      addBtn('华北区域', () => viewer.camera.flyTo({
+        destination: { lon: 115, lat: 36.5, height: 2_500_000 }, duration: 2,
+      }));
+
+      result.textContent =
+        `实体总数: ${entities.length}\n` +
+        `点 ×${CITIES.length}（5 色）+ 航线折线 ×1 + 区域面 ×1 + 矩形面 ×1`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 35, 7_000_000],
+          imagery: 'gaode-sat',
+          title: '04 · 手工构造几何体实体',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '04 几何体 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

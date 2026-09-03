@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 08：圆形扫描 CircleScan - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>08 圆形扫描 CircleScan</h1>
+    <p class="desc">双实例同时运行：北京（青色 500 km，3 环 / 2.5s）与
+      上海（橙红 250 km，2 环 / 1.6s）。扫描波从中心周期性向外扩散，圆盘逐顶点贴地投影。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 两个扫描特效：不同半径 / 颜色 / 周期 / 环数 ─────────────────────
+      const beijingScan = new engine.CircleScan(viewer.context, {
+        center: { lon: 116.4, lat: 39.9 },
+        radius: 500_000,                       // 500 km
+        color: [0.2, 0.9, 1.0, 0.85],          // 青色
+        speed: 2.5,                            // 2.5 s / 轮
+        rings: 3,
+      });
+      beijingScan.setCamera(viewer.camera);
+      viewer.scene.effects.add(beijingScan);
+
+      const shanghaiScan = new engine.CircleScan(viewer.context, {
+        center: { lon: 121.47, lat: 31.23 },
+        radius: 250_000,                       // 250 km
+        color: [1.0, 0.35, 0.15, 0.9],         // 橙红
+        speed: 1.6,
+        rings: 2,
+      });
+      shanghaiScan.setCamera(viewer.camera);
+      viewer.scene.effects.add(shanghaiScan);
+
+      // ── 显隐开关（additive 叠加在已合成场景之上）────────────────────────
+      let bjOn = true;
+      let shOn = true;
+      function refresh() {
+        result.textContent =
+          `北京扫描: ${bjOn ? '开' : '关'}  (500 km, 青, 3 环 / 2.5s)\n` +
+          `上海扫描: ${shOn ? '开' : '关'}  (250 km, 橙红, 2 环 / 1.6s)\n` +
+          '管线: scene.effects → additive (one, one) 合成到场景之上';
+      }
+      const bjBtn = addBtn('北京扫描: 开', () => {
+        bjOn = !bjOn;
+        beijingScan.show = bjOn;
+        bjBtn.textContent = `北京扫描: ${bjOn ? '开' : '关'}`;
+        bjBtn.classList.toggle('active', bjOn);
+        refresh();
+      });
+      bjBtn.classList.add('active');
+      const shBtn = addBtn('上海扫描: 开', () => {
+        shOn = !shOn;
+        shanghaiScan.show = shOn;
+        shBtn.textContent = `上海扫描: ${shOn ? '开' : '关'}`;
+        shBtn.classList.toggle('active', shOn);
+        refresh();
+      });
+      shBtn.classList.add('active');
+
+      // 初始视角覆盖北京—上海
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(119.0, 35.5, 5_500_000),
+      });
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [119.0, 35.5, 5_500_000],
+          imagery: 'gaode-sat',
+          title: '08 · 圆形扫描 CircleScan',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '08 圆形扫描 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

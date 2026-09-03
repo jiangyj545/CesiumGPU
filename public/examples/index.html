@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CesiumGPU 示例门户</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #05080d; color: #d8e0e8; }
+    body {
+      font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      display: flex;
+    }
+
+    button {
+      font: 12.5px/1.4 system-ui, sans-serif;
+      color: #cde; background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      border-radius: 5px; padding: 5px 12px; cursor: pointer;
+    }
+    button:hover { background: rgba(92, 207, 255, 0.16); border-color: rgba(92, 207, 255, 0.45); color: #fff; }
+
+    /* ── 左侧菜单 ─────────────────────────────────────────── */
+    #sidebar {
+      width: 250px; flex-shrink: 0; height: 100%;
+      display: flex; flex-direction: column;
+      background: #070b12;
+      border-right: 1px solid rgba(92, 207, 255, 0.18);
+      z-index: 100;
+    }
+    .brand {
+      padding: 16px 16px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .brand a {
+      font-size: 17px; font-weight: 700; letter-spacing: 0.5px;
+      color: #fff; text-decoration: none;
+    }
+    .brand a .accent { color: #5cd8ff; }
+    .brand .sub { color: #667; font-size: 11px; margin-top: 2px; letter-spacing: 1px; }
+
+    #menu { flex: 1; overflow-y: auto; padding: 8px 0 20px; }
+    #menu::-webkit-scrollbar { width: 8px; }
+    #menu::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 4px; }
+
+    #menu ul { list-style: none; margin: 0; padding: 0; }
+
+    .cat-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px 6px;
+      color: #8ee6ff; font-size: 12.5px; font-weight: 600; letter-spacing: 1px;
+      cursor: pointer; user-select: none;
+    }
+    .cat-header .arrow {
+      font-size: 10px; color: #567;
+      transition: transform 0.15s ease;
+    }
+    li.closed .cat-header .arrow { transform: rotate(-90deg); }
+    .cat-header:hover { color: #c2ecff; }
+
+    li.closed .items { display: none; }
+
+    .item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 14px; cursor: pointer;
+      color: #a9b8c6; font-size: 13px;
+      border-left: 2px solid transparent;
+      transition: background 0.12s ease;
+    }
+    .item:hover { background: rgba(92, 207, 255, 0.07); color: #e8f4fc; }
+    .item.active {
+      background: rgba(92, 207, 255, 0.12);
+      border-left-color: #5cd8ff; color: #fff;
+    }
+    /* 编号占位色块（无缩略图时） */
+    .thumb {
+      width: 38px; height: 26px; flex-shrink: 0;
+      border-radius: 4px; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+      font: 700 11px/1 Consolas, Monaco, monospace; color: rgba(255, 255, 255, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; }
+
+    .sidebar-foot {
+      padding: 10px 14px; border-top: 1px solid rgba(255, 255, 255, 0.08);
+      color: #556; font-size: 11px;
+    }
+    .sidebar-foot a { color: #5cd8ff; text-decoration: none; }
+
+    /* ── 右侧预览区 ───────────────────────────────────────── */
+    main { flex: 1; height: 100%; display: flex; flex-direction: column; min-width: 0; }
+
+    #topbar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 14px;
+      background: rgba(10, 14, 22, 0.92);
+      border-bottom: 1px solid rgba(92, 207, 255, 0.18);
+      flex-shrink: 0;
+    }
+    #btnMenu { display: none; font-size: 15px; padding: 4px 10px; }
+    #crumb {
+      flex: 1; min-width: 0;
+      color: #e8f2fa; font-size: 14px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #crumb .num { color: #5cd8ff; font-family: Consolas, Monaco, monospace; margin-right: 6px; }
+    .tools { display: flex; gap: 6px; flex-shrink: 0; }
+
+    #stage { flex: 1; position: relative; background: #000; }
+    #preview {
+      width: 100%; height: 100%; border: 0; display: block; background: #000;
+    }
+    #preview.hidden { visibility: hidden; }
+
+    /* "示例编写中" 占位 */
+    #writing {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 14px; text-align: center; padding: 24px;
+      background:
+        radial-gradient(ellipse at 50% 38%, rgba(92, 207, 255, 0.10), transparent 60%),
+        #05080d;
+      z-index: 10;
+    }
+    #writing.hidden { display: none; }
+    #writing .bignum {
+      font: 700 88px/1 Consolas, Monaco, monospace;
+      color: rgba(92, 207, 255, 0.16); letter-spacing: 4px;
+    }
+    #writing .name { color: #e8f2fa; font-size: 20px; font-weight: 600; }
+    #writing .hint { color: #7a8a99; font-size: 13px; max-width: 420px; }
+    #writing .hint b { color: #9ecfef; }
+
+    /* ── 源码弹窗 ─────────────────────────────────────────── */
+    #srcModal {
+      position: fixed; inset: 0; z-index: 500;
+      background: rgba(0, 0, 0, 0.62);
+      display: flex; align-items: center; justify-content: center; padding: 32px;
+    }
+    #srcModal.hidden { display: none; }
+    .src-box {
+      width: min(880px, 100%); height: min(640px, 100%);
+      display: flex; flex-direction: column;
+      background: rgba(8, 12, 18, 0.97);
+      border: 1px solid rgba(92, 207, 255, 0.35); border-radius: 10px;
+      box-shadow: 0 12px 48px rgba(0, 0, 0, 0.7); overflow: hidden;
+    }
+    .src-head {
+      display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+      background: rgba(92, 207, 255, 0.12);
+      border-bottom: 1px solid rgba(92, 207, 255, 0.25);
+      color: #8ee6ff; font-size: 13px; font-weight: 600;
+    }
+    .src-head .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .src-box pre { flex: 1; overflow: auto; padding: 14px 18px; margin: 0; }
+    .src-box code { font: 12.5px/1.7 Consolas, Monaco, monospace; color: #d8e0e8; white-space: pre; }
+    .tok-kw { color: #5cd8ff; } .tok-str { color: #ffb86c; }
+    .tok-num { color: #c792ea; } .tok-com { color: #5f7a5f; font-style: italic; }
+
+    /* ── toast ────────────────────────────────────────────── */
+    #toast {
+      position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+      z-index: 600; background: rgba(8, 12, 18, 0.95);
+      border: 1px solid rgba(92, 207, 255, 0.4); color: #8ee6ff;
+      font-size: 13px; padding: 8px 18px; border-radius: 6px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      transition: opacity 0.25s ease; pointer-events: none;
+    }
+    #toast.hidden { opacity: 0; }
+
+    /* ── 移动端：侧栏抽屉 ─────────────────────────────────── */
+    #backdrop {
+      position: fixed; inset: 0; z-index: 90;
+      background: rgba(0, 0, 0, 0.5); display: none;
+    }
+    @media (max-width: 900px) {
+      #sidebar {
+        position: fixed; left: 0; top: 0; bottom: 0;
+        transform: translateX(-100%);
+        transition: transform 0.2s ease;
+        box-shadow: 8px 0 32px rgba(0, 0, 0, 0.6);
+      }
+      body.menu-open #sidebar { transform: translateX(0); }
+      body.menu-open #backdrop { display: block; }
+      #btnMenu { display: inline-block; }
+      #crumb { font-size: 13px; }
+      .tools button { padding: 5px 8px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- ── 左侧分类菜单 ─────────────────────────────────────── -->
+  <aside id="sidebar">
+    <div class="brand">
+      <a href="/" title="返回引擎主页">Cesium<span class="accent">GPU</span></a>
+      <div class="sub">EXAMPLES PORTAL</div>
+    </div>
+    <nav id="menu"></nav>
+    <div class="sidebar-foot">
+      <a href="/" target="_blank">引擎主页</a> ·
+      <a href="./welcome.html" target="_blank">欢迎页</a><br />
+      需要 WebGPU（Chrome / Edge 113+）
+    </div>
+  </aside>
+  <div id="backdrop"></div>
+
+  <!-- ── 右侧预览区 ───────────────────────────────────────── -->
+  <main>
+    <header id="topbar">
+      <button id="btnMenu" title="打开/收起菜单">☰</button>
+      <div id="crumb">欢迎</div>
+      <div class="tools">
+        <button id="btnCode"  title="查看当前示例源码">源码</button>
+        <button id="btnRefresh" title="刷新预览">刷新</button>
+        <button id="btnOpen"  title="在新标签页打开示例">新标签页</button>
+      </div>
+    </header>
+    <div id="stage">
+      <iframe id="preview" src="./welcome.html" title="示例预览"></iframe>
+      <div id="writing" class="hidden">
+        <div class="bignum" id="wNum">--</div>
+        <div class="name" id="wName">示例编写中</div>
+        <div class="hint">该示例将在后续任务中补齐。已完成的示例会出现在左侧菜单并能正常加载。</div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ── 源码弹窗 ─────────────────────────────────────────── -->
+  <div id="srcModal" class="hidden">
+    <div class="src-box">
+      <div class="src-head">
+        <span class="title" id="srcTitle">源码</span>
+        <button id="srcCopy">复制</button>
+        <button id="srcClose">关闭 ✕</button>
+      </div>
+      <pre><code id="srcCode"></code></pre>
+    </div>
+  </div>
+
+  <!-- ── 配置：分类树驱动菜单（EV-Globe 模式） ─────────────── -->
+  <script src="./config.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      // ── 元素引用 ───────────────────────────────────────────
+      var menuEl     = document.getElementById('menu');
+      var crumbEl    = document.getElementById('crumb');
+      var iframeEl   = document.getElementById('preview');
+      var writingEl  = document.getElementById('writing');
+      var wNumEl     = document.getElementById('wNum');
+      var wNameEl    = document.getElementById('wName');
+      var srcModalEl = document.getElementById('srcModal');
+      var srcTitleEl = document.getElementById('srcTitle');
+      var srcCodeEl  = document.getElementById('srcCode');
+      var toastEl    = null;
+
+      var WELCOME = './welcome.html';
+      var WELCOME_TITLE = 'CesiumGPU - WebGPU 地球渲染引擎'; // 引擎主页特征（fallback 检测用）
+      var LS_COLLAPSED = 'cg-examples-collapsed';
+
+      /** 当前打开的示例 { name, fileName, num }；null = 欢迎页 */
+      var current = null;
+      /** 加载请求序号，防止快速点击导致的竞态 */
+      var loadSeq = 0;
+
+      var categories = (window.EXAMPLES_CONFIG && window.EXAMPLES_CONFIG.categories) || [];
+      if (!categories.length) {
+        console.error('[examples] config.js 未定义 EXAMPLES_CONFIG.categories');
+      }
+
+      // ── 极简 JS 高亮（与 demo-utils.js 同配色） ──────────────
+      var KW = 'const|let|var|function|return|if|else|for|while|of|in|new|class|extends|async|await|import|from|export|default|try|catch|finally|throw|typeof|this|null|undefined|true|false';
+      var RE = new RegExp(
+        '(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)' +
+        "|('(?:\\\\.|[^'\\\\\\n])*'|\"(?:\\\\.|[^\"\\\\\\n])*\"|`(?:\\\\.|[^`\\\\])*`)" +
+        '|(\\b\\d+(?:\\.\\d+)?(?:_\\d+)*(?:e[+-]?\\d+)?\\b)' +
+        '|\\b(' + KW + ')\\b', 'g');
+      function esc(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+      function highlight(code) {
+        var out = '', last = 0, m;
+        RE.lastIndex = 0;
+        while ((m = RE.exec(code)) !== null) {
+          out += esc(code.slice(last, m.index));
+          if (m[1]) out += '<span class="tok-com">' + esc(m[1]) + '</span>';
+          else if (m[2]) out += '<span class="tok-str">' + esc(m[2]) + '</span>';
+          else if (m[3]) out += '<span class="tok-num">' + esc(m[3]) + '</span>';
+          else out += '<span class="tok-kw">' + esc(m[4]) + '</span>';
+          last = m.index + m[0].length;
+        }
+        out += esc(code.slice(last));
+        return out;
+      }
+
+      // ── toast ──────────────────────────────────────────────
+      var toastTimer = 0;
+      function toast(text) {
+        if (!toastEl) {
+          toastEl = document.createElement('div');
+          toastEl.id = 'toast';
+          document.body.appendChild(toastEl);
+        }
+        toastEl.textContent = text;
+        toastEl.classList.remove('hidden');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { toastEl.classList.add('hidden'); }, 2200);
+      }
+
+      // ── 菜单渲染 ───────────────────────────────────────────
+      var collapsed = {};
+      try {
+        collapsed = JSON.parse(localStorage.getItem(LS_COLLAPSED) || '{}') || {};
+      } catch (err) {
+        console.warn('[examples] 折叠状态读取失败，使用默认值', err);
+        collapsed = {};
+      }
+
+      function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+      function renderMenu() {
+        var frag = document.createDocumentFragment();
+        // 欢迎页入口（不编号）
+        var welcomeItem = document.createElement('div');
+        welcomeItem.className = 'item';
+        welcomeItem.dataset.file = 'welcome.html';
+        welcomeItem.innerHTML =
+          '<span class="thumb" style="background:linear-gradient(135deg,#12324a,#1a5f7a)">⌂</span>' +
+          '<span>欢迎 / 使用说明</span>';
+        frag.appendChild(welcomeItem);
+
+        var num = 0;
+        categories.forEach(function (cat) {
+          var li = document.createElement('li');
+          if (collapsed[cat.name]) li.className = 'closed';
+
+          var header = document.createElement('div');
+          header.className = 'cat-header';
+          header.innerHTML = '<span class="arrow">▼</span><span></span>';
+          header.lastChild.textContent = cat.name + '（' + cat.items.length + '）';
+          header.addEventListener('click', function () {
+            li.classList.toggle('closed');
+            collapsed[cat.name] = li.classList.contains('closed');
+            try {
+              localStorage.setItem(LS_COLLAPSED, JSON.stringify(collapsed));
+            } catch (err) {
+              console.warn('[examples] 折叠状态保存失败', err);
+            }
+          });
+          li.appendChild(header);
+
+          var ul = document.createElement('ul');
+          ul.className = 'items';
+          cat.items.forEach(function (item) {
+            num++;
+            var it = document.createElement('div');
+            it.className = 'item';
+            it.dataset.file = item.fileName;
+            // 无缩略图 → 按序号生成青色系占位色块；有 thumbnail 字段则用图
+            var hue = (num * 47) % 200 + 180;
+            var it2 = it;
+            if (item.thumbnail) {
+              it.innerHTML =
+                '<span class="thumb"><img src="' + esc(item.thumbnail) +
+                '" alt="" onerror="this.parentNode.textContent=\'▦\'" /></span><span></span>';
+            } else {
+              it.innerHTML =
+                '<span class="thumb" style="background:linear-gradient(135deg,' +
+                'hsl(' + hue + ',55%,22%),hsl(' + hue + ',70%,38%))">' + pad2(num) +
+                '</span><span></span>';
+            }
+            it2.lastChild.textContent = item.name;
+            it2.addEventListener('click', function () { openExample(item, num); });
+            ul.appendChild(it2);
+          });
+          li.appendChild(ul);
+          frag.appendChild(li);
+        });
+
+        menuEl.innerHTML = '';
+        menuEl.appendChild(frag);
+      }
+
+      function markActive(fileName) {
+        var nodes = menuEl.querySelectorAll('.item');
+        for (var i = 0; i < nodes.length; i++) {
+          nodes[i].classList.toggle('active', nodes[i].dataset.file === fileName);
+        }
+      }
+
+      // ── 加载控制 ───────────────────────────────────────────
+      function showWriting(item, num) {
+        iframeEl.classList.add('hidden');
+        iframeEl.src = 'about:blank';
+        wNumEl.textContent = pad2(num);
+        wNameEl.textContent = item.name + ' · 示例编写中';
+        writingEl.classList.remove('hidden');
+      }
+
+      function hideWriting() {
+        writingEl.classList.add('hidden');
+        iframeEl.classList.remove('hidden');
+      }
+
+      /** 引擎主页 shell 特征：dev 服务器对缺失 html 的 SPA 回退会返回它 */
+      var FALLBACK_MARKER = '/src/main.ts';
+
+      /**
+       * 打开示例：先 GET 预检内容。Vite dev 服务器对缺失的 html 返回 200 并回退
+       * 到引擎主页 shell（含 /src/main.ts），因此仅靠状态码不够——需要检查响应体
+       * 是否为回退页；iframe onload 中另做一次特征检测兜底。
+       */
+      function openExample(item, num) {
+        current = { name: item.name, fileName: item.fileName, num: num };
+        crumbEl.innerHTML = '<span class="num">' + pad2(num) + '</span>';
+        crumbEl.appendChild(document.createTextNode(item.name));
+        markActive(item.fileName);
+        location.hash = '/' + item.fileName;
+        hideWriting();
+
+        var seq = ++loadSeq;
+        fetch(item.fileName, { headers: { Accept: 'text/html' } }).then(function (res) {
+          if (seq !== loadSeq) return; // 已被更新的点击取代
+          if (!res.ok) {
+            console.info('[examples] 示例不存在: ' + item.fileName + ' (' + res.status + ')');
+            showWriting(item, num);
+            return null;
+          }
+          return res.text();
+        }).then(function (text) {
+          if (text === null || seq !== loadSeq) return;
+          if (text.indexOf(FALLBACK_MARKER) !== -1) {
+            // SPA 回退到引擎主页 → 该示例尚未创建
+            console.info('[examples] 示例编写中（SPA 回退检测）: ' + item.fileName);
+            showWriting(item, num);
+            return;
+          }
+          iframeEl.src = './' + item.fileName;
+        }).catch(function (err) {
+          if (seq !== loadSeq) return;
+          console.error('[examples] 示例预检失败: ' + item.fileName, err);
+          showWriting(item, num);
+          toast('加载失败：' + err.message);
+        });
+      }
+
+      function openWelcome() {
+        current = null;
+        crumbEl.textContent = '欢迎 / 使用说明';
+        markActive('welcome.html');
+        hideWriting();
+        iframeEl.src = WELCOME;
+        if (location.hash) {
+          history.replaceState(null, '', location.pathname + location.search);
+        }
+      }
+
+      /**
+       * iframe onload 兜底：dev 服务器 SPA 回退会把缺失页渲染成引擎主页
+       * （特征: 标题匹配且含 #timeline），此时仍显示"示例编写中"。
+       */
+      iframeEl.addEventListener('load', function () {
+        if (!current) return;
+        try {
+          var doc = iframeEl.contentDocument;
+          if (doc && doc.title === WELCOME_TITLE && doc.getElementById('timeline')) {
+            showWriting(current, current.num);
+          }
+        } catch (err) {
+          // 跨域（未来外链示例）时无法读取文档，忽略，不影响展示
+        }
+      });
+
+      // ── 顶部工具条 ─────────────────────────────────────────
+      document.getElementById('btnOpen').addEventListener('click', function () {
+        var url = current ? './' + current.fileName : WELCOME;
+        window.open(url, '_blank');
+      });
+
+      document.getElementById('btnRefresh').addEventListener('click', function () {
+        hideWriting();
+        if (current) {
+          iframeEl.src = './' + current.fileName + '?t=' + Date.now();
+        } else {
+          iframeEl.src = WELCOME;
+        }
+        toast('已刷新');
+      });
+
+      document.getElementById('btnCode').addEventListener('click', function () {
+        if (!current) { toast('欢迎页无示例源码'); return; }
+        fetch(current.fileName).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.text();
+        }).then(function (text) {
+          // SPA 回退页（引擎主页 shell）= 示例尚未创建
+          if (text.indexOf(FALLBACK_MARKER) !== -1) {
+            toast('示例尚未创建，暂无源码');
+            return;
+          }
+          srcTitleEl.textContent = current.fileName + ' — ' + current.name;
+          srcCodeEl.innerHTML = highlight(text);
+          srcModalEl.classList.remove('hidden');
+        }).catch(function (err) {
+          toast('示例尚未创建，暂无源码');
+          console.info('[examples] 源码读取失败: ' + current.fileName, err);
+        });
+      });
+      document.getElementById('srcClose').addEventListener('click', function () {
+        srcModalEl.classList.add('hidden');
+      });
+      srcModalEl.addEventListener('click', function (ev) {
+        if (ev.target === srcModalEl) srcModalEl.classList.add('hidden');
+      });
+      document.getElementById('srcCopy').addEventListener('click', function () {
+        navigator.clipboard.writeText(srcCodeEl.textContent).then(
+          function () { toast('源码已复制到剪贴板'); },
+          function (err) { toast('复制失败'); console.error('[examples] copy failed', err); }
+        );
+      });
+
+      // ── 移动端抽屉 ─────────────────────────────────────────
+      document.getElementById('btnMenu').addEventListener('click', function () {
+        document.body.classList.toggle('menu-open');
+      });
+      document.getElementById('backdrop').addEventListener('click', function () {
+        document.body.classList.remove('menu-open');
+      });
+      menuEl.addEventListener('click', function (ev) {
+        // 移动端点击菜单项后自动收起抽屉
+        if (ev.target.closest && ev.target.closest('.item')) {
+          document.body.classList.remove('menu-open');
+        }
+      });
+
+      // ── hash 路由（#/{fileName} 直达示例） ──────────────────
+      function resolveByFileName(fileName) {
+        var num = 0;
+        for (var i = 0; i < categories.length; i++) {
+          var items = categories[i].items;
+          for (var j = 0; j < items.length; j++) {
+            num++;
+            if (items[j].fileName === fileName) return { item: items[j], num: num };
+          }
+        }
+        return null;
+      }
+
+      function applyHash() {
+        var m = location.hash.match(/^#\/(.+\.html)$/);
+        if (!m) { openWelcome(); return; }
+        var found = resolveByFileName(m[1]);
+        if (found) openExample(found.item, found.num);
+        else openWelcome();
+      }
+      window.addEventListener('hashchange', applyHash);
+
+      // ── 启动 ───────────────────────────────────────────────
+      renderMenu();
+      applyHash();
+    })();
+  </script>
+</body>
+</html>

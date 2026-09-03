@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 07：路径飞行漫游 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>07 路径飞行漫游</h1>
+    <p class="desc">CatmullRomSpline 平滑串联 北京→上海→广州→成都 四城航线，
+      相机逐帧 evaluate 沿路径巡航（机头朝向切线方向），支持暂停 / 倍速 / 重置。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      /** 米制经纬高 → 归一化 ECEF（Earth radius = 1） */
+      function lonLat(lon, lat, heightMetres = 0) {
+        const p = engine.Cartesian3.fromDegrees(lon, lat, heightMetres);
+        return new engine.Cartesian3(p.x / S, p.y / S, p.z / S);
+      }
+
+      // ── 航线：北京 → 上海 → 广州 → 成都（巡航高度不同，形成起伏）────────
+      const CITIES = [
+        { name: '北京', lon: 116.40, lat: 39.90, alt: 1_500_000 },
+        { name: '上海', lon: 121.47, lat: 31.23, alt: 800_000 },
+        { name: '广州', lon: 113.26, lat: 23.13, alt: 700_000 },
+        { name: '成都', lon: 104.07, lat: 30.57, alt: 1_000_000 },
+      ];
+      const SEG_SEC = 8;                       // 每段 8 秒
+      const times = CITIES.map((_, i) => i * SEG_SEC);
+      const points = CITIES.map((c) => lonLat(c.lon, c.lat, c.alt));
+      const TOTAL = times[times.length - 1];
+
+      // CatmullRom 样条：过全部 4 个控制点的平滑曲线
+      const spline = new engine.CatmullRomSpline({ times, points });
+
+      // ── 航线可视化：200 个采样点连成折线实体 ───────────────────────────
+      const pathPts = [];
+      for (let i = 0; i <= 200; i++) pathPts.push(spline.evaluate((i / 200) * TOTAL));
+      viewer.scene.entities.add({
+        name: '航线',
+        polyline: { positions: pathPts, width: 2, color: new engine.Color(0.3, 0.8, 1.0, 0.9) },
+      });
+
+      // ── 城市标记：地表点 + 文字标签 ────────────────────────────────────
+      for (const c of CITIES) {
+        viewer.scene.entities.add({
+          name: c.name,
+          position: lonLat(c.lon, c.lat, 0),
+          point: { color: new engine.Color(1.0, 0.8, 0.2, 1.0), pixelSize: 8 },
+          label: { text: c.name, fillColor: new engine.Color(1, 1, 1, 1) },
+        });
+      }
+
+      // ── 航向角：路径切线在局部 ENU 东/北方向上的方位角 ─────────────────
+      function headingAt(t) {
+        const p = spline.evaluate(t);
+        const q = spline.evaluate(Math.min(t + 0.5, TOTAL));
+        // up = normalize(p)；east = normalize(ẑ × up)；north = up × east
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const ux = p.x / mag, uy = p.y / mag, uz = p.z / mag;
+        let ex = -uy, ey = ux, ez = 0;
+        const em = Math.hypot(ex, ey) || 1;
+        ex /= em; ey /= em;
+        const nx = uy * ez - uz * ey;
+        const ny = uz * ex - ux * ez;
+        const nz = ux * ey - uy * ex;
+        const dx = q.x - p.x, dy = q.y - p.y, dz = q.z - p.z;
+        return Math.atan2(dx * ex + dy * ey + dz * ez, dx * nx + dy * ny + dz * nz);
+      }
+
+      // ── 巡航循环：逐帧 evaluate → setView ─────────────────────────────
+      let playing = true;
+      let speed = 1;
+      let t = 0;
+      let lastTs = performance.now();
+
+      function applyCamera() {
+        const p = spline.evaluate(t);
+        viewer.camera.setView({
+          destination: new engine.Cartesian3(p.x * S, p.y * S, p.z * S), // 米制 ECEF
+          orientation: { heading: headingAt(t), pitch: engine.CesiumMath.toRadians(-35) },
+        });
+        const seg = Math.max(0, Math.min(Math.floor(t / SEG_SEC), CITIES.length - 2));
+        const altM = (engine.Cartesian3.magnitude(p) - 1) * S;
+        result.textContent =
+          `进度: ${t.toFixed(1)} / ${TOTAL}s  (${Math.round((t / TOTAL) * 100)}%)\n` +
+          `航段: ${CITIES[seg].name} → ${CITIES[seg + 1].name}\n` +
+          `高度: ${(altM / 1000).toFixed(0)} km   倍速: ${speed}x\n` +
+          `状态: ${playing ? '巡航中' : '已暂停（可自由拖拽视角）'}`;
+      }
+
+      function tick(now) {
+        try {
+          // dt 钳非负：首帧 rAF 时间戳可能早于初始化时的 lastTs
+          const dt = Math.max(0, Math.min((now - lastTs) / 1000, 0.1));
+          lastTs = now;
+          if (playing) {
+            // 归一化取模：JS % 保号，防止 t 出现负数导致航段索引越界
+            t = (((t + dt * speed) % TOTAL) + TOTAL) % TOTAL; // 循环巡航
+            applyCamera();
+          }
+        } catch (err) {
+          playing = false;
+          DemoUtils.showError('巡航循环异常，已停止', err);
+          return; // 中断 rAF 链，避免异常风暴
+        }
+        requestAnimationFrame(tick);
+      }
+
+      // ── 控制按钮 ──────────────────────────────────────────────────────
+      const playBtn = addBtn('暂停', () => {
+        playing = !playing;
+        playBtn.textContent = playing ? '暂停' : '播放';
+        playBtn.classList.toggle('active', !playing);
+        applyCamera();
+      });
+      addBtn('重新开始', () => { t = 0; applyCamera(); });
+      for (const s of [0.5, 1, 2]) {
+        const b = addBtn(`${s}x`, () => {
+          speed = s;
+          for (const btn of controls.querySelectorAll('button[data-speed]')) {
+            btn.classList.toggle('active', Number(btn.dataset.speed) === s);
+          }
+        });
+        b.dataset.speed = s;
+        if (s === 1) b.classList.add('active');
+      }
+
+      applyCamera();
+      requestAnimationFrame(tick);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.4, 39.9, 1_500_000],
+          imagery: 'gaode-sat',
+          title: '07 · 路径飞行漫游',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '07 路径飞行漫游 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>
