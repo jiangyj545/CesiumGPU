@@ -5,7 +5,7 @@ import { Transforms } from '../math/Transforms';
 import { Model } from '../scene/Model';
 import { Camera } from '../scene/Camera';
 import { Primitive } from '../scene/Primitive';
-import { PickPass, PickResult } from '../picking/PickPass';
+import { PickResult } from '../picking/PickPass';
 
 /**
  * Spike: GPU picking via id-encoded render-to-texture + 1×1 readback.
@@ -156,7 +156,7 @@ async function run(): Promise<void> {
   log(`模型已加载: cone4-red.glb (${model.primitiveCount} 个 mesh primitive)`);
 
   // ── PickPass: scene-graph primitives (globe + model) pick automatically ────
-  const picker = new PickPass(viewer.scene);
+  const picker = viewer.scene.createPickPass();
 
   const idLabels = new Map<number, string>();
   const globePrim: Primitive | null = viewer.scene.globe.primitive;

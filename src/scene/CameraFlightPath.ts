@@ -2,8 +2,8 @@ import { Cartesian3 } from '../math/Cartesian3';
 import { CesiumMath } from '../math/CesiumMath';
 import { Cartographic } from '../math/Cartographic';
 import { EasingFunction } from '../math/EasingFunction';
-import { Camera } from '../scene/Camera';
-import type { FlyToOptions } from '../scene/Camera';
+import { Camera } from './Camera';
+import type { FlyToOptions } from './Camera';
 
 /**
  * Minimum camera altitude enforced mid-flight, as a fraction of the Earth's

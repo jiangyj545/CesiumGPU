@@ -1,4 +1,9 @@
 import { Context } from '../../renderer/Context';
+import { Frustum } from '../../renderer/Frustum';
+import { Camera } from '../Camera';
+import { Globe } from '../Globe';
+import { PrimitiveCollection } from '../Primitive';
+import type { IPass } from './IPass';
 
 export interface GBufferTextures {
   albedo:   GPUTexture;
@@ -13,7 +18,29 @@ export interface GBufferTextures {
 }
 
 /**
- * GBufferPass - Manages G-Buffer render targets for deferred shading.
+ * Scene-provided inputs the G-Buffer pass rasterises into its render targets.
+ * Injected via the constructor (OverlayPass-style) — Scene builds the shared
+ * pipelines and camera bind group before creating its passes, so they are
+ * fully initialised by the time the pass is constructed.
+ */
+export interface GBufferDrawInputs {
+  /** Base sphere + per-tile imagery primitives (drawn first, when shown). */
+  globe: Globe;
+  /** Additional opaque primitives (pipeline switched per `prim.unlit`). */
+  primitives: PrimitiveCollection;
+  /** Shared per-frame camera bind group (bind group 0). */
+  cameraBindGroup: GPUBindGroup;
+  /** Opaque G-Buffer pipeline. */
+  opaquePipeline: GPURenderPipeline;
+  /** Unlit (emissive) G-Buffer pipeline variant, or null when unused. */
+  unlitPipeline: GPURenderPipeline | null;
+  /** Whether execute() frustum-culls the opaque primitives (Scene.debugFrustumCulling). */
+  frustumCullingEnabled: () => boolean;
+}
+
+/**
+ * GBufferPass - Manages the G-Buffer render targets for deferred shading and
+ * rasterises all opaque geometry into them.
  *
  * G-Buffer layout:
  *   Attachment 0 – albedo    (rgba8unorm)
@@ -21,20 +48,35 @@ export interface GBufferTextures {
  *   Attachment 2 – worldPos  (rgba32float) world-space positions
  *   Depth        – depth32float
  *
- * @future IPass — 资源持有者（`beginRenderPass` 由 Scene.render() 驱动，无独立
- * execute），暂不实现 IPass；待渲染编排重构后渐进迁移。
+ * Implements {@link IPass}: `execute` opens the G-Buffer render pass and draws
+ * the globe plus every opaque primitive (switching to the unlit pipeline for
+ * emissive geometry).  Downstream passes consume the targets through
+ * {@link getDepthView} / `textures` instead of Scene reaching into internals.
  */
-export class GBufferPass {
+export class GBufferPass implements IPass {
+  readonly label = 'GBufferPass';
+
   private _context: Context;
   private _width: number;
   private _height: number;
+  private _inputs: GBufferDrawInputs;
+  private _camera: Camera | null = null;
   private _textures: GBufferTextures | null = null;
   private _sampler: GPUSampler | null = null;
 
-  constructor(context: Context, width: number, height: number) {
+  constructor(context: Context, width: number, height: number, inputs: GBufferDrawInputs) {
     this._context = context;
     this._width   = width;
     this._height  = height;
+    this._inputs  = inputs;
+  }
+
+  /** Idempotent: G-Buffer targets and the sampler are built on first use. */
+  prepare(): void {
+    if (!this._textures) this._create();
+    if (!this._sampler) {
+      this._sampler = this._context.createSampler({ minFilter: 'nearest', magFilter: 'nearest' });
+    }
   }
 
   get textures(): GBufferTextures {
@@ -49,6 +91,16 @@ export class GBufferPass {
     return this._sampler!;
   }
 
+  /** Depth view for downstream depth-tested passes (WBOIT accumulation, overlay/effects sampling). */
+  getDepthView(): GPUTextureView {
+    return this.textures.depthView;
+  }
+
+  /** World-position texture for GPU-pick readback (carries COPY_SRC usage). */
+  getWorldPosTexture(): GPUTexture {
+    return this.textures.worldPos;
+  }
+
   /** Resize G-Buffer (e.g., on canvas resize). */
   resize(width: number, height: number): void {
     if (width === this._width && height === this._height) return;
@@ -58,38 +110,60 @@ export class GBufferPass {
     this._create();
   }
 
-  /** Build the render pass descriptor for filling the G-Buffer. */
-  beginRenderPass(encoder: GPUCommandEncoder): GPURenderPassEncoder {
-    const tex = this.textures;
-    return encoder.beginRenderPass({
-      label: 'GBuffer Pass',
-      colorAttachments: [
-        {
-          view: tex.albedoView,
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp:  'clear',
-          storeOp: 'store',
-        },
-        {
-          view: tex.normalView,
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp:  'clear',
-          storeOp: 'store',
-        },
-        {
-          view: tex.worldPosView,
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp:  'clear',
-          storeOp: 'store',
-        },
-      ],
-      depthStencilAttachment: {
-        view:              tex.depthView,
-        depthClearValue:   1.0,
-        depthLoadOp:       'clear',
-        depthStoreOp:      'store',
-      },
-    });
+  /**
+   * @inheritdoc IPass
+   * Keeps the camera reference for frustum culling in {@link execute}.
+   */
+  updateCamera(camera: Camera): void {
+    this._camera = camera;
+  }
+
+  /**
+   * @inheritdoc IPass
+   * `_target` / `_time` are unused — this pass owns its colour attachments;
+   * the optional parameters keep the {@link IPass} signature satisfied.
+   */
+  execute(encoder: GPUCommandEncoder, _target?: GPUTextureView, _time?: number): void {
+    const inputs = this._inputs;
+    const pass = this._beginRenderPass(encoder);
+    pass.setPipeline(inputs.opaquePipeline);
+
+    // Globe (base sphere + per-tile imagery primitives). Not frustum-culled
+    // here: the base mesh is a single planet-wide sphere and tile visibility
+    // is already decided by the imagery quadtree selection each frame.
+    const gp = inputs.globe.primitive;
+    if (gp && inputs.globe.show) {
+      gp.drawOpaque(pass, inputs.cameraBindGroup);
+      inputs.globe.drawTiles(pass, inputs.cameraBindGroup);
+    }
+
+    // Frustum culling (disable via Scene.debugFrustumCulling). The frustum is
+    // rebuilt once per execute from the camera's cached view-projection
+    // matrix; primitives whose bounding sphere is entirely outside are skipped.
+    const frustum =
+      inputs.frustumCullingEnabled() && this._camera
+        ? Frustum.fromViewProjection(this._camera.viewProjectionMatrix)
+        : null;
+
+    // Other opaque primitives (switch to the unlit pipeline for emissive
+    // geometry — bind groups are layout-compatible with both pipelines)
+    const opaquePipeline = inputs.opaquePipeline;
+    const unlitPipeline  = inputs.unlitPipeline;
+    let currentPipeline  = opaquePipeline;
+    for (const prim of inputs.primitives.opaque) {
+      if (frustum) {
+        const bs = prim.boundingSphere;
+        if (!frustum.intersectsSphere(bs.center, bs.radius)) continue;
+      }
+      const wanted = prim.unlit && unlitPipeline ? unlitPipeline : opaquePipeline;
+      if (wanted !== currentPipeline) {
+        pass.setPipeline(wanted);
+        currentPipeline = wanted;
+      }
+      prim.drawOpaque(pass, inputs.cameraBindGroup);
+    }
+
+    pass.end();
   }
 
   destroy(): void {
@@ -127,6 +201,40 @@ export class GBufferPass {
       worldPosView: worldPos.createView(),
       depthView:    depth.createView(),
     };
+  }
+
+  /** Build the render pass descriptor for filling the G-Buffer. */
+  private _beginRenderPass(encoder: GPUCommandEncoder): GPURenderPassEncoder {
+    const tex = this.textures;
+    return encoder.beginRenderPass({
+      label: 'GBuffer Pass',
+      colorAttachments: [
+        {
+          view: tex.albedoView,
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp:  'clear',
+          storeOp: 'store',
+        },
+        {
+          view: tex.normalView,
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp:  'clear',
+          storeOp: 'store',
+        },
+        {
+          view: tex.worldPosView,
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp:  'clear',
+          storeOp: 'store',
+        },
+      ],
+      depthStencilAttachment: {
+        view:              tex.depthView,
+        depthClearValue:   1.0,
+        depthLoadOp:       'clear',
+        depthStoreOp:      'store',
+      },
+    });
   }
 
   private _destroyTextures(): void {

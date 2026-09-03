@@ -4,10 +4,6 @@ import { Cartesian3 } from './math/Cartesian3';
 import { Matrix4 } from './math/Matrix4';
 import { Transforms } from './math/Transforms';
 import { JulianDate } from './math/JulianDate';
-import { Color } from './math/Color';
-import { Primitive, PrimitiveCollection } from './scene/Primitive';
-import { EllipsoidGeometry } from './scene/EllipsoidGeometry';
-import { DirectionalLight } from './scene/DirectionalLight';
 import { SunPosition } from './scene/SunPosition';
 import { Model } from './scene/Model';
 import { Camera } from './scene/Camera';
@@ -214,29 +210,3 @@ async function _loadConeModel(
     console.warn('CesiumGPU: failed to load cone4-red.glb', err);
   }
 }
-
-// ── Public exports ───────────────────────────────────────────────────────────
-export {
-  Viewer,
-  Cartesian3,
-  Color,
-  Primitive,
-  PrimitiveCollection,
-  EllipsoidGeometry,
-  DirectionalLight,
-  Model,
-  Camera,
-};
-
-export { CesiumMath } from './math/CesiumMath';
-export { Cartesian2 } from './math/Cartesian2';
-export { Cartesian4 } from './math/Cartesian4';
-export { Matrix4 } from './math/Matrix4';
-export { Quaternion } from './math/Quaternion';
-export { Ellipsoid } from './math/Ellipsoid';
-export { JulianDate } from './math/JulianDate';
-export { Scene } from './scene/Scene';
-export { Globe } from './scene/Globe';
-export { Clock } from './core/Clock';
-export { SunPosition } from './scene/SunPosition';
-export { GltfLoader } from './loader/GltfLoader';

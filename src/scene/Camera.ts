@@ -3,7 +3,7 @@ import { Cartesian3 } from '../math/Cartesian3';
 import { CesiumMath } from '../math/CesiumMath';
 import { Cartographic } from '../math/Cartographic';
 import { EasingFunction } from '../math/EasingFunction';
-import { CameraFlightPath } from '../core/CameraFlightPath';
+import { CameraFlightPath } from './CameraFlightPath';
 
 /** Camera orientation expressed as heading / pitch / roll (radians). */
 export interface Orientation {

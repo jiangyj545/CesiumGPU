@@ -12,23 +12,24 @@ import {
   buildUnlitPipeline,
 } from './Primitive';
 import { PickPass } from '../picking/PickPass';
-import type { PickResult } from '../picking/PickPass';
+import type { PickPassDeps, PickResult } from '../picking/PickPass';
 import { OverlayPass } from './passes/OverlayPass';
+import type { IPass } from './passes/IPass';
 import { EntityVisualizer } from './EntityVisualizer';
 import { EntityCollection } from '../dataSource/EntityCollection';
 import { EffectManager } from '../effect/EffectManager';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
-import { GBUFFER_SHADER } from '../shaders/GBufferShader';
 
 /**
  * Scene - Orchestrates all rendering passes.
  *
- * Rendering pipeline:
- *  1. G-Buffer pass  → writes albedo / normal / worldPos for all opaque prims
- *  2. Lighting pass  → reads G-Buffer, outputs lit opaque scene
- *  3. Transparent accumulation pass → WBOIT accumulate
- *  4. Transparent composite pass    → blend over opaque result
- *  5. Effect passes  → EffectManager executes IPass effects (additive/emissive
+ * Rendering pipeline (render() walks the {@link IPass} array in order):
+ *  1. GBufferPass     → writes albedo / normal / worldPos for all opaque prims
+ *  2. LightingPass    → reads G-Buffer, outputs lit opaque scene
+ *  3. OverlayPass     → entity billboards (before transparent so WBOIT blends
+ *     over the billboards)
+ *  4. TransparentPass → WBOIT accumulation + composite over the opaque result
+ *  5. Effect passes   → EffectManager executes IPass effects (additive/emissive
  *     overlays, drawn last so they are not overwritten)
  */
 export class Scene {
@@ -50,6 +51,12 @@ export class Scene {
   readonly lights: DirectionalLight[] = [];
 
   /**
+   * Toggles per-primitive frustum culling (G-Buffer opaque loop, transparent
+   * loop and the pick view). On by default; disable for debugging.
+   */
+  debugFrustumCulling: boolean = true;
+
+  /**
    * Per-frame hooks invoked with the shared command encoder after all scene
    * render passes and before submit.  Effects (e.g. particle systems) use
    * these to append their own compute and render passes to the same command
@@ -64,6 +71,12 @@ export class Scene {
   private _gbufferPass: GBufferPass | null = null;
   private _lightingPass: LightingPass | null = null;
   private _transparentPass: TransparentPass | null = null;
+
+  /**
+   * Frame pipeline: render()/resize()/destroy() walk this array in order
+   * (gbuffer → lighting → overlay → transparent).  Populated in initialize().
+   */
+  private _renderPasses: IPass[] = [];
 
   private _opaquePipeline: GPURenderPipeline | null = null;
   private _unlitPipeline: GPURenderPipeline | null = null;
@@ -111,24 +124,6 @@ export class Scene {
       this._width  = this._context.drawingBufferWidth  || 1;
       this._height = this._context.drawingBufferHeight || 1;
 
-      // G-Buffer pass (creates GPU textures lazily on first use)
-      this._gbufferPass = new GBufferPass(this._context, this._width, this._height);
-
-      // Lighting pass (creates GPU buffers in constructor — device is now available)
-      this._lightingPass = new LightingPass(
-        this._context,
-        this._gbufferPass,
-        this._context.preferredFormat
-      );
-
-      // Transparent pass
-      this._transparentPass = new TransparentPass(
-        this._context,
-        this._width,
-        this._height,
-        this._context.preferredFormat
-      );
-
       // Shared camera UBO for the G-Buffer pass
       this._cameraUniformBuffer = this._context.device.createBuffer({
         label: 'Scene.CameraUBO',
@@ -161,10 +156,36 @@ export class Scene {
         entries: [{ binding: 0, resource: { buffer: this._cameraUniformBuffer } }],
       });
 
-      // Lighting pass
+      // G-Buffer pass: rasterises opaque geometry into its own targets.
+      // Draw inputs are injected now that pipelines/bind groups exist.
+      this._gbufferPass = new GBufferPass(this._context, this._width, this._height, {
+        globe:                this.globe,
+        primitives:           this.primitives,
+        cameraBindGroup:      this._cameraBindGroup,
+        opaquePipeline:       this._opaquePipeline,
+        unlitPipeline:        this._unlitPipeline,
+        frustumCullingEnabled: () => this.debugFrustumCulling,
+      });
+      this._gbufferPass.prepare();
+
+      // Lighting pass (creates GPU buffers in constructor — device is now available)
+      this._lightingPass = new LightingPass(
+        this._context,
+        this._gbufferPass,
+        this._context.preferredFormat
+      );
       this._lightingPass.prepare();
 
-      // Transparent pass
+      // Transparent pass (accumulation + composite encapsulated in execute)
+      this._transparentPass = new TransparentPass(
+        this._context,
+        this._gbufferPass,
+        this.primitives,
+        this._width,
+        this._height,
+        this._context.preferredFormat,
+        () => this.debugFrustumCulling
+      );
       this._transparentPass.prepare();
 
       // Entity layer: screen-space billboards + polygon/polyline bridging.
@@ -178,6 +199,16 @@ export class Scene {
       this._overlayPass.prepare();
       this._entityVisualizer = new EntityVisualizer(this._context, this.entities, this);
 
+      // Frame pipeline order — overlay stays before transparent so WBOIT
+      // blends over the billboards (behaviour preserved from the previous
+      // hand-rolled render sequence).
+      this._renderPasses = [
+        this._gbufferPass,
+        this._lightingPass,
+        this._overlayPass,
+        this._transparentPass,
+      ];
+
       this._prepared = true;
     })();
 
@@ -188,19 +219,10 @@ export class Scene {
    * Add a transparent primitive to the scene.
    */
   addTransparentPrimitive(primitive: Primitive): void {
-    if (
-      !this._transparentPass ||
-      !this._transparentPass.accumulationPipeline ||
-      !this._transparentPass.cameraBindGroupLayout
-    ) {
+    if (!this._transparentPass || !this._transparentPass.attachPrimitive(primitive)) {
       console.warn('Scene.addTransparentPrimitive: scene not yet prepared');
       return;
     }
-    primitive.buildTransparentBindGroups(
-      this._transparentPass.accumulationPipeline,
-      this._transparentPass.cameraUniformBuffer,
-      this._transparentPass.cameraBindGroupLayout
-    );
     this.primitives.add(primitive);
   }
 
@@ -221,10 +243,9 @@ export class Scene {
     this._width  = width;
     this._height = height;
     this._context.resize(width, height);
-    this._gbufferPass?.resize(width, height);
-    this._transparentPass?.resize(width, height);
-    this._lightingPass?.rebuildGBufferBindGroup();
-    this._overlayPass?.resize(width, height);
+    // Pass order guarantees GBufferPass recreates its textures before
+    // LightingPass rebuilds its bind group against the new views.
+    for (const pass of this._renderPasses) pass.resize?.(width, height);
     this.effects.resize(width, height);
     this.camera.setAspectRatio(width / height);
   }
@@ -241,8 +262,20 @@ export class Scene {
    */
   pick(x: number, y: number): Promise<PickResult | null> {
     if (!this._prepared) return Promise.resolve(null);
-    if (!this._pickPass) this._pickPass = new PickPass(this);
-    return this._pickPass.pick(x, y);
+    // createPickPass() returns the shared lazy instance (idempotent).
+    return this.createPickPass().pick(x, y);
+  }
+
+  /**
+   * Return the shared GPU picking pass, creating it (with explicitly injected
+   * dependencies — PickPass has no Scene import) on first use. Callers that
+   * need direct access beyond {@link pick} (e.g. `verifyIdPrecision`, debug
+   * counters, manual `register`) use this factory instead of constructing
+   * PickPass themselves.
+   */
+  createPickPass(): PickPass {
+    if (!this._pickPass) this._pickPass = new PickPass(this._buildPickDeps());
+    return this._pickPass;
   }
 
   /**
@@ -252,85 +285,30 @@ export class Scene {
     // No point encoding frames against a lost device (validation errors only).
     if (this._context.deviceLost) return;
 
-    if (
-      !this._prepared ||
-      !this._opaquePipeline ||
-      !this._cameraBindGroup ||
-      !this._gbufferPass ||
-      !this._lightingPass ||
-      !this._transparentPass
-    ) return;
+    if (!this._prepared || !this._lightingPass) return;
 
     const ctx     = this._context;
     const device  = ctx.device;
     const encoder = device.createCommandEncoder({ label: 'Frame Encoder' });
 
-    // ── Upload camera uniforms ─────────────────────────────────────────────
+    // ── Per-frame CPU prep: camera uniforms, lighting state, tile streaming ─
     this._uploadCameraUBO();
-    this._lightingPass.updateCamera(this.camera);
     this._lightingPass.updateLights(this.lights);
-    this._transparentPass.updateCamera(this.camera);
 
     // Imagery tile streaming: quadtree selection + per-frame texture uploads.
     // No-op while globe.layers is empty (legacy single-texture path).
     this.globe.update(this.camera);
 
-    // ── 1. G-Buffer pass (opaque geometry) ────────────────────────────────
-    {
-      const pass = this._gbufferPass.beginRenderPass(encoder);
-      pass.setPipeline(this._opaquePipeline);
-
-      // Globe (base sphere + per-tile imagery primitives)
-      const gp = this.globe.primitive;
-      if (gp && this.globe.show) {
-        gp.drawOpaque(pass, this._cameraBindGroup);
-        this.globe.drawTiles(pass, this._cameraBindGroup);
-      }
-
-      // Other opaque primitives (switch to the unlit pipeline for emissive
-      // geometry — bind groups are layout-compatible with both pipelines)
-      const opaquePipeline = this._opaquePipeline;
-      const unlitPipeline  = this._unlitPipeline;
-      let currentPipeline  = opaquePipeline;
-      for (const prim of this.primitives.opaque) {
-        const wanted = prim.unlit && unlitPipeline ? unlitPipeline : opaquePipeline;
-        if (wanted !== currentPipeline) {
-          pass.setPipeline(wanted);
-          currentPipeline = wanted;
-        }
-        prim.drawOpaque(pass, this._cameraBindGroup);
-      }
-
-      pass.end();
-    }
-
-    // ── 2. Lighting pass (deferred shading, outputs to swap-chain) ────────
+    // ── Pass loop: gbuffer → lighting → overlay → transparent ─────────────
     const swapChainView = ctx.getCurrentTextureView();
-    this._lightingPass.execute(encoder, swapChainView);
-
-    // ── 2.5 Entity overlay (screen-space points/labels, depth-tested) ─────
-    // Drawn before the transparent composite so WBOIT blends over billboards.
-    this._overlayPass?.updateCamera(this.camera);
-    this._overlayPass?.execute(encoder, swapChainView);
-
-    // ── 3. Transparent accumulation pass ──────────────────────────────────
-    const transparents = this.primitives.transparent;
-    if (transparents.length > 0 && this._transparentPass.accumulationPipeline) {
-      const depthView = this._gbufferPass.textures.depthView;
-      const accumPass = this._transparentPass.beginAccumulationPass(encoder, depthView);
-      accumPass.setPipeline(this._transparentPass.accumulationPipeline);
-
-      for (const prim of transparents) {
-        prim.drawTransparent(accumPass);
-      }
-      accumPass.end();
-
-      // ── 4. Transparent composite pass ─────────────────────────────────
-      this._transparentPass.executeComposite(encoder, swapChainView);
+    const time = performance.now() / 1000;
+    for (const pass of this._renderPasses) {
+      pass.updateCamera?.(this.camera);
+      pass.execute(encoder, swapChainView, time);
     }
 
-    // ── 5. Effects (additive / emissive overlays, drawn last) ─────────────
-    this.effects.execute(encoder, swapChainView, performance.now() / 1000);
+    // ── Effects (additive / emissive overlays, drawn last) ────────────────
+    this.effects.execute(encoder, swapChainView, time);
 
     // ── Frame hooks (extra compute / render passes on the same encoder) ───
     for (const hook of this.frameHooks) hook(encoder, swapChainView);
@@ -344,13 +322,14 @@ export class Scene {
     this._pickPass = null;
     this._entityVisualizer?.destroy();
     this._entityVisualizer = null;
-    this._overlayPass?.destroy();
-    this._overlayPass = null;
+    for (const pass of this._renderPasses) pass.destroy();
+    this._renderPasses = [];
+    this._gbufferPass     = null;
+    this._lightingPass    = null;
+    this._overlayPass     = null;
+    this._transparentPass = null;
     this.globe.destroy();
     this.primitives.removeAll();
-    this._gbufferPass?.destroy();
-    this._lightingPass?.destroy();
-    this._transparentPass?.destroy();
     this._cameraUniformBuffer?.destroy();
     this.effects.destroy();
   }
@@ -382,14 +361,43 @@ export class Scene {
   /** The G-Buffer pass (null before initialize()). */
   get gbufferPass(): GBufferPass | null { return this._gbufferPass; }
 
-  /** The shared opaque render pipeline used by the G-Buffer pass. */
-  get opaquePipeline(): GPURenderPipeline | null { return this._opaquePipeline; }
+  /** The shared opaque render pipeline used by the G-Buffer pass (null before initialize()). */
+  getOpaquePipeline(): GPURenderPipeline | null { return this._opaquePipeline; }
+
+  /**
+   * The G-Buffer world-position texture used for the GPU-pick 1×1 readback
+   * (null before initialize()).
+   */
+  getWorldPosTexture(): GPUTexture | null {
+    return this._gbufferPass?.getWorldPosTexture() ?? null;
+  }
 
   /** The WebGPU context (null-safe only after Viewer.initialize()). */
   get context(): Context { return this._context; }
-}
 
-// Re-export for convenience
-export { GBUFFER_SHADER };
+  // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * Wire the explicit dependency object handed to PickPass. Getters are polled
+   * lazily so a PickPass created after initialize() keeps working across
+   * resize / destroy cycles of the underlying GPU resources.
+   */
+  private _buildPickDeps(): PickPassDeps {
+    return {
+      context:    this._context,
+      camera:     this.camera,
+      primitives: this.primitives,
+      globe:      this.globe,
+      getOpaquePipeline: () => this.getOpaquePipeline(),
+      getWorldPosTexture: () => this.getWorldPosTexture(),
+      frustumCullingEnabled: () => this.debugFrustumCulling,
+      addFrameHook: (hook) => { this.frameHooks.push(hook); },
+      removeFrameHook: (hook) => {
+        const idx = this.frameHooks.indexOf(hook);
+        if (idx !== -1) this.frameHooks.splice(idx, 1);
+      },
+    };
+  }
+}
 
 export default Scene;

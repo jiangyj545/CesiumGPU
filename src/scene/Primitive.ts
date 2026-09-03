@@ -28,6 +28,17 @@ export interface PrimitiveOptions {
 }
 
 /**
+ * BoundingSphere - Simple centre + radius sphere in world space, used for
+ * frustum culling (see {@link Primitive.boundingSphere} / renderer/Frustum).
+ */
+export interface BoundingSphere {
+  /** World-space centre. */
+  center: Cartesian3;
+  /** World-space radius (local radius × model scale, inflated 5%). */
+  radius: number;
+}
+
+/**
  * Primitive - A renderable mesh in the scene.
  * Matches Cesium's Primitive API (simplified).
  */
@@ -57,6 +68,14 @@ export class Primitive {
 
   private _color: Color;
   private _alpha: number;
+
+  /** Local-space bounding sphere from the vertex min/max corners. */
+  private readonly _localBoundingSphere: BoundingSphere;
+  /** Reused world-space sphere (mutated in place by the getter — no per-frame allocation). */
+  private readonly _worldBoundingSphere: BoundingSphere = {
+    center: new Cartesian3(0, 0, 0),
+    radius: 0,
+  };
 
   // Base-colour texture (1×1 white if none supplied)
   private _texture:  GPUTexture;
@@ -152,12 +171,40 @@ export class Primitive {
 
     this._updateModelUBO();
     this._updateMaterialUBO();
+
+    this._localBoundingSphere = this._computeBoundingSphere(options.vertices);
   }
 
   get translucent(): boolean { return this._translucent; }
 
   /** True when this primitive draws through the unlit (emissive) pipeline. */
   get unlit(): boolean { return this._unlit; }
+
+  /**
+   * World-space bounding sphere (local vertex sphere transformed by the
+   * current modelMatrix), used for frustum culling. The returned object is
+   * reused between calls — treat it as read-only and do not store it.
+   */
+  get boundingSphere(): BoundingSphere {
+    const m  = this.modelMatrix.values;
+    const lc = this._localBoundingSphere.center;
+    const wc = this._worldBoundingSphere.center;
+
+    // Transform the centre (upper-left 3×3 + translation column).
+    wc.x = m[0] * lc.x + m[4] * lc.y + m[8]  * lc.z + m[12];
+    wc.y = m[1] * lc.x + m[5] * lc.y + m[9]  * lc.z + m[13];
+    wc.z = m[2] * lc.x + m[6] * lc.y + m[10] * lc.z + m[14];
+
+    // Radius scales with the largest basis-column magnitude (uniform scale
+    // in this engine, but the max keeps the sphere safe under any scaling).
+    const s0 = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+    const s1 = Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+    const s2 = Math.sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+    this._worldBoundingSphere.radius =
+      this._localBoundingSphere.radius * Math.max(s0, s1, s2);
+
+    return this._worldBoundingSphere;
+  }
 
   set color(c: Color) {
     this._color = c;
@@ -268,6 +315,47 @@ export class Primitive {
   }
 
   // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * Compute the local-space bounding sphere from vertex positions (interleaved
+   * layout: 8 floats per vertex, position at offset 0). Min/max corners give
+   * centre + half-diagonal radius; the radius is inflated by 5% to absorb the
+   * sphere-vs-AABB corner slack so culling stays conservative.
+   */
+  private _computeBoundingSphere(vertices: Float32Array): BoundingSphere {
+    const stride = 8; // position(3) + normal(3) + uv(2)
+
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < vertices.length; i += stride) {
+      const x = vertices[i];
+      const y = vertices[i + 1];
+      const z = vertices[i + 2];
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    }
+
+    if (!Number.isFinite(minX)) {
+      // Empty vertex data: degenerate sphere at the origin.
+      return { center: new Cartesian3(0, 0, 0), radius: 0 };
+    }
+
+    const center = new Cartesian3(
+      (minX + maxX) * 0.5,
+      (minY + maxY) * 0.5,
+      (minZ + maxZ) * 0.5
+    );
+    const dx = maxX - minX;
+    const dy = maxY - minY;
+    const dz = maxZ - minZ;
+    // 5% margin over the exact half-diagonal (sphere fitting an AABB).
+    const radius = 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz) * 1.05;
+    return { center, radius };
+  }
 
   private _updateModelUBO(): void {
     const m = this.modelMatrix.values;

@@ -5,7 +5,7 @@
  */
 export { Viewer } from './core/Viewer';
 export { Clock } from './core/Clock';
-export { CameraFlightPath } from './core/CameraFlightPath';
+export { CameraFlightPath } from './scene/CameraFlightPath';
 export { ScreenSpaceEventHandler } from './core/ScreenSpaceEventHandler';
 export type {
   ScreenSpaceEventType,
@@ -36,9 +36,6 @@ export type { MeasureType, MeasureItem } from './analysis/Measure';
 // Draw interaction (T2.5)
 export { DrawHandler } from './handler/DrawHandler';
 export type { DrawType, DrawEndEvent } from './handler/DrawHandler';
-
-// Renderer
-export { Context } from './renderer/Context';
 
 // Scene
 export { Scene } from './scene/Scene';
@@ -89,11 +86,8 @@ export { EntityCollection } from './dataSource/EntityCollection';
 export { GeoJsonDataSource } from './dataSource/GeoJsonDataSource';
 export type { GeoJsonLoadOptions } from './dataSource/GeoJsonDataSource';
 
-// Rendering passes
-export { GBufferPass } from './scene/passes/GBufferPass';
-export { LightingPass } from './scene/passes/LightingPass';
-export { TransparentPass } from './scene/passes/TransparentPass';
-export { OverlayPass } from './scene/passes/OverlayPass';
+// Rendering passes (only the extension point is public — concrete passes
+// are internal scene wiring reachable via deep paths if ever needed)
 export type { IPass } from './scene/passes/IPass';
 
 // Effects (T3.1)
@@ -121,9 +115,3 @@ export type {
 // Weather effects (T3.5, 对齐 EV_Rain / EV_Snow)
 export { Weather } from './effect/Weather';
 export type { WeatherType, WeatherOptions, WeatherArea } from './effect/Weather';
-
-// Shaders
-export { GBUFFER_SHADER } from './shaders/GBufferShader';
-export { LIGHTING_SHADER } from './shaders/LightingShader';
-export { TRANSPARENT_ACCUMULATION_SHADER, TRANSPARENT_COMPOSITE_SHADER } from './shaders/TransparentShader';
-export { WEATHER_SHADER } from './shaders/WeatherShader';

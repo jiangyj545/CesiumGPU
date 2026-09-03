@@ -16,7 +16,7 @@ import {
  *   同一个 command encoder（`EffectManager.execute` 由 `Scene.render()` 在
  *   composite 之后调用，特效画在最后不被覆盖）。
  * - 渲染：instanced screen-aligned billboard，**加法混合 + G-Buffer 深度测试**
- *   （`GBufferPass.textures.depthView` 作 depth attachment，`depthReadOnly` +
+ *   （`GBufferPass.getDepthView()` 作 depth attachment，`depthReadOnly` +
  *   `depthCompare: 'less'` 不写深度），地球背面的粒子被遮挡不再透出。
  * - 颜色/尺寸随寿命在 shader 内按预设插值（{@link ParticleSystem.presets}）。
  *
@@ -388,7 +388,7 @@ export class ParticleSystem implements IPass {
         storeOp: 'store',
       }],
       depthStencilAttachment: {
-        view: gbuffer.textures.depthView,
+        view: gbuffer.getDepthView(),
         depthReadOnly: true,
       },
     });

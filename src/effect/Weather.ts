@@ -65,7 +65,7 @@ export interface WeatherOptions {
   wind?: number;
   /**
    * Owning scene. When provided the G-Buffer depth view is re-fetched from
-   * `scene.gbufferPass.textures.depthView` every frame, so canvas resize
+   * `scene.gbufferPass.getDepthView()` every frame, so canvas resize
    * (which destroys and recreates the G-Buffer textures) needs no manual
    * re-binding — same pattern as ParticleSystem.
    */
@@ -351,7 +351,7 @@ export class Weather implements IPass {
     // would go stale and invalidate the whole command buffer (same pattern as
     // ParticleSystem). Falls back to the setDepthView cache otherwise.
     const depthView = this._scene
-      ? (this._scene.gbufferPass?.textures.depthView ?? null)
+      ? (this._scene.gbufferPass?.getDepthView() ?? null)
       : this._depthView;
     if (!depthView) {
       if (!this._warnedNoDepth) {

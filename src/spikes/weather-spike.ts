@@ -170,7 +170,7 @@ async function main(): Promise<void> {
     last = now;
 
     // Keep the occlusion depth binding current (recreated on canvas resize).
-    weather?.setDepthView(viewer.scene.gbufferPass?.textures.depthView ?? null);
+    weather?.setDepthView(viewer.scene.gbufferPass?.getDepthView() ?? null);
 
     if (delta > 0.5 && delta < 1000) {
       acc += delta;

@@ -1,5 +1,9 @@
 import { Context } from '../../renderer/Context';
+import { Frustum } from '../../renderer/Frustum';
 import { Camera } from '../Camera';
+import { GBufferPass } from './GBufferPass';
+import { Primitive, PrimitiveCollection } from '../Primitive';
+import type { IPass } from './IPass';
 import {
   TRANSPARENT_ACCUMULATION_SHADER,
   TRANSPARENT_COMPOSITE_SHADER,
@@ -9,16 +13,20 @@ import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../../renderer/CameraUnifo
 /**
  * TransparentPass - Weighted Blended Order-Independent Transparency (WBOIT).
  *
- * Two sub-passes:
+ * Two sub-passes, both encapsulated in {@link execute}:
  *  1. Accumulation: transparent objects write weighted colour+alpha into two
- *     render targets (accum + reveal).
+ *     render targets (accum + reveal), depth-tested read-only against the
+ *     G-Buffer depth.
  *  2. Composite: the accum/reveal textures are blended over the opaque scene.
  *
- * @future IPass — 双子 pass（accumulation + composite）拆分执行且与 Scene.render()
- * 的条件分支耦合，暂不实现 IPass；待渲染编排重构后渐进迁移。
+ * No-ops when the scene has no transparent primitives.
  */
-export class TransparentPass {
+export class TransparentPass implements IPass {
+  readonly label = 'TransparentPass';
+
   private _context: Context;
+  private _gbufferPass: GBufferPass;
+  private _primitives: PrimitiveCollection;
   private _width: number;
   private _height: number;
 
@@ -40,11 +48,27 @@ export class TransparentPass {
   private _outputFormat: GPUTextureFormat;
   private _depthFormat: GPUTextureFormat = 'depth32float';
 
-  constructor(context: Context, width: number, height: number, outputFormat: GPUTextureFormat) {
+  /** Camera reference (set each frame via updateCamera) for frustum culling. */
+  private _camera: Camera | null = null;
+  /** Whether execute() frustum-culls the transparent primitives. */
+  private readonly _frustumCullingEnabled: () => boolean;
+
+  constructor(
+    context: Context,
+    gbufferPass: GBufferPass,
+    primitives: PrimitiveCollection,
+    width: number,
+    height: number,
+    outputFormat: GPUTextureFormat,
+    frustumCullingEnabled: () => boolean = () => false
+  ) {
     this._context      = context;
+    this._gbufferPass  = gbufferPass;
+    this._primitives   = primitives;
     this._width        = width;
     this._height       = height;
     this._outputFormat = outputFormat;
+    this._frustumCullingEnabled = frustumCullingEnabled;
 
     this.cameraUniformBuffer = context.device.createBuffer({
       label: 'TransparentPass.CameraUBO',
@@ -82,9 +106,27 @@ export class TransparentPass {
   }
 
   /**
-   * Update the camera UBO (called once per frame by Scene).
+   * Wire a transparent primitive to this pass: build its per-primitive bind
+   * groups against the accumulation pipeline and the shared camera UBO.
+   *
+   * @returns false when the pass is not prepared yet (no accumulation pipeline).
+   */
+  attachPrimitive(primitive: Primitive): boolean {
+    if (!this._accumPipeline || !this._cameraBindGroupLayout) return false;
+    primitive.buildTransparentBindGroups(
+      this._accumPipeline,
+      this.cameraUniformBuffer,
+      this._cameraBindGroupLayout
+    );
+    return true;
+  }
+
+  /**
+   * Update the camera UBO (called once per frame by Scene). The camera
+   * reference is also kept for frustum culling in {@link execute}.
    */
   updateCamera(camera: Camera): void {
+    this._camera = camera;
     const data = new Float32Array(CAMERA_UBO_SIZE / 4);
     // Layout lives in src/renderer/CameraUniforms.ts (single source of truth).
     writeCameraUniforms(data, {
@@ -101,10 +143,54 @@ export class TransparentPass {
   }
 
   /**
-   * Begin the accumulation render pass (clears accum/reveal targets).
+   * @inheritdoc IPass
+   *
+   * Encapsulates both WBOIT sub-passes: accumulation (clears accum/reveal and
+   * draws every transparent primitive, reading the G-Buffer depth read-only)
+   * followed by composite (blended over `target`, which carries the lit opaque
+   * scene).  No-ops when there is nothing transparent to draw or the pass is
+   * not prepared yet.
+   * (`_time` is unused — WBOIT is stateless per frame; the optional parameter
+   * keeps the {@link IPass} signature satisfied.)
    */
-  beginAccumulationPass(encoder: GPUCommandEncoder, depthView: GPUTextureView): GPURenderPassEncoder {
-    return encoder.beginRenderPass({
+  execute(encoder: GPUCommandEncoder, target: GPUTextureView, _time?: number): void {
+    const transparents = this._primitives.transparent;
+    if (transparents.length === 0 || !this._accumPipeline) return;
+
+    // Frustum culling (disable via Scene.debugFrustumCulling): skip
+    // transparent primitives whose bounding sphere is entirely outside.
+    const frustum =
+      this._frustumCullingEnabled() && this._camera
+        ? Frustum.fromViewProjection(this._camera.viewProjectionMatrix)
+        : null;
+    const drawn = frustum
+      ? transparents.filter((prim) => {
+          const bs = prim.boundingSphere;
+          return frustum.intersectsSphere(bs.center, bs.radius);
+        })
+      : transparents;
+    if (drawn.length === 0) return;
+
+    this._executeAccumulation(encoder, drawn);
+    this._executeComposite(encoder, target);
+  }
+
+  destroy(): void {
+    this.cameraUniformBuffer.destroy();
+    this._destroyRenderTargets();
+  }
+
+  // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * Accumulation sub-pass: clears accum/reveal targets and draws all
+   * transparent primitives, depth-tested read-only against the G-Buffer.
+   */
+  private _executeAccumulation(
+    encoder: GPUCommandEncoder,
+    transparents: readonly Primitive[]
+  ): void {
+    const pass = encoder.beginRenderPass({
       label: 'Transparent Accumulation Pass',
       colorAttachments: [
         {
@@ -121,17 +207,23 @@ export class TransparentPass {
         },
       ],
       depthStencilAttachment: {
-        view: depthView,
+        view: this._gbufferPass.getDepthView(),
         depthReadOnly: true,
         // depthLoadOp / depthStoreOp must NOT be set when depthReadOnly is true (WebGPU spec)
       },
     });
+
+    pass.setPipeline(this._accumPipeline!);
+    for (const prim of transparents) {
+      prim.drawTransparent(pass);
+    }
+    pass.end();
   }
 
   /**
-   * Execute the composite pass (blends transparent layer over opaque output).
+   * Composite sub-pass: blends the transparent layer over the opaque output.
    */
-  executeComposite(encoder: GPUCommandEncoder, outputView: GPUTextureView): void {
+  private _executeComposite(encoder: GPUCommandEncoder, outputView: GPUTextureView): void {
     if (!this._compositePipeline || !this._compositeBindGroup) return;
 
     const pass = encoder.beginRenderPass({
@@ -148,13 +240,6 @@ export class TransparentPass {
     pass.draw(3);
     pass.end();
   }
-
-  destroy(): void {
-    this.cameraUniformBuffer.destroy();
-    this._destroyRenderTargets();
-  }
-
-  // ── Private ────────────────────────────────────────────────────────────────
 
   private _createRenderTargets(): void {
     const device = this._context.device;

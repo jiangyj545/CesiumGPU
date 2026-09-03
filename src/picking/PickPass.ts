@@ -1,8 +1,55 @@
-import { Scene } from '../scene/Scene';
-import { Primitive } from '../scene/Primitive';
+import { Context } from '../renderer/Context';
+import { Frustum } from '../renderer/Frustum';
+import type { Camera } from '../scene/Camera';
+import type { Primitive, PrimitiveCollection } from '../scene/Primitive';
 import { Cartesian3 } from '../math/Cartesian3';
 import { PICK_SHADER, PICK_ID_TEST_SHADER } from '../shaders/PickShader';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
+
+/** Signature of the per-frame encode hook (matches the Scene.frameHooks shape). */
+export type PickFrameHook = (
+  encoder: GPUCommandEncoder,
+  swapChainView: GPUTextureView
+) => void;
+
+/**
+ * Narrow, structural view of the globe's pickable primitives. Satisfied by
+ * the Globe class — PickPass depends on this slice, not on Globe or Scene.
+ */
+export interface PickPassGlobe {
+  readonly show: boolean;
+  /** Base sphere primitive, or null before Globe.initialize(). */
+  readonly primitive: Primitive | null;
+  /** Live per-tile imagery primitives. */
+  readonly tilePrimitives: Primitive[];
+  readonly tilePrimitiveCount: number;
+}
+
+/**
+ * Explicit dependencies injected by the Scene — PickPass has no Scene import.
+ * The getters are polled lazily because GPU resources (pipelines, G-Buffer
+ * textures) come and go with scene initialize/resize, while a PickPass
+ * instance can be created once and reused.
+ */
+export interface PickPassDeps {
+  /** WebGPU context: device, canvas sizing, queue writes, submit. */
+  context: Context;
+  /** Camera for the pick-view uniform upload + cache fingerprint. */
+  camera: Camera;
+  /** Scene-graph primitives (the opaque set is re-drawn into the pick view). */
+  primitives: PrimitiveCollection;
+  /** Globe-provided pickables (base mesh + live tiles). */
+  globe: PickPassGlobe;
+  /** Shared opaque pipeline — null before the scene is initialized. */
+  getOpaquePipeline(): GPURenderPipeline | null;
+  /** G-Buffer worldPos texture for the 1×1 position readback (null-safe). */
+  getWorldPosTexture(): GPUTexture | null;
+  /** Whether the pick set should be frustum-culled (Scene.debugFrustumCulling). */
+  frustumCullingEnabled(): boolean;
+  /** Register / unregister the per-frame encode hook on the frame encoder. */
+  addFrameHook(hook: PickFrameHook): void;
+  removeFrameHook(hook: PickFrameHook): void;
+}
 
 /**
  * Result of a single GPU pick.
@@ -56,12 +103,16 @@ const READBACK_BYTES_PER_ROW = 256;
  * PickPass - Production GPU picking via id-encoded render-to-texture + readback.
  *
  * Every opaque primitive drawn into the G-Buffer (globe base mesh, imagery
- * tiles and `scene.primitives`) is automatically pickable: each `Primitive`
- * owns a 24-bit `pickId` assigned at construction. When a pick is pending,
- * the pass re-draws that same set into a canvas-sized rgba8unorm "pick view"
- * using the PickShader, appends 1×1 copies of the pick texture and the
- * G-Buffer worldPos texture to the frame encoder (via `scene.frameHooks`),
- * and decodes them after submit with `mapAsync`.
+ * tiles and the scene's primitive collection) is automatically pickable: each
+ * `Primitive` owns a 24-bit `pickId` assigned at construction. When a pick is
+ * pending, the pass re-draws that same set into a canvas-sized rgba8unorm
+ * "pick view" using the PickShader, appends 1×1 copies of the pick texture and
+ * the G-Buffer worldPos texture to the frame encoder (via the injected frame
+ * hooks), and decodes them after submit with `mapAsync`.
+ *
+ * Dependencies are injected via the {@link PickPassDeps} parameter object —
+ * this module has no import of the Scene class (the Scene wires its narrow
+ * accessors in `Scene._buildPickDeps`).
  *
  * Guarantees:
  *  - at most one readback per rendered frame (concurrent `pick()` calls
@@ -78,7 +129,7 @@ const READBACK_BYTES_PER_ROW = 256;
  * applied once here, so callers never scale by devicePixelRatio themselves.
  */
 export class PickPass {
-  private _scene: Scene;
+  private readonly _deps: PickPassDeps;
 
   /** Primitives manually registered in addition to the scene graph. */
   private readonly _registered = new Set<Primitive>();
@@ -110,16 +161,16 @@ export class PickPass {
   /** Diagnostics: how often each pipeline stage ran. */
   readonly debug = { hookCalls: 0, encodes: 0, flushes: 0, gpuErrors: 0 };
 
-  /** Registered once into `scene.frameHooks`; encodes the pick view. */
+  /** Registered once via `deps.addFrameHook`; encodes the pick view. */
   private readonly _frameHook: (encoder: GPUCommandEncoder) => void;
 
   /** Diagnostic listener for uncaptured GPU errors; removed in destroy(). */
   private readonly _errorListener: (event: Event) => void;
 
-  constructor(scene: Scene) {
-    this._scene = scene;
+  constructor(deps: PickPassDeps) {
+    this._deps = deps;
 
-    const device = scene.context.device;
+    const device = deps.context.device;
 
     this._cameraUbo = device.createBuffer({
       label: 'PickPass.CameraUBO',
@@ -139,7 +190,7 @@ export class PickPass {
       this.debug.hookCalls += 1;
       this._encodePickFrame(encoder);
     };
-    scene.frameHooks.push(this._frameHook);
+    deps.addFrameHook(this._frameHook);
 
     this._errorListener = (event: Event) => {
       this.debug.gpuErrors += 1;
@@ -184,15 +235,15 @@ export class PickPass {
    * `PickResult` whose `id === 0` means "background / no hit".
    */
   pick(x: number, y: number): Promise<PickResult | null> {
-    if (!this._scene.opaquePipeline) return Promise.resolve(null);
+    if (!this._deps.getOpaquePipeline()) return Promise.resolve(null);
 
     // Convert CSS pixels → pick-texture texels with the ratio between the
     // pick target size and the canvas CSS size (the effective DPR, correct
     // even when the drawing buffer was clamped). Ratio is 1 at DPR 1, so
     // the legacy path is unchanged.
-    const canvas = this._scene.context.canvas;
-    const w = this._targetWidth  || Math.max(1, this._scene.context.drawingBufferWidth);
-    const h = this._targetHeight || Math.max(1, this._scene.context.drawingBufferHeight);
+    const canvas = this._deps.context.canvas;
+    const w = this._targetWidth  || Math.max(1, this._deps.context.drawingBufferWidth);
+    const h = this._targetHeight || Math.max(1, this._deps.context.drawingBufferHeight);
     const sx = w / Math.max(1, canvas.clientWidth);
     const sy = h / Math.max(1, canvas.clientHeight);
     const cx = Math.min(Math.max(0, Math.round(x * sx)), w - 1);
@@ -246,7 +297,7 @@ export class PickPass {
    * Returns the decoded id (=== testId when lossless).
    */
   async verifyIdPrecision(testId: number): Promise<number> {
-    const device = this._scene.context.device;
+    const device = this._deps.context.device;
 
     const target = device.createTexture({
       label: 'PickPass.IdPrecisionTarget',
@@ -269,7 +320,7 @@ export class PickPass {
       size:  256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    this._scene.context.writeBuffer(ubo, 0, new Uint32Array([testId >>> 0, 0, 0, 0]));
+    this._deps.context.writeBuffer(ubo, 0, new Uint32Array([testId >>> 0, 0, 0, 0]));
     const bg = device.createBindGroup({
       layout: bgl,
       entries: [{ binding: 0, resource: { buffer: ubo } }],
@@ -293,7 +344,7 @@ export class PickPass {
       { buffer: this._idReadBuffer, bytesPerRow: READBACK_BYTES_PER_ROW },
       { width: 1, height: 1 },
     );
-    this._scene.context.submit([encoder.finish()]);
+    this._deps.context.submit([encoder.finish()]);
 
     await this._idReadBuffer.mapAsync(GPUMapMode.READ);
     const bytes = new Uint8Array(this._idReadBuffer.getMappedRange());
@@ -311,10 +362,9 @@ export class PickPass {
   }
 
   destroy(): void {
-    const idx = this._scene.frameHooks.indexOf(this._frameHook);
-    if (idx !== -1) this._scene.frameHooks.splice(idx, 1);
+    this._deps.removeFrameHook(this._frameHook);
 
-    this._scene.context.device.removeEventListener('uncapturederror', this._errorListener as EventListener);
+    this._deps.context.device.removeEventListener('uncapturederror', this._errorListener as EventListener);
 
     // Reject any in-flight pick so awaiting callers do not hang forever
     // (the frame hook is gone, so the job could never be flushed).
@@ -345,7 +395,7 @@ export class PickPass {
 
   /** Change-detector for the cached pick: camera view state. */
   private _cameraFingerprint(): number {
-    const cam = this._scene.camera;
+    const cam = this._deps.camera;
     const p   = cam.position;
     const v   = cam.viewMatrix.values;
     let h = 0x811c9dc5;
@@ -361,19 +411,19 @@ export class PickPass {
   /** Change-detector for the cached pick: pickable content. */
   private _sceneFingerprint(): number {
     return (
-      this._scene.primitives.length * 2654435761 +
-      this._scene.globe.tilePrimitiveCount * 40503 +
+      this._deps.primitives.length * 2654435761 +
+      this._deps.globe.tilePrimitiveCount * 40503 +
       this._registered.size * 104729
     );
   }
 
-  /** Ensure the pick pipeline exists (needs scene.opaquePipeline for BGLs). */
+  /** Ensure the pick pipeline exists (needs the injected opaque pipeline's BGLs). */
   private _ensurePipeline(): void {
     if (this._pipeline) return;
-    const opaque = this._scene.opaquePipeline;
+    const opaque = this._deps.getOpaquePipeline();
     if (!opaque) throw new Error('PickPass: scene not initialized yet');
 
-    const device   = this._scene.context.device;
+    const device   = this._deps.context.device;
     // Reuse the opaque pipeline's bind group layouts so existing Primitive
     // bind groups (group 0 camera, group 1 model) stay compatible.
     const cameraBGL = opaque.getBindGroupLayout(0);
@@ -428,7 +478,7 @@ export class PickPass {
     let bg = this._idBindGroups.get(pickId);
     if (bg) return bg;
 
-    const device = this._scene.context.device;
+    const device = this._deps.context.device;
     let ubo = this._idUbos.get(pickId);
     if (!ubo) {
       ubo = device.createBuffer({
@@ -436,7 +486,7 @@ export class PickPass {
         size:  256,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
-      this._scene.context.writeBuffer(ubo, 0, new Uint32Array([pickId, 0, 0, 0]));
+      this._deps.context.writeBuffer(ubo, 0, new Uint32Array([pickId, 0, 0, 0]));
       this._idUbos.set(pickId, ubo);
     }
     bg = device.createBindGroup({
@@ -450,7 +500,7 @@ export class PickPass {
 
   /** Recreate the pick render targets when the canvas size changes. */
   private _syncTargetSize(): void {
-    const ctx = this._scene.context;
+    const ctx = this._deps.context;
     const w = ctx.drawingBufferWidth;
     const h = ctx.drawingBufferHeight;
     if (this._pickTexture && this._targetWidth === w && this._targetHeight === h) return;
@@ -478,7 +528,7 @@ export class PickPass {
 
   /** Upload camera uniforms (layout defined in src/renderer/CameraUniforms.ts). */
   private _uploadCamera(): void {
-    const cam  = this._scene.camera;
+    const cam  = this._deps.camera;
     const data = new Float32Array(CAMERA_UBO_SIZE / 4);
 
     writeCameraUniforms(data, {
@@ -492,24 +542,35 @@ export class PickPass {
       far:                  cam.frustum.far,
     });
 
-    this._scene.context.writeBuffer(this._cameraUbo, 0, data);
+    this._deps.context.writeBuffer(this._cameraUbo, 0, data);
   }
 
   /**
-   * Draw the exact same opaque set as Scene.render()'s G-Buffer pass:
-   * globe base mesh → imagery tiles → scene.primitives (opaque) → manual.
+   * Draw the exact same opaque set as the G-Buffer pass:
+   * globe base mesh → imagery tiles → scene primitives (opaque) → manual.
+   * The frustum culling applied here mirrors the G-Buffer pass so the pick
+   * set always equals the visible set (a sphere fully outside the frustum
+   * rasterises nothing, so results are identical either way).
    */
   private _drawPickSet(pass: GPURenderPassEncoder, cameraBindGroup: GPUBindGroup): void {
     this._idToPrimitive = new Map<number, Primitive>();
 
+    const frustum = this._deps.frustumCullingEnabled()
+      ? Frustum.fromViewProjection(this._deps.camera.viewProjectionMatrix)
+      : null;
+
     const drawWithId = (prim: Primitive): void => {
       if (!prim.show) return;
+      if (frustum) {
+        const bs = prim.boundingSphere;
+        if (!frustum.intersectsSphere(bs.center, bs.radius)) return;
+      }
       this._idToPrimitive.set(prim.pickId, prim);
       pass.setBindGroup(2, this._idBindGroup(prim.pickId));
       prim.drawOpaque(pass, cameraBindGroup);
     };
 
-    const globe = this._scene.globe;
+    const globe = this._deps.globe;
     if (globe.show) {
       const base = globe.primitive;
       if (base) {
@@ -518,7 +579,7 @@ export class PickPass {
       }
     }
 
-    for (const prim of this._scene.primitives.opaque) drawWithId(prim);
+    for (const prim of this._deps.primitives.opaque) drawWithId(prim);
     for (const prim of this._registered) drawWithId(prim);
   }
 
@@ -575,10 +636,10 @@ export class PickPass {
         { buffer: this._idReadBuffer, bytesPerRow: READBACK_BYTES_PER_ROW },
         copySize,
       );
-      const gbuffer = this._scene.gbufferPass?.textures;
-      if (gbuffer) {
+      const worldPos = this._deps.getWorldPosTexture();
+      if (worldPos) {
         encoder.copyTextureToBuffer(
-          { texture: gbuffer.worldPos, origin },
+          { texture: worldPos, origin },
           { buffer: this._posReadBuffer, bytesPerRow: READBACK_BYTES_PER_ROW },
           copySize,
         );

@@ -2,6 +2,7 @@ import { Context } from '../../renderer/Context';
 import { GBufferPass } from './GBufferPass';
 import { DirectionalLight } from '../DirectionalLight';
 import { Camera } from '../Camera';
+import type { IPass } from './IPass';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../../renderer/CameraUniforms';
 import { LIGHTING_SHADER } from '../../shaders/LightingShader';
 
@@ -13,10 +14,12 @@ const MAX_LIGHTS = 8;
  * Renders a full-screen triangle, outputting the lit colour to the supplied
  * render target (or the swap-chain texture).
  *
- * @future IPass — execute 已接近签名，但缺 label/prepare/resize 且由 Scene.render()
- * 直接驱动，暂不实现 IPass；待迁移后统一。
+ * Implements {@link IPass}: `resize` rebuilds the G-Buffer bind group (Scene
+ * drives passes in order, so GBufferPass has already recreated its textures).
  */
-export class LightingPass {
+export class LightingPass implements IPass {
+  readonly label = 'LightingPass';
+
   private _context: Context;
   private _pipeline: GPURenderPipeline | null = null;
   private _cameraBindGroup: GPUBindGroup | null = null;
@@ -152,9 +155,18 @@ export class LightingPass {
   }
 
   /**
+   * IPass: canvas resize.  GBufferPass recreates its textures first (Scene
+   * drives passes in array order), so only the G-Buffer bind group needs
+   * rebuilding against the new views.
+   */
+  resize(_width: number, _height: number): void {
+    this._rebuildGBufferBindGroup();
+  }
+
+  /**
    * Rebuild G-Buffer bind group (call after GBuffer resize).
    */
-  rebuildGBufferBindGroup(): void {
+  private _rebuildGBufferBindGroup(): void {
     if (!this._pipeline) return;
     const device = this._context.device;
     const layout = this._pipeline.getBindGroupLayout(1);
@@ -171,8 +183,12 @@ export class LightingPass {
     });
   }
 
-  /** Execute the lighting pass, drawing a full-screen triangle. */
-  execute(encoder: GPUCommandEncoder, outputView: GPUTextureView): void {
+  /**
+   * Execute the lighting pass, drawing a full-screen triangle.
+   * (`_time` is unused — deferred shading is stateless per frame; the optional
+   * parameter keeps the {@link IPass} signature satisfied.)
+   */
+  execute(encoder: GPUCommandEncoder, outputView: GPUTextureView, _time?: number): void {
     if (!this._pipeline || !this._cameraBindGroup || !this._gbufferBindGroup) {
       console.warn('LightingPass.execute: not prepared yet');
       return;
