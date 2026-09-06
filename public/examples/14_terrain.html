@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>示例 12：地形与贴地 Terrain - CesiumGPU</title>
+  <title>示例 14：地形与贴地 Terrain - CesiumGPU</title>
   <style>
     .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:400px;
       padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
@@ -22,7 +22,7 @@
 <body>
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
-    <h1>12 地形与贴地</h1>
+    <h1>14 地形与贴地</h1>
     <p class="desc">LocalQuantizedMeshProvider 加载本地 quantized-mesh 地形（湖北）；
       pickGlobe 命中点自动贴合地形，折线/多边形经 heightReference: 'clampToGround'
       贴地渲染，量测经 Measure 钩子计算贴地距离/面积。</p>
@@ -66,7 +66,7 @@
         }
       } catch (err) {
         window.__TERRAIN_ERR = err.message + '\n' + (err.stack || '').split('\n').slice(0, 3).join('\n');
-        console.error('[12_terrain] terrain init failed:', err);
+        console.error('[14_terrain] terrain init failed:', err);
         log('地形服务不可用，已降级为 0 高椭球：' + err.message);
       }
 

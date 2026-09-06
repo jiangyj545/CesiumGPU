@@ -41,17 +41,23 @@ window.EXAMPLES_CONFIG = {
     {
       name: '空间分析',
       items: [
-        { name: '距离/面积/高度量测', fileName: '10_measure.html' },
+        { name: '距离/面积/高度量测', fileName: '11_measure.html' },
+      ],
+    },
+    {
+      name: '地形',
+      items: [
+        { name: '地形与贴地', fileName: '14_terrain.html' },
       ],
     },
     {
       name: '特效',
       items: [
         { name: '动态墙', fileName: '08_dynamicWall.html' },
-        { name: '圆形扫描', fileName: '08_circleScan.html' },
-        { name: '粒子系统', fileName: '09_particle.html' },
-        { name: '雨雪天气', fileName: '11_weather.html' },
-        { name: '云台视频叠加', fileName: '12_videoOverlay.html' },
+        { name: '圆形扫描', fileName: '09_circleScan.html' },
+        { name: '粒子系统', fileName: '10_particle.html' },
+        { name: '雨雪天气', fileName: '12_weather.html' },
+        { name: '云台视频叠加', fileName: '13_videoOverlay.html' },
       ],
     },
   ],

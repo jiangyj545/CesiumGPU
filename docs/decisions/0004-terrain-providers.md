@@ -6,7 +6,7 @@
   `src/terrain/LocalQuantizedMeshProvider.ts`、`src/terrain/TerrariumProvider.ts`、
   `src/terrain/QuantizedMeshDecoder.ts`（小端变体解码器）
 - 关联测试：`tests/terrain/`（decoder / provider / terrarium decode 共 3 个 spec）
-- 关联验证：`public/examples/12_terrain.html`（湖北地形 + 贴地折线/量测）
+- 关联验证：`public/examples/14_terrain.html`（湖北地形 + 贴地折线/量测）
 - 关联消费端：`Camera.pickGlobe` 贴合、`Measure.clampToTerrain`、
   `PolylineGeometry` / `PolygonGeometry` 的 `heightReference: 'clampToGround'`
 

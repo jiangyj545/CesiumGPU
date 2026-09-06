@@ -25,7 +25,7 @@
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
     <h1>01 影像图层切换与叠放</h1>
-    <p class="desc">XyzImageryProvider 加载多底图：高德卫星 / 高德矢量 / OSM。
+    <p class="desc">XyzImageryProvider 加载多底图：高德卫星 / 高德矢量 / OSM / 天地图卫星。
       切换显隐、调整透明度、raiseToTop 改变叠放顺序。</p>
     <div id="controls"></div>
     <div class="row">透明度<input id="alpha" type="range" min="0" max="1" step="0.05" value="1" /><span id="alphaVal">100%</span></div>
@@ -39,12 +39,15 @@
       const P = DemoUtils.IMAGERY_PRESETS;
       const layers = viewer.globe.layers;
 
-      // ── 三个影像图层：叠放顺序 = 添加顺序（后添加的在栈顶）────────────
+      // ── 四个影像图层：叠放顺序 = 添加顺序（后添加的在栈顶）────────────
       const satLayer = layers.addImageryProvider(new engine.XyzImageryProvider(P['gaode-sat']));
       const vecLayer = layers.addImageryProvider(new engine.XyzImageryProvider(P['gaode-vec']));
       const osmLayer = layers.addImageryProvider(new engine.XyzImageryProvider(P.osm));
+      // 天地图卫星影像（浏览器端 key，Web-Mercator 瓦片）
+      const TDT_TK = '1006be64546f4c8fe11ea687163c54f7';
+      const tdtLayer = layers.addImageryProvider(engine.XyzImageryProvider.tianditu(TDT_TK, 'img'));
 
-      const NAMES = [[satLayer, '高德卫星'], [vecLayer, '高德矢量'], [osmLayer, 'OSM']];
+      const NAMES = [[satLayer, '高德卫星'], [vecLayer, '高德矢量'], [osmLayer, 'OSM'], [tdtLayer, '天地图卫星']];
       const nameOf = (l) => NAMES.find(([x]) => x === l)[1];
       const result = document.getElementById('result');
       const controls = document.getElementById('controls');
@@ -111,9 +114,8 @@
         refresh();
       });
 
-      // 初始：独显高德卫星
-      vecLayer.show = false;
-      osmLayer.show = false;
+      // 初始：独显天地图卫星（点其他按钮可切换对比）
+      for (const [l] of NAMES) l.show = l === tdtLayer;
       refresh();
     }
 

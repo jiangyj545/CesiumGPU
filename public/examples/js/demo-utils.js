@@ -80,6 +80,11 @@
 
   // ── 内部：样式注入（幂等） ─────────────────────────────────────
   var CSS_TEXT = [
+    // 页面骨架：示例可独立打开（不经门户 iframe），必须自持全屏布局，
+    // 否则 #cesiumContainer 高度塌陷 → canvas 半屏、SSE 视口因子减半、LOD 细分不足。
+    'html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#05080d;}',
+    '#cesiumContainer{width:100%;height:100%;position:relative;}',
+
     '.cg-fps{position:absolute;top:12px;right:12px;z-index:9000;',
     'color:#0f0;font:12px/1.4 Consolas,Monaco,monospace;background:rgba(0,0,0,.6);',
     'padding:6px 10px;border-radius:6px;pointer-events:none;}',
@@ -343,11 +348,17 @@
     injectStyleOnce();
     if (!startup._errorHooksInstalled) {
       startup._errorHooksInstalled = true;
+      // 已知良性浏览器噪声：ResizeObserver 回调改布局后 Chrome 在下一帧投递的
+      // 提示性报错（引擎 resize canvas 时必然发生），不是示例故障，不弹错误面板。
+      var BENIGN_ERROR_RE = /ResizeObserver loop|viewport size.*mismatch/i;
       global.addEventListener('error', function (ev) {
+        if (BENIGN_ERROR_RE.test(ev.message || '')) return;
         showError(ev.message || '未知错误', ev.error);
       });
       global.addEventListener('unhandledrejection', function (ev) {
         var r = ev.reason;
+        var msg = (r && (r.message || r.toString && r.toString())) || '';
+        if (BENIGN_ERROR_RE.test(msg)) return;
         showError('未处理的 Promise 拒绝', r instanceof Error ? r : new Error(String(r)));
       });
     }

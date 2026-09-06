@@ -129,12 +129,12 @@ polygon: {
 - 瓦片请求失败进入失败缓存，不报错、不阻塞渲染；
 - `sampleHeight` 一律返回 `0`，引擎自动降级为 **0 高椭球**：
   拾取/量测/几何保持可用，只是没有地形起伏；
-- 可运行示例页 `public/examples/12_terrain.html`（flyTo 湖北 → 拉近，
+- 可运行示例页 `public/examples/14_terrain.html`（flyTo 湖北 → 拉近，
   含贴地折线、贴地多边形与贴地量测）自检服务连通性。
 
 ## 5. 示例
 
-- [12_terrain.html](../../public/examples/12_terrain.html)：湖北地形 + 贴地折线/多边形 + 贴地量测完整示例。
+- [14_terrain.html](../../public/examples/14_terrain.html)：湖北地形 + 贴地折线/多边形 + 贴地量测完整示例。
 
 ## 相关文档
 
