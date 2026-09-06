@@ -19,7 +19,7 @@
 ## 其他文档
 
 - **API 参考** — [docs/api/index.html](../api/index.html)（由 `npm run docs:api` 从 `src/index.ts` 生成）
-- **设计决策（ADR）** — [docs/decisions/](../decisions/)：瓦片纹理池（0001）、GPU 拾取回读（0002）、compute 粒子（0003）、地形 Provider 双格式（0004）
+- **设计决策（ADR）** — [docs/decisions/](../decisions/)：瓦片纹理池（0001）、GPU 拾取回读（0002）、compute 粒子（0003）、地形 Provider 双格式（0004）、影像破洞系统性修复（0005）
 
 ## 示例
 
@@ -33,4 +33,4 @@
 | [03_geojson.html](http://localhost:3001/examples/03_geojson.html) | Entity / GeoJSON |
 | [04_geometry.html](http://localhost:3001/examples/04_geometry.html) | 几何与图元 |
 | [05_draw.html](http://localhost:3001/examples/05_draw.html) | 绘制与量测 |
-| [12_terrain.html](http://localhost:3001/examples/12_terrain.html) | 地形与贴地 |
+| [14_terrain.html](http://localhost:3001/examples/14_terrain.html) | 地形与贴地 |

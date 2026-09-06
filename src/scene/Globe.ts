@@ -6,6 +6,7 @@ import { ImageryLayerCollection } from '../imagery/ImageryLayerCollection';
 import { ImageryLayer } from '../imagery/ImageryLayer';
 import { TileKey } from '../imagery/TileKey';
 import { Color } from '../math/Color';
+import { CesiumMath } from '../math/CesiumMath';
 import { Matrix4 } from '../math/Matrix4';
 import { Cartesian3 } from '../math/Cartesian3';
 import { TerrainLayer } from '../terrain/TerrainLayer';
@@ -30,6 +31,17 @@ export class Globe {
   /** Show/hide the globe. */
   show: boolean = true;
 
+  /**
+   * Sun-light shading on the globe surface (CesiumJS `globe.enableLighting`
+   * semantics). Default `false`: imagery renders at uniform brightness —
+   * with the default sun light the back-lit hemisphere falls to
+   * `ambient × albedo` (≈5% for ocean), visually indistinguishable from the
+   * space background, which reads as holes. When false the base sphere,
+   * imagery tiles, polar caps and terrain tiles all draw through the unlit
+   * G-Buffer pipeline (raw albedo, no shading / haze / tone map).
+   */
+  enableLighting = false;
+
   /** Base colour (ocean/land) shown when no imagery layer is loaded. */
   baseColor: Color;
 
@@ -51,6 +63,16 @@ export class Globe {
   private _tileSampler: GPUSampler | null = null;
   /** Live tile primitives, keyed by tile key. */
   private _tilePrimitives = new Map<string, TilePrimitiveEntry>();
+  /**
+   * Polar cap patches (north + south): Web Mercator imagery stops at
+   * ±85.05°, so without these the caps show the base colour — reads as a
+   * "hole" whenever the poles rotate into view. Each patch re-samples the
+   * top/bottom row of the ROOT level grid stretched over the cap.
+   */
+  private _polarCaps: { north: TilePrimitiveEntry | null; south: TilePrimitiveEntry | null } = {
+    north: null,
+    south: null,
+  };
   /** CPU geometry cache keyed by `"<tileKey>#<ancestorLevels>"`. */
   private _geometryCache = new Map<string, CachedTileGeometry>();
   /**
@@ -347,6 +369,14 @@ export class Globe {
     } else {
       layer.update(this._context.device, camera, this._context.drawingBufferHeight);
       this._syncTilePrimitives(layer);
+      this._syncPolarCaps(layer);
+    }
+
+    // Hidden layers still tick `update` — ImageryLayer uses the hidden branch
+    // only to warm its root tiles (16 fetches, one-time), so flipping a layer
+    // visible never starts from an empty cache (no full-screen hole).
+    for (const hidden of this.layers) {
+      if (hidden !== layer) hidden.update(this._context.device, camera, this._context.drawingBufferHeight);
     }
 
     // Terrain streaming runs alongside imagery: meshes arrive asynchronously
@@ -374,6 +404,11 @@ export class Globe {
     for (const entry of this._tilePrimitives.values()) {
       entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
+    // Polar caps ride along with the flat imagery path (terrain replaces the
+    // whole flat tile set including caps — see the early return above).
+    for (const which of ['north', 'south'] as const) {
+      this._polarCaps[which]?.primitive.drawOpaque(pass, cameraBindGroup);
+    }
   }
 
   /** Number of live tile primitives (for spike HUDs). */
@@ -389,6 +424,10 @@ export class Globe {
   get tilePrimitives(): Primitive[] {
     const out: Primitive[] = [];
     for (const entry of this._tilePrimitives.values()) out.push(entry.primitive);
+    for (const which of ['north', 'south'] as const) {
+      const cap = this._polarCaps[which];
+      if (cap !== null) out.push(cap.primitive);
+    }
     return out;
   }
 
@@ -436,6 +475,72 @@ export class Globe {
     }
   }
 
+  /**
+   * Keep the two polar cap patches in step with the active layer: Web
+   * Mercator tiles stop at ±85.05°, so the caps (±85.05°…90°) are covered by
+   * dedicated geometry that re-samples the ROOT grid's top / bottom row
+   * stretched poleward. Without them the base colour bleeds through the
+   * caps — visually a "hole" at high-latitude views.
+   */
+  private _syncPolarCaps(layer: ImageryLayer): void {
+    const rootLevel = Math.min(ImageryLayer.ROOT_LEVEL, layer.provider.maximumLevel);
+    const n = 2 ** rootLevel;
+    const mercatorEdge = Math.atan(Math.sinh(Math.PI)); // ±85.0511°
+
+    // The cap texture is any resident tile covering the top/bottom row at
+    // the coarsest level with an own or fallback texture; row 0 = north.
+    const caps: Array<'north' | 'south'> = ['north', 'south'];
+    for (const which of caps) {
+      // Find a resident texture for the cap's reference row (the row's
+      // first tile via the fallback chain is enough — every tile in a row
+      // resolves up to the same coarse ancestors).
+      const y = which === 'north' ? 0 : n - 1;
+      const refTile = new TileKey(rootLevel, 0, y);
+      const resolved = layer.resolveTexture(refTile);
+      const current = this._polarCaps[which];
+
+      if (resolved === null) {
+        // Nothing loaded yet for this row — drop any stale cap primitive.
+        if (current !== null) {
+          this._destroyTilePrimitive(current);
+          this._polarCaps[which] = null;
+        }
+        continue;
+      }
+      if (current !== null && current.texture === resolved.texture) continue; // up to date
+
+      if (current !== null) this._destroyTilePrimitive(current);
+
+      // Cap geometry: full longitude sweep, Mercator edge → pole. UVs map
+      // onto the reference row's sub-rect inside the resolved texture
+      // (row stretched over the 4.95° cap — standard global-viewer behaviour).
+      const south = which === 'north' ? mercatorEdge : -CesiumMath.PI_OVER_TWO;
+      const north = which === 'north' ? CesiumMath.PI_OVER_TWO : -mercatorEdge;
+      const rowsTotal = n;
+      const vRange = 1.0 / rowsTotal;
+      // TileKey y grows southward; texture v likewise (row 0 = north edge).
+      const v0 = which === 'north' ? 0.0 : 1.0 - vRange;
+      const uvRect = { u0: 0.0, v0, u1: 1.0, v1: v0 + vRange };
+      const geometry = EllipsoidGeometry.createRegion(
+        -CesiumMath.PI,
+        south,
+        CesiumMath.PI,
+        north,
+        POLAR_CAP_PARTITIONS,
+        { uvRect, radiusScale: TILE_RADIUS_SCALE },
+      );
+      const primitive = new Primitive(this._context, {
+        vertices:    geometry.vertices,
+        indices:     geometry.indices,
+        translucent: false,
+      });
+      Matrix4.identity(primitive.modelMatrix);
+      primitive.setTexture(resolved.texture, this._getTileSampler());
+      primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
+      this._polarCaps[which] = { primitive, texture: resolved.texture };
+    }
+  }
+
   /** Build one per-tile primitive (region geometry + tile texture). */
   private _createTilePrimitive(
     tile: TileKey,
@@ -480,7 +585,10 @@ export class Globe {
       rect.east,
       rect.north,
       TILE_PARTITIONS,
-      { uvRect, radiusScale: TILE_RADIUS_SCALE }
+      // Mercator tiles distribute pixel rows in Mercator-y; a linear v
+      // offsets every row's content northward (≈7.7° mid-latitude) —
+      // the "map squeezed into the Arctic" defect.
+      { uvRect, radiusScale: TILE_RADIUS_SCALE, mercatorV: true }
     );
 
     if (this._geometryCache.size >= TILE_GEOMETRY_CACHE_CAPACITY) {
@@ -752,13 +860,25 @@ export class Globe {
     this._detachTexture = null;
   }
 
-  /** Destroy all tile primitives (used when no layer is active). */
+  /** Destroy all tile primitives including the polar caps (no layer active). */
   private _clearTilePrimitives(): void {
     if (this._tilePrimitives.size === 0) return;
     for (const entry of this._tilePrimitives.values()) {
       this._destroyTilePrimitive(entry);
     }
     this._tilePrimitives.clear();
+    this._clearPolarCaps();
+  }
+
+  /** Destroy both polar cap patches (textures stay owned by the layer cache). */
+  private _clearPolarCaps(): void {
+    for (const which of ['north', 'south'] as const) {
+      const cap = this._polarCaps[which];
+      if (cap !== null) {
+        this._destroyTilePrimitive(cap);
+        this._polarCaps[which] = null;
+      }
+    }
   }
 
   destroy(): void {
@@ -802,10 +922,23 @@ interface CachedTileGeometry {
 const TILE_PARTITIONS = 8;
 
 /**
- * Tiles are drawn a hair above the base globe so the legacy fallback texture
- * underneath never z-fights with them.
+ * Tiles are drawn above the base globe so the legacy fallback texture
+ * underneath never z-fights with them. The lift must exceed the worst-case
+ * chord-vs-arc sagitta of a tile triangle sinking below the (much finer)
+ * base-globe mesh: with TILE_PARTITIONS = 8 the largest tiles (L2 roots,
+ * ≈11.25° per cell) sag ≈ 1 − cos(5.6°) ≈ 0.0048 below the surface, while
+ * the base globe (128 stacks, ≈2.8° cells) sags only ≈ 0.0003. A 0.1% lift
+ * (1.001) is swallowed by that gap — mid-tile fragments lose the depth test
+ * against the base globe and vanish, leaving the base colour showing through
+ * (the "uncovered regions" defect). 0.8% clears the worst case with margin
+ * and stays visually imperceptible (≈50 km at true Earth scale, far below
+ * global-view pixel size).
  */
-const TILE_RADIUS_SCALE = 1.001;
+const TILE_RADIUS_SCALE = 1.008;
+
+/** Longitude × latitude partitions of a polar cap patch (small — it only
+ *  stretches one ROOT-row of imagery over the 4.95° cap). */
+const POLAR_CAP_PARTITIONS = 16;
 
 /** WGS84 polar / equatorial ratio (matches EllipsoidGeometry normalisation). */
 const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;

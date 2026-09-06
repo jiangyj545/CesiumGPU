@@ -32,6 +32,14 @@ export interface CreateRegionOptions {
    * globe and avoid z-fighting.
    */
   radiusScale?: number;
+  /**
+   * Map v through the Web-Mercator function instead of linearly. Mercator
+   * tile images distribute their pixel rows uniformly in Mercator-y space,
+   * which is non-linear in latitude — a linear v makes every row's content
+   * sit too far north (≈7.7° at mid latitudes, worse toward the poles),
+   * squeezing the whole map toward the Arctic. Default: false (linear).
+   */
+  mercatorV?: boolean;
 }
 
 /**
@@ -194,6 +202,13 @@ export class EllipsoidGeometry {
     const ratio   = WGS84_POLAR_RATIO;
     const ratioSq = ratio * ratio;
 
+    // Mercator rows: v must follow the Mercator-y of the latitude, not the
+    // latitude itself (see CreateRegionOptions.mercatorV). Precompute the
+    // edge ys so each stack maps lat → normalized y → v.
+    const mercatorV  = options.mercatorV ?? false;
+    const mercNorthY = Math.asinh(Math.tan(north));
+    const mercSouthY = Math.asinh(Math.tan(south));
+
     const stacks = partitions; // rows: north → south
     const slices = partitions; // columns: west → east
 
@@ -204,7 +219,17 @@ export class EllipsoidGeometry {
     for (let stack = 0; stack <= stacks; stack++) {
       const t   = stack / stacks;
       const lat = north + (south - north) * t; // row 0 = north edge
-      const v   = uvRect.v0 + (uvRect.v1 - uvRect.v0) * t;
+      let v: number;
+      if (mercatorV) {
+        // Normalise this row's Mercator-y into [0, 1] across the region.
+        // tan() diverges at ±π/2 — polar-cap callers must stay in the
+        // Mercator domain (cap patches sample the top/bottom row linearly).
+        const y = Math.asinh(Math.tan(lat));
+        const tn = (y - mercNorthY) / (mercSouthY - mercNorthY);
+        v = uvRect.v0 + (uvRect.v1 - uvRect.v0) * tn;
+      } else {
+        v = uvRect.v0 + (uvRect.v1 - uvRect.v0) * t;
+      }
       const cosLat = Math.cos(lat);
       const sinLat = Math.sin(lat);
 

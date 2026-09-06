@@ -43,6 +43,23 @@ export class XyzImageryProvider implements ImageryProvider {
     });
   }
 
+  /**
+   * Built-in 天地图 (TianDiTu) raster tile preset.
+   *
+   * `layer` picks the map style: 'img' 卫星影像 | 'vec' 矢量底图 | 'cia' 影像注记
+   * | 'cva' 矢量注记. Tiles use the Web-Mercator (w) tile matrix set via the
+   * DataServer endpoint, which serves `image/*` payloads with CORS enabled.
+   */
+  static tianditu(tk: string, layer: 'img' | 'vec' | 'cia' | 'cva' = 'img'): XyzImageryProvider {
+    return new XyzImageryProvider({
+      // DataServer 形式：浏览器端 key（服务端 IP 校验会拒绝，必须浏览器 Referer/UA）
+      url:          `https://t{s}.tianditu.gov.cn/DataServer?T=${layer}_w&x={x}&y={y}&l={z}&tk=${tk}`,
+      subdomains:   ['0', '1', '2', '3', '4', '5', '6', '7'],
+      maximumLevel: 18,
+      tileSize:     256,
+    });
+  }
+
   get ready(): boolean {
     // XYZ services need no metadata negotiation — ready immediately.
     return true;

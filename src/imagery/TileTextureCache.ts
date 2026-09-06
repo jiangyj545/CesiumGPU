@@ -41,6 +41,16 @@ interface PendingDestroy {
 }
 
 /**
+ * Tiles at or above this zoom level never participate in LRU eviction.
+ * Coarse tiles form the upsampling fallback chain (`ImageryLayer.resolveTexture`
+ * walks ancestors while a leaf loads); evicting one mid-chain nulls every
+ * descendant's fallback at once → primitive destroyed → base-colour hole.
+ * The coarse levels are small and bounded (L2-L4 ≈ 336 tiles total), so
+ * pinning them costs little and removes the holes.
+ */
+const PIN_LEVEL = 4;
+
+/**
  * Frames between enqueue and actual `destroy()`. Command buffers referencing
  * an evicted texture complete within 1-2 frames; 2 is conservative.
  */
@@ -157,14 +167,31 @@ export class TileTextureCache {
 
   /** Evict least-recently-used entries until within capacity. */
   private _evictOldest(): void {
-    while (this._entries.size > this._capacity) {
-      const oldestKey = this._entries.keys().next().value;
-      if (oldestKey === undefined) break;
+    // Pinned entries are budget-exempt: the capacity bounds evictable tiles,
+    // so a fully-pinned coarse set can never starve fine tile insertion.
+    let pinned = 0;
+    for (const key of this._entries.keys()) if (this._isPinned(key)) pinned++;
+    const effectiveCapacity = this._capacity + pinned;
+    if (this._entries.size <= effectiveCapacity) return;
+    // Only evictable (unpinned) keys may be removed; pinned coarse tiles
+    // stay resident regardless of recency (see PIN_LEVEL).
+    for (const oldestKey of [...this._entries.keys()]) {
+      if (this._entries.size <= effectiveCapacity) break;
+      if (this._isPinned(oldestKey)) continue;
       const oldest = this._entries.get(oldestKey);
       this._entries.delete(oldestKey);
       if (oldest !== undefined) this._deferDestroy(oldest);
       this._evictions++;
     }
+  }
+
+  /** Coarse (fallback-chain) tiles are exempt from LRU eviction. */
+  private _isPinned(key: string): boolean {
+    // Keys are "{level}/{x}/{y}" — the leading number is the zoom level.
+    const slash = key.indexOf('/');
+    if (slash <= 0) return false;
+    const level = Number(key.slice(0, slash));
+    return Number.isFinite(level) && level <= PIN_LEVEL;
   }
 
   /**

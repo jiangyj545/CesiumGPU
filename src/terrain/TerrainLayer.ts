@@ -71,7 +71,7 @@ export class TerrainLayer {
 
   constructor(options: TerrainLayerOptions) {
     this.provider                 = options.provider;
-    this._maximumScreenSpaceError = options.maximumScreenSpaceError ?? 2.0;
+    this._maximumScreenSpaceError = options.maximumScreenSpaceError ?? DEFAULT_MAXIMUM_SSE;
     this._maximumLevel            = options.maximumLevel ?? this.provider.maximumLevel;
     this._rootLevel               = options.rootLevel ?? TerrainLayer.ROOT_LEVEL;
     this._cacheCapacity           = options.cacheCapacity ?? DEFAULT_CACHE_CAPACITY;
@@ -928,6 +928,13 @@ const TERRAIN_TILE_SIZE = 65;
 
 /** Default LRU mesh pool capacity (~64 grids). */
 const DEFAULT_CACHE_CAPACITY = 64;
+
+/**
+ * Default SSE refine threshold — same "screen pixels per texel" semantics as
+ * ImageryLayer (1.0 = texel/pixel parity). Keeps imagery and terrain LOD
+ * depth consistent; 2.0 froze selection at the coarse mosaic levels.
+ */
+const DEFAULT_MAXIMUM_SSE = 1.0;
 
 /** Ancestor levels walked for the parent-mesh fallback. */
 const MAX_FALLBACK_LEVELS = 6;

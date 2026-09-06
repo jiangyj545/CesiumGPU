@@ -70,8 +70,8 @@ export class ImageryLayer {
   /** Bitmaps fetched but not yet uploaded to the GPU, upload-ordered. */
   private _uploadQueue: UploadItem[] = [];
 
-  /** Keys whose fetch failed; not retried this session (null → parent fallback). */
-  private _failed = new Set<string>();
+  /** Keys whose fetch failed, → failure timestamp (ms); retried after FAILED_TILE_RETRY_MS. */
+  private _failed = new Map<string, number>();
 
   /** CPU-side tile bounding volumes, keyed by tile key. */
   private _volumes = new Map<string, TileVolume>();
@@ -86,7 +86,7 @@ export class ImageryLayer {
     this.provider                 = options.provider;
     this.show                     = options.show ?? true;
     this.alpha                    = options.alpha ?? 1.0;
-    this._maximumScreenSpaceError = options.maximumScreenSpaceError ?? 2.0;
+    this._maximumScreenSpaceError = options.maximumScreenSpaceError ?? DEFAULT_MAXIMUM_SSE;
     this._maximumLevel            = options.maximumLevel ?? options.provider.maximumLevel;
     this._uploadsPerFrame         = options.uploadsPerFrame ?? UPLOADS_PER_FRAME;
     this._maxConcurrentRequests   = options.maxConcurrentRequests ?? 10;
@@ -104,7 +104,17 @@ export class ImageryLayer {
     // can no longer invalidate a submit.
     this._cache.onFrameEnd();
 
-    if (this._destroyed || !this.show) return;
+    if (this._destroyed) return;
+
+    if (!this.show) {
+      // Hidden layers stay warm at the root level: without this a layer that
+      // has been hidden since page load owns zero textures, so the moment it
+      // becomes visible the entire globe is a hole until its first tiles
+      // arrive (a slow provider shows a full-screen hole for seconds).
+      this._warmRootTiles();
+      this._flushUploads(device);
+      return;
+    }
 
     this._selectTiles(camera, viewportHeight);
     this._launchRequests();
@@ -135,7 +145,9 @@ export class ImageryLayer {
 
     let ancestor = tile.parent();
     let levels   = 1;
-    while (ancestor !== null && levels <= MAX_FALLBACK_LEVELS) {
+    // Fallback may walk to the quadtree root: prefetching keeps the chain
+    // resident, and a far ancestor (however blurry) beats the base globe.
+    while (ancestor !== null && levels <= Math.max(MAX_FALLBACK_LEVELS, tile.level - ImageryLayer.ROOT_LEVEL)) {
       if (this._cache.has(ancestor.key)) {
         const texture = this._cache.get(ancestor.key);
         if (texture) return { texture, ancestorLevels: levels };
@@ -179,6 +191,11 @@ export class ImageryLayer {
   /**
    * Quadtree selection with view-frustum and horizon culling, iterative
    * (explicit stack) so depth never blows the call stack at high levels.
+   *
+   * SSE semantics here are "screen pixels covered by one texel":
+   * `(worldSize / tileSize) · viewportHeight / (2·distance·tan(fov/2))`.
+   * A value of 1.0 = texel-per-pixel parity, so the refine threshold of
+   * DEFAULT_MAXIMUM_SSE refines until tiles are sampled at 1:1 density.
    */
   private _selectTiles(camera: Camera, viewportHeight: number): void {
     const planes  = this._extractFrustumPlanes(camera.viewProjectionMatrix.values);
@@ -254,15 +271,37 @@ export class ImageryLayer {
   /**
    * Enqueue fetches for selected tiles missing a texture: deduped against
    * in-flight/failed sets, nearest-first, bounded in-flight count.
+   *
+   * Ancestor tiles of each selection are enqueued too (lowest priority):
+   * the upsampling fallback in {@link resolveTexture} walks up the ancestor
+   * chain, and those levels are rarely selected on their own once the camera
+   * has zoomed past them — without prefetching them the chain breaks and the
+   * base globe bleeds through while a leaf loads.
    */
   private _launchRequests(): void {
     const queue: SelectedTile[] = [];
+    const seen = new Set<string>();
     for (const entry of this._selected) {
       const key = entry.tile.key;
-      if (this._cache.has(key)) continue;
-      if (this._inflight.has(key)) continue;
-      if (this._failed.has(key)) continue;
-      queue.push(entry);
+      if (this._cache.has(key) || this._inflight.has(key)) continue;
+      if (this._isFailed(key)) continue;
+      if (!seen.has(key)) { seen.add(key); queue.push(entry); }
+
+      // Prefetch the fallback chain. Ancestors request BEFORE leaves (negative
+      // penalty): the chain is the display guarantee — once loaded, coarse
+      // levels are pinned in the cache and every descendant can fall back to
+      // them, so a missing ancestor is a hole while a missing leaf is merely
+      // blur. Few and small, one-time cost (parent-first, as CesiumJS does).
+      let ancestor = entry.tile.parent();
+      while (ancestor !== null && ancestor.level >= ImageryLayer.ROOT_LEVEL) {
+        const aKey = ancestor.key;
+        if (!this._cache.has(aKey) && !this._inflight.has(aKey)
+            && !this._isFailed(aKey) && !seen.has(aKey)) {
+          seen.add(aKey);
+          queue.push({ tile: ancestor, distance: entry.distance - ANCESTOR_REQUEST_PENALTY });
+        }
+        ancestor = ancestor.parent();
+      }
     }
     queue.sort((a, b) => a.distance - b.distance);
 
@@ -287,14 +326,62 @@ export class ImageryLayer {
           }
           this._uploadQueue.push({ key, bitmap, distance: item.distance });
         } else {
-          // Failed tiles are skipped (no retry); parent fallback renders instead.
-          this._failed.add(key);
+          // Record the failure with a timestamp — rate-limited / transient
+          // errors must become retryable (a 429 is not "tile does not exist").
+          this._failed.set(key, performance.now());
         }
       }).catch((error: unknown) => {
         this._inflight.delete(key);
-        this._failed.add(key);
+        this._failed.set(key, performance.now());
         console.warn(`ImageryLayer: request for tile ${key} failed`, error);
       });
+    }
+  }
+
+  /** A key counts as failed only inside the retry window. */
+  private _isFailed(key: string): boolean {
+    const failedAt = this._failed.get(key);
+    if (failedAt === undefined) return false;
+    if (performance.now() - failedAt > FAILED_TILE_RETRY_MS) {
+      this._failed.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Hidden-layer warm-up: request the ROOT_LEVEL grid (16 tiles at L2) when
+   * missing, reusing the same fetch/upload machinery as the visible path.
+   * Bounded to the quadtree roots so the per-frame cost of a hidden layer is
+   * negligible; the pinned coarse level (see TileTextureCache) keeps them
+   * resident, so any layer flipped visible renders a blurry-but-complete
+   * globe instantly instead of a full-screen hole.
+   */
+  private _warmRootTiles(): void {
+    const rootLevel = Math.min(ImageryLayer.ROOT_LEVEL, this._maximumLevel, this.provider.maximumLevel);
+    const n = 2 ** rootLevel;
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const key = new TileKey(rootLevel, x, y).key;
+        if (this._cache.has(key) || this._inflight.has(key) || this._isFailed(key)) continue;
+        if (this._inflight.size >= this._maxConcurrentRequests) return;
+        this._inflight.add(key);
+        void this.provider.requestTile(new TileKey(rootLevel, x, y)).then(bitmap => {
+          this._inflight.delete(key);
+          if (this._destroyed) { bitmap?.close(); return; }
+          if (bitmap !== null) {
+            this._uploadQueue.push({ key, bitmap, distance: 0 });
+          } else {
+            this._failed.set(key, performance.now());
+          }
+        }).catch((error: unknown) => {
+          // Same bookkeeping as the visible-path fetch failure (no silent
+          // swallow): record for TTL retry and log once.
+          this._inflight.delete(key);
+          this._failed.set(key, performance.now());
+          console.warn(`ImageryLayer: warm-up request for tile ${key} failed`, error);
+        });
+      }
     }
   }
 
@@ -471,6 +558,25 @@ const MAX_UPLOAD_QUEUE = 256;
 
 /** Ancestor levels walked for the upsampling fallback. */
 const MAX_FALLBACK_LEVELS = 6;
+
+/**
+ * Sort distance subtracted for ancestor-prefetch requests: fallback-chain
+ * ancestors issue BEFORE the leaf tiles they back (a missing ancestor means
+ * a hole; a missing leaf only means blur — see _launchRequests).
+ */
+const ANCESTOR_REQUEST_PENALTY = 1.0;
+
+/** Failed fetches become retryable after this window (rate limits are transient). */
+const FAILED_TILE_RETRY_MS = 30_000;
+
+/**
+ * Default SSE refine threshold. The SSE formula yields "screen pixels per
+ * texel" (see {@link ImageryLayer._selectTiles}), where 1.0 = texel/pixel
+ * parity — the pixel-density match point. The old default of 2.0 let every
+ * tile refine at well under 2 px/texel even at L2 from 9000 km, freezing
+ * the whole globe at L2/L3 mosaic ("blurry broken imagery").
+ */
+const DEFAULT_MAXIMUM_SSE = 1.0;
 
 /** Safety cap on the selected set (guards against SSE blowups). */
 const MAX_SELECTED_TILES = 512;
