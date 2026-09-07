@@ -100,6 +100,10 @@ export class DynamicWall implements IPass {
     );
   }
 
+  /** 流速倍率（实时可调，下一帧生效）。 */
+  get speed(): number { return this._speed; }
+  set speed(v: number) { this._speed = Math.max(0, v); }
+
   /** @inheritdoc IPass - 幂等初始化（管线 / 缓冲 / bindGroup）。 */
   prepare(): void {
     if (this._pipeline) return;

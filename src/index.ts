@@ -89,6 +89,8 @@ export type { GeoJsonLoadOptions } from './dataSource/GeoJsonDataSource';
 // Rendering passes (only the extension point is public — concrete passes
 // are internal scene wiring reachable via deep paths if ever needed)
 export type { IPass } from './scene/passes/IPass';
+// 相机 UBO 布局写入器：自定义 IPass 特效（256B 相机 uniform）的公共依赖
+export { CAMERA_UBO_SIZE, writeCameraUniforms } from './renderer/CameraUniforms';
 
 // Effects (T3.1)
 export { EffectManager } from './effect/EffectManager';
@@ -101,6 +103,14 @@ export type { CircleScanOptions } from './effect/CircleScan';
 // Dynamic wall effect (T3.2, 对齐 EV_DynamicWall)
 export { DynamicWall } from './effect/DynamicWall';
 export type { DynamicWallOptions } from './effect/DynamicWall';
+
+// Dynamic water surface effect (对齐 EV_DynamicWater / EV_Ocean)
+export { DynamicWater } from './effect/DynamicWater';
+export type { DynamicWaterOptions } from './effect/DynamicWater';
+
+// Ground heatmap overlay effect (对齐 EV_Heatmap)
+export { HeatmapLayer } from './effect/HeatmapLayer';
+export type { HeatmapLayerOptions, HeatPoint, HeatGradientStop } from './effect/HeatmapLayer';
 
 // Particle system (T3.4, 对齐 EV_ParticleSystem)
 export { ParticleSystem } from './effect/ParticleSystem';

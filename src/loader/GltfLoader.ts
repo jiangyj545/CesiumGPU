@@ -192,10 +192,13 @@ export class GltfLoader {
     }
 
     // Resolve all buffers (embedded or external)
-    const buffers = await GltfLoader._resolveBuffers(json, url, embeddedBinary);
+    // Normalise to an absolute URL first: relative page URLs (e.g. "/data/x.gltf")
+    // cannot act as a base for new URL() when the gltf references external .bin files.
+    const baseUrl = new URL(url, (typeof document !== 'undefined' && document.baseURI) || 'http://localhost/').href;
+    const buffers = await GltfLoader._resolveBuffers(json, baseUrl, embeddedBinary);
 
     // Load all images referenced by materials
-    const images = await GltfLoader._resolveImages(json, buffers, url);
+    const images = await GltfLoader._resolveImages(json, buffers, baseUrl);
 
     // Walk the scene graph and collect mesh primitives
     return GltfLoader._buildModel(json, buffers, images);
