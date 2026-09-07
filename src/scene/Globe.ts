@@ -420,8 +420,20 @@ export class Globe {
    * Snapshot of the live tile primitives (for GPU picking: the pick pass
    * re-draws the same set the G-Buffer pass draws). Allocated per call —
    * only invoked when a pick is pending, never per rendered frame.
+   *
+   * MUST stay same-source with {@link Globe.drawTiles}: while terrain
+   * primitives exist, drawTiles draws ONLY the terrain set (imagery tiles and
+   * polar caps are skipped by its early return), so the pick pass must paint
+   * the terrain geometry too — otherwise picking rasterises the flat imagery
+   * tiles lifted at 1.008× radius while the G-Buffer holds displaced terrain
+   * meshes, and every pick lands systematically offset.
    */
   get tilePrimitives(): Primitive[] {
+    if (this._terrainPrimitives.size > 0) {
+      const terrain: Primitive[] = [];
+      for (const entry of this._terrainPrimitives.values()) terrain.push(entry.primitive);
+      return terrain;
+    }
     const out: Primitive[] = [];
     for (const entry of this._tilePrimitives.values()) out.push(entry.primitive);
     for (const which of ['north', 'south'] as const) {
