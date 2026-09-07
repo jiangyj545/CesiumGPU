@@ -612,7 +612,13 @@ export class TerrainLayer {
 
   /** Barycentric height over the tile's triangles (0 when nothing covers the point). */
   private _interpolateHeight(entry: TerrainCacheEntry, lonDeg: number, latDeg: number): number {
-    return this._sampleMeshHeight(entry, lonDeg, latDeg, null) ?? 0;
+    // SAMPLE_BARYCENTRIC_EPSILON (not the strict -1e-6 default): vertex
+    // lon/lat are back-solved from float32 positions, jittering boundary
+    // vertices ~4e-6 of a grid cell outside their own edge triangles — the
+    // strict tolerance rejects every edge triangle and sampleHeight returns 0
+    // on tile-border nodes (consumers then clamp to the base ellipsoid,
+    // hundreds of metres off). Same remedy as the stitch path.
+    return this._sampleMeshHeight(entry, lonDeg, latDeg, null, SAMPLE_BARYCENTRIC_EPSILON) ?? 0;
   }
 
   /**
@@ -961,6 +967,18 @@ const EDGE_EPSILON = 2e-3;
  * default of `-1e-6`.
  */
 const STITCH_BARYCENTRIC_EPSILON = -2e-3;
+
+/**
+ * Barycentric tolerance for plain {@link sampleHeight} queries. Identical
+ * rationale as {@link STITCH_BARYCENTRIC_EPSILON}: tile-border vertices
+ * back-solved from float32 positions jitter just outside their own edge
+ * triangles, so the strict `-1e-6` default made sampleHeight return 0 on
+ * border grid nodes (measured on a 65×65 tile: up to 24 nodes per edge).
+ * Consumers treat 0 as "no terrain" and clamp to the base ellipsoid —
+ * hundreds of metres of error. Heights extrapolate linearly over the tiny
+ * tolerance, so interior queries are unaffected.
+ */
+const SAMPLE_BARYCENTRIC_EPSILON = -2e-3;
 
 /** Cap on the stitch-result cache. */
 const STITCH_CACHE_CAPACITY = 512;
