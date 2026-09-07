@@ -1,0 +1,12 @@
+{
+	"camera" : {
+		"position" : [119.97636, 30.52390, 47.92720],
+		"orientation" : [-30.9, -38.7, 8.8],
+		"fov" : 55.7
+	},
+	"video" : {
+		"file" : "new001.mp4",
+		"bottomClipLine" : [0.0, 0.5, 0.11, 0.0]
+	},
+	"groundHeight" : 8
+}

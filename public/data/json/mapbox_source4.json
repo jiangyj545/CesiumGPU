@@ -1,0 +1,96 @@
+{
+    "attribution": "<a href=\"https://www.mapbox.com/about/maps/\" target=\"_blank\" title=\"Mapbox\" aria-label=\"Mapbox\">&copy; Mapbox</a> <a href=\"https://www.openstreetmap.org/about/\" target=\"_blank\" title=\"OpenStreetMap\" aria-label=\"OpenStreetMap\">&copy; OpenStreetMap</a> <a class=\"mapbox-improve-map\" href=\"https://www.mapbox.com/contribute/\" target=\"_blank\" title=\"Improve this map\" aria-label=\"Improve this map\">Improve this map</a>",
+    "bounds": [
+        -180,
+        -85,
+        180,
+        85
+    ],
+    "center": [
+        0,
+        0,
+        0
+    ],
+    "constituents": [
+        {
+            "maxzoom": 16,
+            "minzoom": 0,
+            "source": "mapbox.mapbox-streets-v8"
+        }
+    ],
+    "format": "pbf",
+    "language_options": {
+        "ar": "Arabic",
+        "ca": "Catalan",
+        "cs": "Czech",
+        "da": "Danish",
+        "de": "German",
+        "el": "Greek",
+        "en": "English",
+        "es": "Spanish",
+        "fa": "Farsi",
+        "fi": "Finnish",
+        "fr": "French",
+        "he": "Hebrew",
+        "hu": "Hungarian",
+        "id": "Indonesian",
+        "it": "Italian",
+        "ja": "Japanese",
+        "ka": "Georgian",
+        "ko": "Korean",
+        "local": "Renderable local language",
+        "lv": "Latvian",
+        "ms": "Malay",
+        "nb": "Norwegian Bokmål",
+        "nl": "Dutch",
+        "no": "Norwegian",
+        "pl": "Polish",
+        "pt": "Portuguese",
+        "ro": "Romanian",
+        "ru": "Russian",
+        "sk": "Slovak",
+        "sl": "Slovenian",
+        "sr": "Serbian",
+        "sv": "Swedish",
+        "th": "Thai",
+        "tl": "Tagalog",
+        "tr": "Turkish",
+        "uk": "Ukrainian",
+        "vi": "Vietnamese",
+        "zh-Hans": "Simplified Chinese",
+        "zh-Hant": "Traditional Chinese"
+    },
+    "mapbox_logo": true,
+    "maskLevel": 9,
+    "maxzoom": 16,
+    "minzoom": 0,
+    "name": "Mapbox Terrain v2 + Mapbox Streets v8",
+    "scheme": "xyz",
+    "tilejson": "2.2.0",
+    "tiles": [
+        "http://10.10.6.159:8080/earthview/rest/services/tileserver/wmts?serviceName=深圳地铁&LAYER=深圳地铁&STYLE=default&TILEMATRIXSET=EPSG:900913&SERVICE=WMTS&REQUEST=GetTile&Version=1.1.1&FORMAT=application%2Fvnd.mapbox-vector-tile&TILEMATRIX={z1}&TILECOL={x}&TILEROW={y}&token=undefined"
+    ],
+    "vector_layers": [
+        {
+            "description": "",
+            "fields": {
+                "O_Name": "总图——水泥?_9"
+            },
+            "id": "深圳市_地铁线.shp_0",
+            "source": "composite",
+            "source_name": "composite"
+        }
+    ],
+    "worldview_default": "US",
+    "worldview_options": {
+        "AR": "Argentina",
+        "CN": "China",
+        "IN": "India",
+        "JP": "Japan",
+        "MA": "Morocco",
+        "RS": "Serbia",
+        "RU": "Russia",
+        "TR": "Turkey",
+        "US": "United States"
+    }
+}
