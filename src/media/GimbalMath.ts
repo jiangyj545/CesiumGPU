@@ -49,6 +49,20 @@ export interface Footprint {
   centerRangeMeters: number;
 }
 
+/**
+ * Terrain elevation sampler: geodetic longitude / latitude in degrees in,
+ * terrain height in metres out (returning 0 for unloaded regions is fine —
+ * the projection simply clamps back to the base ellipsoid).
+ *
+ * Passing a sampler to `computeFootprint` / `projectToSurface` /
+ * `buildFootprintGrid` / `buildFrustumLineVertices` switches projection from
+ * "ray ∩ ellipsoid" to "ray ∩ ellipsoid, then radially displaced by the
+ * sampled height". This is a single-iteration approximation: the height is
+ * sampled at the ellipsoid hit point and the second-order shift of the hit
+ * position caused by the height itself is ignored (far below DEM accuracy).
+ */
+export type HeightSampler = (lonDeg: number, latDeg: number) => number;
+
 /** WGS84 极半轴 / 赤道半轴 = 6356752.3142 / 6378137 ≈ 0.9966472。 */
 export const WGS84_POLAR_RATIO = 6356752.3142 / 6378137;
 
@@ -69,6 +83,10 @@ const _tmpA = new Cartesian3();
 const _rayDir = new Cartesian3();
 const _surf = new Cartesian3();
 const _target = new Cartesian3();
+const _gnd = new Cartesian3();
+// Module-level scalar scratch for lon/lat extraction (see `_extractLonLatDeg`).
+let _sampLonDeg = 0;
+let _sampLatDeg = 0;
 const _nTL = new Cartesian3();
 const _nTR = new Cartesian3();
 const _nBR = new Cartesian3();
@@ -225,13 +243,27 @@ export function intersectRayEllipsoid(origin: Cartesian3, dir: Cartesian3): numb
   return null;
 }
 
-/** 单条角射线求交并写入 corner；未命中时写入 position + dir 并返回 false。 */
+/**
+ * Extract lon/lat (degrees) of a point in the engine's squashed-ECEF
+ * convention — the exact inverse of the terrain providers'
+ * `ecefFromLonLatHeight` (z/rho = sin(lat), hypot(x, y) = cos(lat)), so
+ * sampler coordinates line up with terrain tile meshes by construction.
+ * Writes into the module-level `_sampLonDeg` / `_sampLatDeg` scratch.
+ */
+function _extractLonLatDeg(p: Cartesian3): void {
+  _sampLonDeg = Math.atan2(p.y, p.x) * (180.0 / Math.PI);
+  _sampLatDeg = Math.atan2(p.z / _RHO, Math.hypot(p.x, p.y)) * (180.0 / Math.PI);
+}
+
+/** 单条角射线求交并写入 corner；未命中时写入 position + dir 并返回 false。
+ *  `heightSampler` 提供时命中点再沿径向抬升采样高程（见 `HeightSampler`）。 */
 function _cornerInto(
   pose: GimbalPose,
   basis: { dir: Cartesian3; up: Cartesian3; right: Cartesian3 },
   ndcX: number,
   ndcY: number,
   corner: Cartesian3,
+  heightSampler?: HeightSampler,
 ): boolean {
   _cornerRayFromBasis(pose, basis, ndcX, ndcY, _rayDir);
   const t = intersectRayEllipsoid(pose.position, _rayDir);
@@ -244,6 +276,17 @@ function _cornerInto(
   corner.x = pose.position.x + t * _rayDir.x;
   corner.y = pose.position.y + t * _rayDir.y;
   corner.z = pose.position.z + t * _rayDir.z;
+  if (heightSampler !== undefined) {
+    // The hit point lies on the base ellipsoid (squashed radius 1), so
+    // scaling it by 1 + h / EARTH_SCALE puts it on the terrain surface
+    // along the geocentric hit direction (same convention as
+    // `ecefFromLonLatHeight` / `projectToSurface`).
+    _extractLonLatDeg(corner);
+    const k = 1.0 + heightSampler(_sampLonDeg, _sampLatDeg) / EARTH_SCALE;
+    corner.x *= k;
+    corner.y *= k;
+    corner.z *= k;
+  }
   return true;
 }
 
@@ -252,8 +295,15 @@ function _cornerInto(
  * 中心射线 (0,0) 求交得 center / centerRangeMeters。
  * 任一射线未命中 → valid = false（未命中角点写入 position + dir 的有限占位点）。
  * `result` 出参复用已有 Footprint（含其 corners / center 对象）避免分配。
+ *
+ * `heightSampler`（可选）把每个命中点从基准椭球面径向抬升到地形面
+ * （centerRangeMeters 相应变为到地形点的斜距）；未命中路径维持 degraded 行为。
  */
-export function computeFootprint(pose: GimbalPose, result?: Footprint): Footprint {
+export function computeFootprint(
+  pose: GimbalPose,
+  result?: Footprint,
+  heightSampler?: HeightSampler,
+): Footprint {
   const fp: Footprint =
     result ?? {
       corners: [new Cartesian3(), new Cartesian3(), new Cartesian3(), new Cartesian3()],
@@ -264,10 +314,10 @@ export function computeFootprint(pose: GimbalPose, result?: Footprint): Footprin
 
   const basis = gimbalBasis(pose);
   let valid = true;
-  valid = _cornerInto(pose, basis, -1.0, 1.0, fp.corners[0]) && valid;  // TL
-  valid = _cornerInto(pose, basis, 1.0, 1.0, fp.corners[1]) && valid;   // TR
-  valid = _cornerInto(pose, basis, 1.0, -1.0, fp.corners[2]) && valid;  // BR
-  valid = _cornerInto(pose, basis, -1.0, -1.0, fp.corners[3]) && valid; // BL
+  valid = _cornerInto(pose, basis, -1.0, 1.0, fp.corners[0], heightSampler) && valid;  // TL
+  valid = _cornerInto(pose, basis, 1.0, 1.0, fp.corners[1], heightSampler) && valid;   // TR
+  valid = _cornerInto(pose, basis, 1.0, -1.0, fp.corners[2], heightSampler) && valid;  // BR
+  valid = _cornerInto(pose, basis, -1.0, -1.0, fp.corners[3], heightSampler) && valid; // BL
 
   // 中心射线（视线中心）
   _cornerRayFromBasis(pose, basis, 0.0, 0.0, _rayDir);
@@ -281,6 +331,15 @@ export function computeFootprint(pose: GimbalPose, result?: Footprint): Footprin
   } else {
     Cartesian3.multiplyByScalar(_rayDir, tc, _tmpA);
     Cartesian3.add(pose.position, _tmpA, fp.center);
+    if (heightSampler !== undefined) {
+      // Same radial terrain lift as `_cornerInto` (center sits on the base
+      // ellipsoid before the lift).
+      _extractLonLatDeg(fp.center);
+      const k = 1.0 + heightSampler(_sampLonDeg, _sampLatDeg) / EARTH_SCALE;
+      fp.center.x *= k;
+      fp.center.y *= k;
+      fp.center.z *= k;
+    }
     fp.centerRangeMeters = Cartesian3.distance(pose.position, fp.center) * EARTH_SCALE;
   }
 
@@ -291,16 +350,25 @@ export function computeFootprint(pose: GimbalPose, result?: Footprint): Footprin
 /**
  * 把点径向回投到归一化椭球面并沿径向抬升 heightOffsetMeters：
  * s = 1 / sqrt(x² + y² + (z/rho)²)，result = p · s · (1 + heightOffsetMeters / EARTH_SCALE)。
- * 这是将来接入 DEM 高程时的可替换点（替换本函数即可换采样源）。
+ * `heightSampler`（可选）在 p 自身经纬度处采样地形高程并与 heightOffsetMeters
+ * 叠加后一并抬升——网格顶点因此逐点贴地形，而非仅取角点抬升的双线性混合。
+ * 径向缩放沿地心方向、在压缩度量（z 除以极比）下进行，与
+ * `ecefFromLonLatHeight` 的地形网格构建约定一致。
  */
 export function projectToSurface(
   p: Cartesian3,
   heightOffsetMeters: number,
   result: Cartesian3,
+  heightSampler?: HeightSampler,
 ): Cartesian3 {
+  let offset = heightOffsetMeters;
+  if (heightSampler !== undefined) {
+    _extractLonLatDeg(p);
+    offset += heightSampler(_sampLonDeg, _sampLatDeg);
+  }
   const zr = p.z / _RHO;
   const s = 1.0 / Math.sqrt(p.x * p.x + p.y * p.y + zr * zr);
-  const k = s * (1.0 + heightOffsetMeters / EARTH_SCALE);
+  const k = s * (1.0 + offset / EARTH_SCALE);
   result.x = p.x * k;
   result.y = p.y * k;
   result.z = p.z * k;
@@ -311,6 +379,8 @@ export function projectToSurface(
  * 由足迹 4 角双线性插值生成 (subdivisions+1)² 顶点的贴地网格。
  *
  * - 每个插值点经 `projectToSurface` 径向回投椭球面并抬升 heightOffsetMeters；
+ * - `heightSampler`（可选）让每个插值顶点在自身经纬度处采样地形高程并随径向
+ *   抬升（见 `HeightSampler`），实现逐顶点贴地形；
  * - positionsOut 布局 xyz 紧凑（行主序：j 外层沿 TL→BL、i 内层沿 TL→TR，TL 为原点）；
  * - 索引（quad 双三角形）写入 indicesOut：每 quad 6 个索引，
  *   基址 base = j*(n+1)+i，三角形 (base, base+n+1, base+1) / (base+1, base+n+1, base+n+2)；
@@ -323,6 +393,7 @@ export function buildFootprintGrid(
   heightOffsetMeters: number,
   positionsOut: Float32Array,
   indicesOut: Uint32Array,
+  heightSampler?: HeightSampler,
 ): { vertexCount: number; indexCount: number } {
   if (!fp.valid) return { vertexCount: 0, indexCount: 0 };
 
@@ -344,7 +415,7 @@ export function buildFootprintGrid(
       _surf.x = tl.x * wTL + tr.x * wTR + br.x * wBR + bl.x * wBL;
       _surf.y = tl.y * wTL + tr.y * wTR + br.y * wBR + bl.y * wBL;
       _surf.z = tl.z * wTL + tr.z * wTR + br.z * wBR + bl.z * wBL;
-      projectToSurface(_surf, heightOffsetMeters, _surf);
+      projectToSurface(_surf, heightOffsetMeters, _surf, heightSampler);
       positionsOut[vi++] = _surf.x;
       positionsOut[vi++] = _surf.y;
       positionsOut[vi++] = _surf.z;
@@ -406,6 +477,9 @@ export function buildTextureMatrix(
  * 1. 近平面矩形 4 条边（TL→TR→BR→BL→TL，近平面角 = 沿 dir 的 nearMeters 处矩形四角）；
  * 2. fp.valid 时追加：无人机位置 → 4 地面角 连线（4 条，共 24 floats）。
  * fp.valid = false 时只写近平面部分（24 floats）。
+ * `heightSampler`（可选）把 4 条连线的地面端点重投影到地形面——
+ * `projectToSurface` 先归一回基准椭球再抬升采样高程，因此幂等：对已由
+ * `computeFootprint(pose, fp, sampler)` 抬升过的足迹重复采样结果不变。
  * 调用方需保证 out ≥ 48 floats。
  */
 export function buildFrustumLineVertices(
@@ -413,6 +487,7 @@ export function buildFrustumLineVertices(
   fp: Footprint,
   nearMeters: number,
   out: Float32Array,
+  heightSampler?: HeightSampler,
 ): number {
   const basis = gimbalBasis(pose);
   const tanHalfFovY = Math.tan(pose.fovY * 0.5);
@@ -434,7 +509,12 @@ export function buildFrustumLineVertices(
 
   if (fp.valid) {
     for (let i = 0; i < 4; i++) {
-      f = _writeSegment(out, f, pose.position, fp.corners[i]);
+      if (heightSampler === undefined) {
+        f = _writeSegment(out, f, pose.position, fp.corners[i]);
+      } else {
+        projectToSurface(fp.corners[i], 0, _gnd, heightSampler);
+        f = _writeSegment(out, f, pose.position, _gnd);
+      }
     }
   }
   return f;

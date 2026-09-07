@@ -26,6 +26,8 @@
     <p class="desc">北京上空 mock 无人机绕圈（60s/圈，10Hz device_osd 遥测），
       mock 视频 canvas（1280×720, 30fps）→ 贴地投影纹理（透视校正 uv/w）+ 视锥线框；
       地球远侧足迹由 shader 内射线-球求交 discard 剔除。
+      「地形模拟」开关注入解析高度函数模拟 DEM（真实地形 provider 接入后把
+      同一开关里的 sampler 换成 globe.terrainLayer.sampleHeight.bind(layer) 即可）。
       提示：拖动旋转到地球背面，足迹与视锥应被整体遮挡。</p>
     <div id="controls"></div>
     <div id="result">初始化中…</div>
@@ -102,8 +104,16 @@
       let overlayOn = true;
       let frustumOn = true;
       let paused = false;
+      let terrainOn = false;
       let currentHz = 0;
       let lastCount = 0;
+
+      // ── 模拟 DEM：北京周边解析起伏（米）──────────────────────────
+      // 与 tests/media/gimbalTerrain.spec.ts 同式；真实地形 provider 接入后
+      // 换成 (lon, lat) => globe.terrainLayer.sampleHeight(lon, lat) 即可。
+      const DEG = Math.PI / 180;
+      const mockTerrainHeight = (lonDeg, latDeg) =>
+        800 * Math.sin(3 * lonDeg * DEG) * Math.cos(2 * latDeg * DEG);
 
       function refresh() {
         let fpText = 'footprint: 等待首次几何重建…';
@@ -111,8 +121,11 @@
         if (fp !== null) {
           if (fp.valid) {
             const c = footprintCenterDeg(fp);
+            const terrainText = terrainOn
+              ? `   地形高程: ${mockTerrainHeight(c.lonDeg, c.latDeg).toFixed(0)} m`
+              : '';
             fpText =
-              `footprint 中心: ${c.lonDeg.toFixed(5)}°E, ${c.latDeg.toFixed(5)}°N\n` +
+              `footprint 中心: ${c.lonDeg.toFixed(5)}°E, ${c.latDeg.toFixed(5)}°N${terrainText}\n` +
               `中心斜距: ${fp.centerRangeMeters.toFixed(0)} m`;
           } else {
             fpText = 'footprint: degraded（射线未命中椭球）';
@@ -121,7 +134,8 @@
         result.textContent =
           `状态: ${overlay.state}   遥测: ~${currentHz} Hz (目标 10)\n` +
           `FOV: ${FOV_STEPS[fovIdx]}°   视锥: ${frustumOn ? '开' : '关'}` +
-          `   遥测源: ${paused ? '已暂停' : '运行中'}\n` +
+          `   遥测源: ${paused ? '已暂停' : '运行中'}` +
+          `   投影面: ${terrainOn ? '模拟 DEM' : '椭球面'}\n` +
           `${fpText}\n` +
           '提示: 旋转到地球背面，足迹应被遮挡(discard)；暂停遥测后几何静止、纹理仍动';
       }
@@ -164,6 +178,17 @@
         fovIdx = (fovIdx + 1) % FOV_STEPS.length;
         overlay.setFovYDeg(FOV_STEPS[fovIdx]); // 见上方路径说明，≤100ms 生效
         fovBtn.textContent = `FOV ${FOV_STEPS[fovIdx]}°`;
+        refresh();
+      });
+
+      // ── 地形高度模拟开关：注入模拟 DEM 采样器（undefined = 贴椭球面）──
+      // setHeightSampler 置几何脏标记，≤60ms（minGeoIntervalMs）内节流重建，
+      // 效果上等同立即切换。真实地形接入后换 sampler 即可，其余逻辑不变。
+      const terrainBtn = addBtn('地形模拟: 关', () => {
+        terrainOn = !terrainOn;
+        overlay.setHeightSampler(terrainOn ? mockTerrainHeight : null);
+        terrainBtn.textContent = `地形模拟: ${terrainOn ? '开' : '关'}`;
+        terrainBtn.classList.toggle('active', terrainOn);
         refresh();
       });
 

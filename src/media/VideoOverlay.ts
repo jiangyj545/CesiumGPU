@@ -12,7 +12,7 @@ import {
   buildTextureMatrix,
   computeFootprint,
 } from './GimbalMath';
-import type { Footprint, GimbalPose } from './GimbalMath';
+import type { Footprint, GimbalPose, HeightSampler } from './GimbalMath';
 import { DeviceOsdParser } from './Telemetry';
 import type { DeviceOsdParseOptions, GimbalState } from './Telemetry';
 import { VideoTexture, createVideoSampler } from './VideoTexture';
@@ -40,8 +40,10 @@ import type { VideoFrameSurface } from './VideoSource';
  *                 近平面线框仍绘制；恢复有效时重置警告标志）
  *
  * **与 DEM 的关系**：`heightOffsetMeters` 只是把网格沿径向抬离椭球面
- * （`projectToSurface` 的 `k = s * (1 + h / EARTH_SCALE)`）。接入 DEM 时
- * 仅需替换 `GimbalMath.projectToSurface` 的采样源，本类接口不变。
+ * （`projectToSurface` 的 `k = s * (1 + h / EARTH_SCALE)`）。地形感知投影经
+ * `heightSampler`（`setHeightSampler`）注入米制高程回调：GimbalMath 在椭球
+ * 交点处采样高程并沿径向抬升。本类不自动绑定 Globe——由调用方显式传入，
+ * 例如 `overlay.setHeightSampler(globe.terrainLayer.sampleHeight.bind(globe.terrainLayer))`。
  *
  * ```ts
  * const overlay = new VideoOverlay(viewer.context, {
@@ -70,6 +72,14 @@ export interface VideoOverlayOptions {
   fovBiasDeg?: number;
   /** 网格沿径向抬离椭球面的高度（米），DEM 预留。默认 0。 */
   heightOffsetMeters?: number;
+  /**
+   * 地形高程采样器（度数经纬度入参、米制高程返回），启用地形感知投影。
+   * 本类刻意零依赖引擎内部（不自动绑 Globe）——由调用方显式注入，例如
+   * `heightSampler: (lon, lat) => globe.terrainLayer.sampleHeight(lon, lat)`
+   * （或 `setHeightSampler`，注意用 bind / 箭头包一层避免 this 丢失）。
+   * 默认 undefined（投影到基准椭球面）。
+   */
+  heightSampler?: HeightSampler;
   /** 是否绘制视锥线框。默认 true。 */
   showFrustum?: boolean;
   /** 视锥线框颜色（rgb + a）。默认 [0.22, 0.88, 1.0, 0.55]。 */
@@ -122,6 +132,7 @@ export class VideoOverlay implements Effect {
   private readonly _tint: [number, number, number];
   private readonly _fovBiasRad: number;
   private _heightOffsetMeters: number;
+  private _heightSampler: HeightSampler | undefined;
   private _showFrustum: boolean;
   private readonly _frustumColor: [number, number, number, number];
   private readonly _minGeoIntervalSec: number;
@@ -185,6 +196,7 @@ export class VideoOverlay implements Effect {
     this._tint = [tint[0], tint[1], tint[2]];
     this._fovBiasRad = CesiumMath.toRadians(options.fovBiasDeg ?? DEFAULT_FOV_BIAS_DEG);
     this._heightOffsetMeters = options.heightOffsetMeters ?? DEFAULT_HEIGHT_OFFSET_METERS;
+    this._heightSampler = options.heightSampler;
     this._showFrustum = options.showFrustum ?? DEFAULT_SHOW_FRUSTUM;
     const lc = options.frustumColor ?? DEFAULT_FRUSTUM_COLOR;
     this._frustumColor = [lc[0], lc[1], lc[2], lc[3]];
@@ -286,6 +298,16 @@ export class VideoOverlay implements Effect {
   /** 设置网格径向抬升高度（米），影响足迹网格贴地，置几何脏标记。 */
   setHeightOffsetMeters(meters: number): void {
     this._heightOffsetMeters = meters;
+    this._geoDirty = true;
+  }
+
+  /**
+   * 设置地形高程采样器（度数经纬度入参、米制高程返回；传 `null` 恢复贴椭球面）。
+   * 调用方负责绑定 this，例如 `layer.sampleHeight.bind(layer)` 或箭头包一层。
+   * 置几何脏标记，下一次节流重建即生效。
+   */
+  setHeightSampler(sampler: HeightSampler | null): void {
+    this._heightSampler = sampler ?? undefined;
     this._geoDirty = true;
   }
 
@@ -454,7 +476,8 @@ export class VideoOverlay implements Effect {
    */
   private _rebuildGeometry(timeSeconds: number): void {
     const pose = this._pose;
-    const fp = computeFootprint(pose, this._footprint);
+    const sampler = this._heightSampler;
+    const fp = computeFootprint(pose, this._footprint, sampler);
     buildTextureMatrix(pose, TEXTURE_NEAR_METERS, TEXTURE_FAR_METERS, this._texMatrix);
 
     const grid = buildFootprintGrid(
@@ -463,6 +486,7 @@ export class VideoOverlay implements Effect {
       this._heightOffsetMeters,
       this._positions,
       this._indices,
+      sampler,
     );
     if (grid.indexCount > 0) {
       // 传全量数组（buffer 尺寸与数组一致）；draw 数量由 _indexCount 控制。
@@ -475,7 +499,7 @@ export class VideoOverlay implements Effect {
     }
     this._indexCount = grid.indexCount;
 
-    const lineFloats = buildFrustumLineVertices(pose, fp, FRUSTUM_NEAR_METERS, this._lineVerts);
+    const lineFloats = buildFrustumLineVertices(pose, fp, FRUSTUM_NEAR_METERS, this._lineVerts, sampler);
     if (lineFloats > 0 && this._lineVertexBuffer !== null) {
       // 线框 buffer 按 LINE_FLOATS_CAP 预留，实际绘制数 = lineFloats / 3。
       this._context.writeBuffer(this._lineVertexBuffer, 0, this._lineVerts);
