@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 33：雷达探测 Probing - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>33 雷达探测 Probing</h1>
+    <p class="desc">EV 探测雷达近似：CircleScan 同心波纹特效（引擎原生）+
+      旋转扇形视域 polygon（60° 张角，每 120ms 步进扫描）+ 目标点。
+      EV 私有探测服务的服务端计算无对应引擎，按规范做前端近似（诚实注明）。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      const RADAR = { lon: 115.8, lat: 40.4 };
+      const RANGE_M = 150_000;
+
+      // ── 扇形顶点：中心 + 张角弧 ───────────────────────────────────
+      function sectorPositions(centerLon, centerLat, radiusM, headingDeg, sweepDeg, segs = 24) {
+        const mPerDegLat = 111_320;
+        const mPerDegLon = 111_320 * Math.cos((centerLat * Math.PI) / 180);
+        const positions = [engine.Cartesian3.fromDegrees(centerLon, centerLat, 0)];
+        for (let i = 0; i <= segs; i++) {
+          const a = ((headingDeg + (sweepDeg * i) / segs - 90) * Math.PI) / 180; // 0°=正东
+          positions.push(engine.Cartesian3.fromDegrees(
+            centerLon + (Math.cos(a) * radiusM) / mPerDegLon,
+            centerLat + (Math.sin(a) * radiusM) / mPerDegLat, 0));
+        }
+        return positions;
+      }
+
+      // CircleScan 同心波纹（引擎原生特效）
+      scene.effects.add(new engine.CircleScan(viewer.context, {
+        center: { lon: RADAR.lon, lat: RADAR.lat },
+        radius: RANGE_M,
+        color: [1.0, 0.25, 0.15, 0.5],
+        speed: 2.4,
+        rings: 3,
+      }));
+
+      // 旋转扇形视域
+      const sector = scene.entities.add(new engine.Entity({
+        name: '雷达扇形视域',
+        polygon: {
+          hierarchy: { positions: sectorPositions(RADAR.lon, RADAR.lat, RANGE_M, 0, 60) },
+          height: 3000 / engine.Camera.EARTH_SCALE,
+          color: new engine.Color(1, 0.35, 0.15, 0.30),
+        },
+      }));
+      const sectorEdge = scene.entities.add(new engine.Entity({
+        name: '扇形边线',
+        polyline: {
+          positions: sectorPositions(RADAR.lon, RADAR.lat, RANGE_M, 0, 60),
+          width: 2,
+          color: new engine.Color(1, 0.55, 0.3, 0.9),
+        },
+      }));
+
+      // 目标点（分布在扫描半径内）
+      const TARGETS = [
+        { name: '目标 A（大型）', lon: 116.4, lat: 40.7, size: 18 },
+        { name: '目标 B（中型）', lon: 116.9, lat: 40.1, size: 14 },
+        { name: '目标 C（小型）', lon: 115.4, lat: 41.0, size: 11 },
+        { name: '目标 D（民航）', lon: 116.15, lat: 39.9, size: 12 },
+      ];
+      for (const t of TARGETS) {
+        scene.entities.add(new engine.Entity({
+          name: t.name,
+          position: engine.Cartesian3.fromDegrees(t.lon, t.lat, 0),
+          point: { pixelSize: t.size, color: new engine.Color(1, 0.2, 0.15, 0.95) },
+          label: { text: t.name, font: '13px sans-serif', fillColor: engine.Color.WHITE, show: true },
+        }));
+      }
+      // 雷达站
+      scene.entities.add(new engine.Entity({
+        name: '雷达站',
+        position: engine.Cartesian3.fromDegrees(RADAR.lon, RADAR.lat, 0),
+        point: { pixelSize: 16, color: new engine.Color(0.2, 1, 0.6, 1) },
+        label: { text: '雷达站', font: 'bold 14px sans-serif', fillColor: engine.Color.WHITE, show: true },
+      }));
+
+      // 扇形旋转扫描
+      let heading = 0;
+      let scanning = true;
+      let lastStep = 0;
+      viewer.preRender = () => {
+        if (!scanning) return;
+        const now = performance.now();
+        if (now - lastStep < 120) return;
+        lastStep = now;
+        heading = (heading + 2.4) % 360;
+        const positions = sectorPositions(RADAR.lon, RADAR.lat, RANGE_M, heading, 60);
+        sector.polygon = {
+          hierarchy: { positions },
+          height: 3000 / engine.Camera.EARTH_SCALE,
+          color: new engine.Color(1, 0.35, 0.15, 0.30),
+        };
+        sectorEdge.polyline = {
+          positions,
+          width: 2,
+          color: new engine.Color(1, 0.55, 0.3, 0.9),
+        };
+      };
+
+      addBtn('扫描开 / 关', () => { scanning = !scanning; });
+      addBtn('雷达近景', () => viewer.camera.flyTo({
+        destination: { lon: RADAR.lon, lat: RADAR.lat - 0.5, height: 500_000 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-40) },
+        duration: 2.5,
+      }));
+      addBtn('全域视角', () => viewer.camera.flyTo({
+        destination: { lon: RADAR.lon, lat: RADAR.lat, height: 1_200_000 }, duration: 2,
+      }));
+
+      result.textContent =
+        `CircleScan 波纹 ×3 环（150 km，周期 2.4s）\n` +
+        `旋转扇形 60° × 150 km（每 120ms 步进 2.4°）· 目标 ${TARGETS.length} 个\n` +
+        `诚实注明：EV 服务端探测分析无引擎对应，此处为前端视觉近似`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [115.8, 39.9, 1_200_000],
+          imagery: 'gaode-sat',
+          title: '33 · 雷达探测',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '33 雷达探测 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

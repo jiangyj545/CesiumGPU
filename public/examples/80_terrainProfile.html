@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 80：地形剖面（多点路径）TerrainProfile - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:330px;max-width:460px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+    .cg-panel #controls button{padding:5px 10px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;max-height:150px;overflow:auto;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+    /* 剖面图（屏幕底部整宽 canvas） */
+    #profileChart{position:absolute;left:12px;bottom:12px;z-index:9000;
+      border-radius:8px;background:rgba(8,14,26,.88);border:1px solid rgba(120,180,255,.3);
+      display:none;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>80 地形剖面（多点连续路径）</h1>
+    <p class="desc">用 DrawHandler 画一条<b>多点连续路径</b>（区别于两点直线剖面）：
+      路径按弦长参数化重采样为 240 个剖面点，逐点 <code>sampleHeight</code> 后用
+      canvas 2D 绘制「里程—海拔」剖面图，附累计爬升/下降、最大坡度等统计；
+      球面上同步画出贴地路径线与顶点标记。</p>
+    <label>剖面重采样点数 <span id="nVal">240</span></label>
+    <input id="nSlider" type="range" min="60" max="480" step="20" value="240" />
+    <div id="controls">
+      <button id="btnDraw">📏 绘制路径</button>
+      <button id="btnDemo">示例路径（宜昌→荆门）</button>
+      <button id="btnClear">清除</button>
+    </div>
+    <div id="result">点「绘制路径」后左键连续取点（≥2 点），右键结束。</div>
+    <p class="warn">⚠ 需要本地地形服务在线：<code>http://localhost:8888</code>（terrain_hubei）。
+      离线时剖面退化为平线。</p>
+  </div>
+  <canvas id="profileChart" height="220"></canvas>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const nSlider = document.getElementById('nSlider');
+      const nVal = document.getElementById('nVal');
+      const btnDraw = document.getElementById('btnDraw');
+      const canvas = document.getElementById('profileChart');
+      const ctx = canvas.getContext('2d');
+
+      // ── 1. 地形层（湖北 8888；离线降级 0 高）────────────────────────
+      let terrainOk = false;
+      try {
+        if (typeof engine.TerrainLayer === 'function') {
+          viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+            url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 14,
+          }));
+          terrainOk = true;
+        }
+      } catch (err) { console.warn('[80] terrain init failed:', err.message); }
+      const sampleHeight = terrainOk
+        ? (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat)
+        : () => 0;
+      if (!terrainOk) result.textContent += '\n（地形离线：0 高椭球模式）';
+
+      const RATIO = 6356752.3142 / 6378137;
+      function toLonLat(p) {
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const ux = p.x / mag, uy = (p.y / mag) / RATIO, uz = (p.z / mag) / RATIO;
+        return { lon: Math.atan2(uy, ux) * 180 / Math.PI,
+                 lat: Math.atan2(uz, Math.hypot(ux, uy)) * 180 / Math.PI };
+      }
+
+      // ── 2. 路径重采样：按弦长参数化，等距取 N 点 ─────────────────────
+      function resamplePath(llDeg, n) {
+        // 相邻顶点弦长（米，局部平面近似足够做参数化）
+        const segLen = [];
+        let total = 0;
+        for (let i = 1; i < llDeg.length; i++) {
+          const dLat = (llDeg[i].lat - llDeg[i - 1].lat) * 111_320;
+          const dLon = (llDeg[i].lon - llDeg[i - 1].lon) * 111_320 *
+            Math.cos(llDeg[i].lat * Math.PI / 180);
+          const len = Math.hypot(dLon, dLat);
+          segLen.push(len);
+          total += len;
+        }
+        const pts = [];
+        for (let k = 0; k < n; k++) {
+          const target = (k / (n - 1)) * total;
+          let acc = 0, seg = 0;
+          while (seg < segLen.length - 1 && acc + segLen[seg] < target) { acc += segLen[seg]; seg++; }
+          const t = segLen[seg] > 0 ? (target - acc) / segLen[seg] : 0;
+          pts.push({
+            lon: llDeg[seg].lon + (llDeg[seg + 1].lon - llDeg[seg].lon) * t,
+            lat: llDeg[seg].lat + (llDeg[seg + 1].lat - llDeg[seg].lat) * t,
+            dist: target,
+            vertex: seg, // 所属路径段（用于分段着色）
+          });
+        }
+        return { pts, total };
+      }
+
+      // ── 3. 剖面计算 + canvas 绘制 ───────────────────────────────────
+      function computeProfile(llDeg) {
+        const n = nSlider.valueAsNumber;
+        const { pts, total } = resamplePath(llDeg, n);
+        pts.forEach((p) => { p.h = sampleHeight(p.lon, p.lat); });
+        return { pts, total };
+      }
+
+      function drawChart(prof, vertexCount) {
+        const W = Math.min(980, innerWidth - 48);
+        const H = 220;
+        canvas.width = Math.round(W * devicePixelRatio);
+        canvas.height = Math.round(H * devicePixelRatio);
+        canvas.style.width = W + 'px';
+        canvas.style.height = H + 'px';
+        canvas.style.display = 'block';
+        ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+        ctx.clearRect(0, 0, W, H);
+
+        const pad = { l: 52, r: 14, t: 26, b: 24 };
+        const hs = prof.pts.map((p) => p.h);
+        const hMin = Math.min(0, ...hs), hMax = Math.max(50, ...hs);
+        const span = Math.max(1, hMax - hMin);
+        const xOf = (d) => pad.l + (d / Math.max(1, prof.total)) * (W - pad.l - pad.r);
+        const yOf = (h) => H - pad.b - ((h - hMin) / span) * (H - pad.t - pad.b);
+
+        // 网格 + 纵轴刻度（海拔 m）
+        ctx.strokeStyle = 'rgba(120,180,255,.18)';
+        ctx.fillStyle = '#8fa8c8';
+        ctx.font = '10px Consolas, monospace';
+        ctx.textAlign = 'right';
+        for (let i = 0; i <= 4; i++) {
+          const h = hMin + (span * i) / 4;
+          const y = yOf(h);
+          ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+          ctx.fillText(`${Math.round(h)} m`, pad.l - 6, y + 3);
+        }
+
+        // 分段底色（多点路径的每一段一个色相，强调“连续多段”）
+        const segHues = [200, 30, 130, 280, 60, 330];
+        let segStartX = xOf(0);
+        for (let s = 0; s < vertexCount - 1; s++) {
+          // 该段终点里程 = 下一个更晚段号首次出现的 dist
+          let endX = xOf(prof.total);
+          for (const p of prof.pts) { if (p.vertex > s) { endX = xOf(p.dist); break; } }
+          ctx.fillStyle = `hsla(${segHues[s % segHues.length]},60%,50%,.08)`;
+          ctx.fillRect(segStartX, pad.t, Math.max(1, endX - segStartX), H - pad.t - pad.b);
+          ctx.fillStyle = '#9db4d0';
+          ctx.textAlign = 'center';
+          ctx.fillText(`段${s + 1}`, (segStartX + endX) / 2, pad.t - 8);
+          ctx.textAlign = 'right';
+          segStartX = endX;
+        }
+
+        // 剖面填充 + 折线
+        ctx.beginPath();
+        ctx.moveTo(xOf(0), yOf(hMin));
+        for (const p of prof.pts) ctx.lineTo(xOf(p.dist), yOf(p.h));
+        ctx.lineTo(xOf(prof.total), yOf(hMin));
+        ctx.closePath();
+        const grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
+        grad.addColorStop(0, 'rgba(90,200,140,.55)');
+        grad.addColorStop(1, 'rgba(90,200,140,.08)');
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        ctx.beginPath();
+        prof.pts.forEach((p, i) => {
+          const x = xOf(p.dist), y = yOf(p.h);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = '#7fd4a8';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // 顶点竖线（路径拐点，跳过首点）
+        ctx.strokeStyle = 'rgba(255,212,121,.7)';
+        ctx.setLineDash([4, 3]);
+        for (let i = 1; i < prof.pts.length; i++) {
+          if (prof.pts[i].vertex !== prof.pts[i - 1].vertex) {
+            ctx.beginPath();
+            ctx.moveTo(xOf(prof.pts[i].dist), yOf(prof.pts[i].h));
+            ctx.lineTo(xOf(prof.pts[i].dist), H - pad.b);
+            ctx.stroke();
+          }
+        }
+        ctx.setLineDash([]);
+
+        // 最高/最低点标记
+        const hi = prof.pts.reduce((a, b) => (b.h > a.h ? b : a));
+        const lo = prof.pts.reduce((a, b) => (b.h < a.h ? b : a));
+        ctx.fillStyle = '#ffb35c';
+        ctx.textAlign = 'center';
+        ctx.fillText(`▲ ${hi.h.toFixed(0)} m`, xOf(hi.dist), yOf(hi.h) - 6);
+        ctx.fillText(`▼ ${lo.h.toFixed(0)} m`, xOf(lo.dist), yOf(lo.h) + 14);
+
+        // 横轴里程
+        ctx.fillStyle = '#8fa8c8';
+        ctx.fillText(`${(prof.total / 1000).toFixed(1)} km`, W - pad.r, H - 8);
+        ctx.textAlign = 'left';
+        ctx.fillText('0 km', pad.l, H - 8);
+      }
+
+      // ── 4. 统计 + 球面贴地路径 ───────────────────────────────────────
+      function showProfile(llDeg, positions) {
+        const prof = computeProfile(llDeg);
+        drawChart(prof, llDeg.length);
+
+        // 统计：累计爬升/下降、最大坡度
+        let up = 0, down = 0, maxSlope = 0, maxSlopeAt = 0;
+        for (let i = 1; i < prof.pts.length; i++) {
+          const dh = prof.pts[i].h - prof.pts[i - 1].h;
+          const dd = prof.pts[i].dist - prof.pts[i - 1].dist;
+          if (dh > 0) up += dh; else down -= dh;
+          const slope = dd > 0 ? Math.abs(dh) / dd : 0;
+          if (slope > maxSlope) { maxSlope = slope; maxSlopeAt = prof.pts[i].dist; }
+        }
+        const hs = prof.pts.map((p) => p.h);
+        const pathLen = engine.Measure.distance(positions, false,
+          { clampToTerrain: (p) => engine.Measure.clampToTerrain(p, sampleHeight) });
+
+        // 球面：贴地路径线（重采样后的等距点，保证沿线起伏）
+        viewer.scene.entities.removeAll();
+        const clamped = prof.pts.map((p) =>
+          engine.Measure.clampToTerrain(
+            engine.Cartesian3.fromDegrees(p.lon, p.lat, 0), sampleHeight));
+        viewer.scene.entities.add({
+          name: '剖面路径',
+          polyline: {
+            positions: clamped, width: 4,
+            color: new engine.Color(0.5, 0.95, 0.7, 1.0),
+          },
+        });
+        // 顶点标记
+        llDeg.forEach((v, i) => {
+          viewer.scene.entities.add({
+            name: `顶点${i + 1}`,
+            position: engine.Cartesian3.fromDegrees(v.lon, v.lat,
+              (sampleHeight(v.lon, v.lat) + 30) / 6378137),
+            point: { pixelSize: 9, color: new engine.Color(1.0, 0.83, 0.47, 1.0) },
+            label: { text: `P${i + 1}`, fillColor: new engine.Color(1.0, 0.9, 0.6, 1.0) },
+          });
+        });
+
+        result.textContent =
+          `路径 ${llDeg.length} 点 / ${llDeg.length - 1} 段，贴地里程 ${engine.MeasureCollection.formatDistance(pathLen)}\n` +
+          `海拔 ${Math.min(...hs).toFixed(0)} ~ ${Math.max(...hs).toFixed(0)} m  ` +
+          `累计爬升 ${up.toFixed(0)} m / 下降 ${down.toFixed(0)} m\n` +
+          `最大坡度 ${(maxSlope * 100).toFixed(1)}% @ 里程 ${(maxSlopeAt / 1000).toFixed(2)} km`;
+      }
+
+      // ── 5. 交互 ─────────────────────────────────────────────────────
+      const draw = new engine.DrawHandler(viewer);
+      let lastPath = null; // {llDeg, positions} 缓存，重采样点数变化时免重画
+
+      function setActive(on) {
+        btnDraw.classList.toggle('active', on);
+      }
+      draw.drawEnd.addListener(({ positions }) => {
+        if (positions.length < 2) { result.textContent = '路径至少需要 2 个点。'; setActive(false); return; }
+        lastPath = { llDeg: positions.map(toLonLat), positions };
+        setActive(false);
+        showProfile(lastPath.llDeg, lastPath.positions);
+      });
+      btnDraw.addEventListener('click', () => {
+        setActive(true);
+        draw.start('polyline');
+        result.textContent = '左键连续取点（≥2 点），右键结束。';
+      });
+      nSlider.addEventListener('input', () => {
+        nVal.textContent = nSlider.value;
+        if (lastPath) showProfile(lastPath.llDeg, lastPath.positions);
+      });
+      document.getElementById('btnDemo').addEventListener('click', () => {
+        // 示例：宜昌 → 当阳 → 荆门（跨丘陵的多段路径）
+        const degPts = [[110.5, 30.7], [110.95, 30.8], [111.5, 30.85], [112.0, 31.0], [112.6, 31.3]];
+        lastPath = {
+          llDeg: degPts.map(([lon, lat]) => ({ lon, lat })),
+          positions: degPts.map(([lon, lat]) => engine.Cartesian3.fromDegrees(lon, lat, 0)),
+        };
+        viewer.camera.flyTo({
+          destination: { lon: 111.4, lat: 30.7, height: 320_000 },
+          orientation: { heading: 0, pitch: -0.9 },
+        });
+        showProfile(lastPath.llDeg, lastPath.positions);
+      });
+      document.getElementById('btnClear').addEventListener('click', () => {
+        draw.stop(); setActive(false);
+        viewer.scene.entities.removeAll();
+        canvas.style.display = 'none';
+        lastPath = null;
+        result.textContent = '已清除路径与剖面。';
+      });
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [111.4, 30.8, 400_000],
+          imagery: 'gaode-sat',
+          title: '80 · 地形剖面 TerrainProfile',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '80 地形剖面 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

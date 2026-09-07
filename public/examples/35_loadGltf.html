@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>glTF 模型加载 · CesiumGPU 示例</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:400px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,150,.5);border:1px solid rgba(90,160,255,.4);border-radius:6px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:flex;align-items:center;gap:8px;margin:4px 0;color:#9db4d0;}
+    .cg-panel input[type=range]{flex:1;accent-color:#4a9eff;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>35 · glTF 模型加载（Model.fromGltfAsync）</h1>
+    <div class="desc">
+      对齐 EV-Globe 06_loadGltf：加载 glTF/GLB 静态模型，指定经纬度、高度、
+      朝向（heading）与缩放。glTF 为 Y-up，放置时做 Y-up→Z-up 修正；
+      引擎世界坐标为归一化 ECEF（地球半径 1.0）。
+    </div>
+    <div id="controls"></div>
+    <label>缩放倍率 <input id="scaleRange" type="range" min="0.5" max="8" step="0.1" value="1"></label>
+    <label>朝向角° <input id="headingRange" type="range" min="0" max="360" step="1" value="0"></label>
+    <label>离地高度m <input id="heightRange" type="range" min="0" max="500" step="1" value="0"></label>
+    <div id="result">加载中…</div>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    // ── 归一化 ECEF 换算 ──────────────────────────────────────────────
+    const ES = engine.Camera.EARTH_SCALE;              // 1 内部单位 = 6378137 m
+    function placeMatrix(lon, lat, hMeters, headingDeg) {
+      const ecef = engine.Cartesian3.fromDegrees(lon, lat, hMeters);   // 米制 ECEF
+      const enu  = engine.Transforms.eastNorthUpToFixedFrame(ecef);    // 平移列已归一化
+      const rot  = engine.Matrix4.fromRotationZ(engine.CesiumMath.toRadians(headingDeg));
+      const yUp  = engine.Matrix4.fromRotationX(Math.PI / 2);          // glTF Y-up → Z-up
+      return engine.Matrix4.multiply(enu, engine.Matrix4.multiply(rot, yUp, new engine.Matrix4()),
+                                     new engine.Matrix4());
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const scaleR  = document.getElementById('scaleRange');
+      const headingR = document.getElementById('headingRange');
+      const heightR  = document.getElementById('heightRange');
+
+      // ── 四个模型一字排开（北京南郊空地，间隔约 400 m）───────────────
+      const CENTER = { lon: 116.39, lat: 39.86 };
+      // 基准摆放尺寸（米）：scale = size / EARTH_SCALE
+      const DEFS = [
+        { key: 'air',   label: '飞机',   url: '/data/model/CesiumAir/Cesium_Air.glb',            lon: -300, lat: 0,    heading:  90, size: 40 },
+        { key: 'truck', label: '卡车',   url: '/data/model/CesiumMilkTruck/CesiumMilkTruck.glb', lon: 0,    lat: 0,    heading:   0, size: 24 },
+        { key: 'man',   label: '人',     url: '/data/model/CesiumMan/Cesium_Man.glb',            lon: 300,  lat: 0,    heading: 180, size: 12 },
+        { key: 'gv',    label: '军车',   url: '/data/gltf/groundvehicle.gltf',                   lon: 0,    lat: -400, heading: 270, size: 30 },
+        // 外部 .bin 引用的 gltf（几何在外置二进制文件）：与内嵌 GLB 相对，
+        // 覆盖 GltfLoader 相对 baseUrl 规范化路径
+        { key: 'trafo', label: '变压器', url: '/data/model/750kV变压器模型/1-7T-ACF1-334-GIM01-750kV变压器模型01.gltf', lon: 300, lat: -400, heading: 0, size: 30 },
+      ];
+
+      const models = {};   // key -> { model, def }
+      for (const def of DEFS) {
+        const model = await engine.Model.fromGltfAsync({
+          url: def.url,
+          scene: viewer.scene,
+          modelMatrix: placeMatrix(CENTER.lon + def.lon / 111_320 / Math.cos(CENTER.lat * Math.PI / 180),
+                                   CENTER.lat + def.lat / 110_540,
+                                   0, def.heading),
+          scale: def.size / ES,   // glTF 本地 1 单位 ≈ 1 m → 归一化
+        });
+        models[def.key] = { model, def };
+      }
+
+      // ── 选中模型后，滑杆实时改写其 modelMatrix ─────────────────────
+      let selected = models.truck;
+      function applySelected() {
+        const { model, def } = selected;
+        const m = Number(scaleR.value);
+        const h = Number(headingR.value) + def.heading;
+        const alt = Number(heightR.value);
+        model.modelMatrix = placeMatrix(
+          CENTER.lon + def.lon / 111_320 / Math.cos(CENTER.lat * Math.PI / 180),
+          CENTER.lat + def.lat / 110_540, alt, h);
+        model.applyModelMatrix();   // 修改 modelMatrix 后必须显式调用
+        return { m, h, alt };
+      }
+
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.addEventListener('click', () => onClick(b));
+        controls.appendChild(b);
+        return b;
+      }
+
+      function refreshInfo() {
+        const { m, h, alt } = applySelected();
+        result.textContent =
+          `当前模型: ${selected.def.label} (${selected.def.url})\n` +
+          `primitiveCount: ${selected.model.primitiveCount}   isReady: ${selected.model.isReady}\n` +
+          `缩放: ×${m.toFixed(1)}   朝向: ${((h % 360) + 360) % 360 | 0}°   高度: ${alt} m`;
+      }
+
+      for (const def of DEFS) {
+        const btn = addBtn(def.label, () => {
+          selected = models[def.key];
+          controls.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          scaleR.value = 1; headingR.value = 0; heightR.value = 0;
+          refreshInfo();
+        });
+        if (def.key === 'truck') btn.classList.add('active');
+      }
+
+      // 相机：先俯瞰模型排，再推近选中模型
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.004, 2200),
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-35) },
+      });
+      setTimeout(() => {
+        viewer.camera.flyTo({
+          destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.0016, 900),
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-30) },
+          duration: 2.5,
+        });
+      }, 1200);
+
+      [scaleR, headingR, heightR].forEach(r => r.addEventListener('input', refreshInfo));
+      refreshInfo();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.39, 39.856, 2200],
+          imagery: 'gaode-sat',
+          title: '35 · glTF 模型加载',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '35 glTF 模型加载 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

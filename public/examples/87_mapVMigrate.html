@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 87：mapV 迁徙图近似 MapVMigrate - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:270px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+    /* canvas 叠加层：盖在 WebGL canvas 之上，不拦截鼠标（mapV 同款挂法） */
+    #overlay{position:absolute;inset:0;z-index:500;pointer-events:none;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>87 mapV 迁徙图近似</h1>
+    <p class="desc">迁移自 EV-Globe 14_mapVMigrate / 14_mapVBigMigrate。
+      不引入 mapv 库：绝对定位 canvas 2D 叠加层（不进 WebGPU 管线）绘制
+      黄红渐变弧线、粒子尾迹与城市脉冲；/data/china.geojson 投影描底。
+      相机旋转时叠加层逐帧跟随投影。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── canvas 2D 叠加层 ──────────────────────────────────────────────
+      const overlay = document.createElement('canvas');
+      overlay.id = 'overlay';
+      document.getElementById('cesiumContainer').appendChild(overlay);
+      const ctx = overlay.getContext('2d');
+
+      /** 世界点（米制 ECEF）→ 屏幕 CSS 像素；相机背后返回 null */
+      function toPixel(world) {
+        const vp = viewer.scene.camera.viewProjectionMatrix.values;
+        const cx = vp[0] * world.x + vp[4] * world.y + vp[8] * world.z + vp[12];
+        const cy = vp[1] * world.x + vp[5] * world.y + vp[9] * world.z + vp[13];
+        const cw = vp[3] * world.x + vp[7] * world.y + vp[11] * world.z + vp[15];
+        if (cw <= 0) return null;
+        return [
+          ((cx / cw) * 0.5 + 0.5) * overlay.clientWidth,
+          (0.5 - (cy / cw) * 0.5) * overlay.clientHeight,
+        ];
+      }
+      const lonLat = (lon, lat, h = 0) => C3.fromDegrees(lon, lat, h);
+
+      function syncSize() {
+        const dpr = window.devicePixelRatio || 1;
+        const w = Math.round(overlay.clientWidth * dpr);
+        const h = Math.round(overlay.clientHeight * dpr);
+        if (overlay.width !== w || overlay.height !== h) {
+          overlay.width = w;
+          overlay.height = h;
+        }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      // ── 数据：城市 / 迁徙对 / 中国边界 ─────────────────────────────────
+      const CITIES = {
+        北京: [116.40, 39.90], 上海: [121.47, 31.23], 广州: [113.26, 23.13],
+        成都: [104.07, 30.67], 乌鲁木齐: [87.62, 43.82], 哈尔滨: [126.63, 45.75],
+        西安: [108.94, 34.34], 武汉: [114.30, 30.59], 拉萨: [91.11, 29.65],
+        深圳: [114.06, 22.55],
+      };
+      const MIGRATIONS = [
+        ['乌鲁木齐', '北京'], ['成都', '上海'], ['哈尔滨', '北京'],
+        ['西安', '广州'], ['武汉', '深圳'], ['拉萨', '成都'],
+        ['上海', '哈尔滨'], ['北京', '乌鲁木齐'],
+      ];
+      const ALT = 300_000;                        // 弧线中点抬升（视觉高度感）
+
+      let borderRings = [];                       // [[lon,lat], ...] 抽稀后
+      try {
+        const resp = await fetch('/data/china.geojson');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const geo = await resp.json();
+        for (const f of geo.features || []) {
+          const g = f.geometry;
+          const polys = g.type === 'MultiPolygon' ? g.coordinates
+            : g.type === 'Polygon' ? [g.coordinates] : [];
+          for (const poly of polys) {
+            for (const ring of poly) {
+              borderRings.push(ring.filter((_, i) => i % 2 === 0)); // 抽稀 1/2
+            }
+          }
+        }
+      } catch (err) {
+        DemoUtils.toast('china.geojson 加载失败，仅显示迁徙弧线');
+        console.error('[87] 边界数据加载失败', err);
+      }
+
+      // ── 绘制 ──────────────────────────────────────────────────────────
+      let showBorder = true, showArcs = true, paused = false;
+      let elapsed = 0;
+
+      function drawBorder() {
+        ctx.strokeStyle = 'rgba(90,160,255,0.5)';
+        ctx.lineWidth = 1;
+        for (const ring of borderRings) {
+          let pen = false;
+          for (const [lon, lat] of ring) {
+            const p = toPixel(lonLat(lon, lat));
+            if (!p) { pen = false; continue; }
+            if (pen) ctx.lineTo(p[0], p[1]);
+            else { ctx.beginPath(); ctx.moveTo(p[0], p[1]); pen = true; }
+          }
+          if (pen) ctx.stroke();
+        }
+      }
+
+      /** 弧线屏幕控制点：起 / 终 + 抬高的中点（大圆外弧感） */
+      function arcCtrl(from, to) {
+        const mid = [(from[0] + to[0]) / 2, (from[1] + to[1]) / 2];
+        return [toPixel(lonLat(from[0], from[1])), toPixel(lonLat(mid[0], mid[1], ALT)),
+          toPixel(lonLat(to[0], to[1]))];
+      }
+      /** 屏幕空间二次贝塞尔 */
+      const bez = (p0, p1, p2, u) => {
+        const a = (1 - u) * (1 - u), b = 2 * u * (1 - u), c = u * u;
+        return [a * p0[0] + b * p1[0] + c * p2[0],
+          a * p0[1] + b * p1[1] + c * p2[1]];
+      };
+
+      function drawArcs() {
+        MIGRATIONS.forEach(([fa, ta], idx) => {
+          const [p0, p1, p2] = arcCtrl(CITIES[fa], CITIES[ta]);
+          if (!p0 || !p1 || !p2) return;          // 任一端在相机背后则跳过
+          const SEG = 14;
+          // 渐变弧线：黄 → 红 分段着色
+          for (let i = 0; i < SEG; i++) {
+            const t1 = (i + 1) / SEG;
+            const q0 = bez(p0, p1, p2, i / SEG), q1 = bez(p0, p1, p2, t1);
+            const g = 0.85 - 0.65 * t1, b = 0.1 * (1 - t1);
+            ctx.strokeStyle = `rgba(255,${Math.round(g * 255)},${Math.round(b * 255)},0.75)`;
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.moveTo(q0[0], q0[1]);
+            ctx.lineTo(q1[0], q1[1]);
+            ctx.stroke();
+          }
+          // 飞点粒子 ×3 + 尾迹
+          for (let k = 0; k < 3; k++) {
+            const u = (elapsed * 0.10 + idx * 0.13 + k / 3) % 1;
+            for (let s = 0; s < 8; s++) {
+              const uu = u - s * 0.012;
+              if (uu < 0) continue;
+              const q = bez(p0, p1, p2, uu);
+              const a = (1 - s / 8) * (1 - u * 0.3);
+              ctx.fillStyle = `rgba(255,${200 - s * 20},60,${a.toFixed(3)})`;
+              const size = 3.2 - s * 0.3;
+              ctx.beginPath();
+              ctx.arc(q[0], q[1], Math.max(size, 0.6), 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        });
+      }
+
+      function drawCityPulses() {
+        let i = 0;
+        for (const [name, [lon, lat]] of Object.entries(CITIES)) {
+          const p = toPixel(lonLat(lon, lat));
+          if (!p) { i++; continue; }
+          const phase = (elapsed * 0.7 + i * 0.37) % 1;
+          ctx.strokeStyle = `rgba(255,210,80,${(0.8 * (1 - phase)).toFixed(3)})`;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(p[0], p[1], 4 + phase * 14, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = 'rgba(255,230,140,0.95)';
+          ctx.beginPath();
+          ctx.arc(p[0], p[1], 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(255,255,255,0.85)';
+          ctx.font = '12px sans-serif';
+          ctx.fillText(name, p[0] + 6, p[1] - 6);
+          i++;
+        }
+      }
+
+      // ── 逐帧驱动（与引擎渲染同步）─────────────────────────────────────
+      let lastMs = performance.now();
+      viewer.preRender = () => {
+        const now = performance.now();
+        const dt = Math.min((now - lastMs) / 1000, 0.05);
+        lastMs = now;
+        if (!paused) elapsed += dt;
+        syncSize();
+        ctx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
+        if (showBorder) drawBorder();
+        if (showArcs) { drawArcs(); drawCityPulses(); }
+      };
+
+      // ── 交互 ──────────────────────────────────────────────────────────
+      const mkToggle = (label, get, set) => {
+        const btn = addBtn(label, () => {
+          set(!get());
+          btn.textContent = get() ? label : label + '（关）';
+          btn.classList.toggle('active', get());
+        });
+        btn.classList.add('active');
+      };
+      mkToggle('边界描底', () => showBorder, (v) => { showBorder = v; });
+      mkToggle('迁徙弧线', () => showArcs, (v) => { showArcs = v; });
+      mkToggle('动画', () => !paused, (v) => { paused = !v; });
+
+      function refresh() {
+        result.textContent =
+          `边界环: ${borderRings.length}   迁徙线: ${MIGRATIONS.length} 条   ` +
+          `粒子: ${MIGRATIONS.length * 3 * 8}\n` +
+          '渲染: DOM canvas 2D（不进 WebGPU 管线），逐帧 viewProjection 投影\n' +
+          '底图: /data/china.geojson 抽稀描边';
+      }
+      refresh();
+
+      viewer.camera.setView({
+        destination: C3.fromDegrees(105, 36, 7_000_000),
+      });
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 7_000_000],
+          imagery: 'gaode-sat',
+          title: '87 · mapV 迁徙图近似',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '87 mapV 迁徙图近似 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

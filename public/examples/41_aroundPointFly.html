@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 41：绕点环绕飞行 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);font:13px/1.6 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9fd0ff;}
+    .cg-panel .desc{font-size:12px;color:#8fa8c8;margin:0 0 10px;}
+    .cg-panel h2{font-size:12px;margin:10px 0 4px;color:#7fb4e8;}
+    .cg-panel label{display:block;font-size:12px;margin:6px 0 2px;color:#b8d0ee;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel button{margin:4px 6px 4px 0;padding:5px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#dbeaff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel button.active{background:rgba(80,160,90,.7);border-color:rgba(140,255,160,.5);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;}
+    .cg-panel .warn{font-size:11px;color:#e8c37f;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>41 绕点环绕飞行</h1>
+    <p class="desc">相机围绕固定目标点（湖北地形区）做圆周环绕：
+      手动极坐标模式逐帧 setView 推进；引擎模式用 Camera.orbitAroundPivot。</p>
+
+    <div>
+      <button id="btnPlay" class="active">暂停</button>
+      <button id="btnMode">切换：手动极坐标</button>
+    </div>
+
+    <h2>环绕参数</h2>
+    <label>环绕半径 <span id="vRadius">12</span> km</label>
+    <input type="range" id="radius" min="3" max="80" step="1" value="12" />
+    <label>相机高度 <span id="vHeight">8.0</span> km</label>
+    <input type="range" id="height" min="2" max="40" step="0.5" value="8" />
+    <label>角速度 <span id="vSpeed">12</span> °/s</label>
+    <input type="range" id="speed" min="1" max="45" step="1" value="12" />
+    <label>俯仰倾角 <span id="vPitch">-35</span> °</label>
+    <input type="range" id="pitch" min="-80" max="-5" step="1" value="-35" />
+
+    <h2>目标点</h2>
+    <div>
+      <button class="pivotBtn active" data-p="wuhan">武汉</button>
+      <button class="pivotBtn" data-p="yichang">宜昌（山区）</button>
+      <button class="pivotBtn" data-p="shennongjia">神农架</button>
+    </div>
+
+    <div id="result">初始化中…</div>
+    <div class="warn">注：引擎 orbitAroundPivot 会把相机钳制到离地 ≥0.05 归一化半径
+      （≈318 km），故引擎模式为高空俯瞰环绕；低空环绕由手动极坐标实现。</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const R = C3.EARTH_RADIUS || 6378137;
+      const MATH = engine.CesiumMath;
+      const result = document.getElementById('result');
+
+      // ── 地形层（湖北 quantized-mesh，8888 本地服务）────────────────
+      let sampleHeight = () => 0;
+      try {
+        const provider = new engine.LocalQuantizedMeshProvider({
+          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          maximumLevel: 14,
+        });
+        viewer.globe.setTerrainProvider(provider);
+        sampleHeight = (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat);
+      } catch (err) {
+        console.error('[41] terrain init failed:', err);
+        result.textContent = '地形服务不可用，运行在 0 高椭球模式：' + err.message;
+      }
+
+      // ── 目标点（湖北境内，环绕 pivot 固定于地表）────────────────────
+      const PIVOTS = {
+        wuhan:       { name: '武汉',   lon: 114.305, lat: 30.593 },
+        yichang:     { name: '宜昌',   lon: 111.286, lat: 30.692 },
+        shennongjia: { name: '神农架', lon: 110.675, lat: 31.744 },
+      };
+      let pivot = PIVOTS.wuhan;
+
+      // ── 环绕状态 ───────────────────────────────────────────────────
+      const state = {
+        playing: true,
+        mode: 'polar',        // 'polar' 手动极坐标 | 'engine' orbitAroundPivot
+        thetaDeg: 0,          // 极角
+        radiusKm: 12,
+        heightKm: 8,
+        speedDeg: 12,
+        pitchDeg: -35,
+        lastTs: performance.now(),
+      };
+
+      const $ = (id) => document.getElementById(id);
+      const bindRange = (id, labelId, fmt, key) => {
+        $(id).addEventListener('input', (e) => {
+          state[key] = parseFloat(e.target.value);
+          $(labelId).textContent = fmt(state[key]);
+        });
+      };
+      bindRange('radius', 'vRadius', (v) => v.toFixed(0), 'radiusKm');
+      bindRange('height', 'vHeight', (v) => v.toFixed(1), 'heightKm');
+      bindRange('speed',  'vSpeed',  (v) => v.toFixed(0), 'speedDeg');
+      bindRange('pitch',  'vPitch',  (v) => v.toFixed(0), 'pitchDeg');
+
+      $('btnPlay').addEventListener('click', () => {
+        state.playing = !state.playing;
+        $('btnPlay').textContent = state.playing ? '暂停' : '继续';
+        $('btnPlay').classList.toggle('active', state.playing);
+      });
+
+      // 模式切换：手动极坐标 ↔ 引擎 orbitAroundPivot
+      $('btnMode').addEventListener('click', () => {
+        if (state.mode === 'polar') {
+          state.mode = 'engine';
+          $('btnMode').textContent = '切换：引擎 orbitAroundPivot';
+          // 引擎模式受 1.05 半径下限钳制，先飞到 500 km 高空
+          viewer.camera.flyTo({
+            destination: { lon: pivot.lon, lat: pivot.lat, height: 500_000 },
+            duration: 3,
+            orientation: { heading: 0, pitch: MATH.toRadians(-60) },
+          });
+        } else {
+          state.mode = 'polar';
+          $('btnMode').textContent = '切换：手动极坐标';
+          viewer.camera.cancelFlight();
+        }
+      });
+
+      // 目标点切换
+      document.querySelectorAll('.pivotBtn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          pivot = PIVOTS[btn.dataset.p];
+          document.querySelectorAll('.pivotBtn').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          state.thetaDeg = 0;
+          if (state.mode === 'engine') {
+            viewer.camera.flyTo({
+              destination: { lon: pivot.lon, lat: pivot.lat, height: 500_000 },
+              duration: 3,
+              orientation: { heading: 0, pitch: MATH.toRadians(-60) },
+            });
+          }
+        });
+      });
+
+      // ── 手动极坐标：绕 pivot 的圆周点 + 朝向 pivot ──────────────────
+      const M_PER_DEG_LAT = 110540;
+      function applyPolar(thetaDeg) {
+        const d = state.radiusKm * 1000;
+        const th = MATH.toRadians(thetaDeg);
+        // pivot 局部东北向偏移（东 = sinθ，北 = cosθ）
+        const dEast = d * Math.sin(th);
+        const dNorth = d * Math.cos(th);
+        const cosLat = Math.cos(MATH.toRadians(pivot.lat));
+        const lon = pivot.lon + dEast / (111320 * cosLat);
+        const lat = pivot.lat + dNorth / M_PER_DEG_LAT;
+        // 视线朝向 pivot：heading = θ + 180°（从相机指向圆心）
+        const heading = MATH.toRadians((thetaDeg + 180) % 360);
+        const height = state.heightKm * 1000 + sampleHeight(pivot.lon, pivot.lat);
+        viewer.camera.setView({
+          destination: { lon, lat, height },
+          orientation: { heading, pitch: MATH.toRadians(state.pitchDeg) },
+        });
+      }
+
+      // ── 巡航循环 ──────────────────────────────────────────────────
+      function tick(now) {
+        try {
+          const dt = Math.max(0, Math.min((now - state.lastTs) / 1000, 0.1));
+          state.lastTs = now;
+          if (state.playing) {
+            state.thetaDeg = (state.thetaDeg + dt * state.speedDeg) % 360;
+            if (state.mode === 'polar') {
+              applyPolar(state.thetaDeg);
+            } else {
+              // 引擎模式：每帧绕 pivot 法线推进 heading（pivot 保持屏幕不动）
+              const pl = MATH.toRadians(pivot.lat);
+              const po = MATH.toRadians(pivot.lon);
+              const pivotUnit = new C3(
+                Math.cos(pl) * Math.cos(po),
+                Math.cos(pl) * Math.sin(po),
+                Math.sin(pl),
+              );
+              viewer.camera.orbitAroundPivot(pivotUnit, MATH.toRadians(dt * state.speedDeg), 0);
+            }
+          }
+          const r = C3.magnitude(viewer.camera.position);
+          const camLon = (Math.atan2(viewer.camera.position.y, viewer.camera.position.x) * 180) / Math.PI;
+          const camLat = (Math.asin(Math.max(-1, Math.min(1, viewer.camera.position.z / r))) * 180) / Math.PI;
+          const altKm = ((r - 1) * R) / 1000;
+          result.textContent =
+            `模式: ${state.mode === 'polar' ? '手动极坐标 setView' : '引擎 orbitAroundPivot'}\n` +
+            `目标: ${pivot.name} (${pivot.lon.toFixed(3)}, ${pivot.lat.toFixed(3)})\n` +
+            `极角: ${state.thetaDeg.toFixed(1)}°   地形高: ${sampleHeight(pivot.lon, pivot.lat).toFixed(0)} m\n` +
+            `相机: ${camLon.toFixed(3)}, ${camLat.toFixed(3)}  高度 ${altKm.toFixed(1)} km`;
+        } catch (err) {
+          state.playing = false;
+          DemoUtils.showError('环绕循环异常，已停止', err);
+          return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [114.3, 30.6, 30_000],
+          imagery: 'gaode-sat',
+          title: '41 · 绕点环绕飞行',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '41 绕点环绕飞行 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

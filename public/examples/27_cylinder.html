@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 27：圆柱/方体/锥体 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>27 圆柱 / 方体 / 锥体</h1>
+    <p class="desc">引擎无 CylinderGraphics / BoxGraphics：以「polygon + height 挤出」
+      近似圆柱与长方体，锥体以「半径逐级递减的叠层圆台」近似（诚实注明）。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 局部米 → 经纬度换算 ───────────────────────────────────────
+      function circlePositions(centerLon, centerLat, radiusM, segments = 64) {
+        const mPerDegLat = 111_320;
+        const mPerDegLon = 111_320 * Math.cos((centerLat * Math.PI) / 180);
+        const positions = [];
+        for (let i = 0; i < segments; i++) {
+          const a = (i / segments) * Math.PI * 2;
+          positions.push(engine.Cartesian3.fromDegrees(
+            centerLon + (Math.cos(a) * radiusM) / mPerDegLon,
+            centerLat + (Math.sin(a) * radiusM) / mPerDegLat, 0));
+        }
+        return positions;
+      }
+      function boxPositions(centerLon, centerLat, halfWM, halfHM) {
+        const mPerDegLat = 111_320;
+        const mPerDegLon = 111_320 * Math.cos((centerLat * Math.PI) / 180);
+        const corners = [
+          [-halfWM, -halfHM], [halfWM, -halfHM], [halfWM, halfHM], [-halfWM, halfHM],
+        ];
+        return corners.map(([dx, dy]) => engine.Cartesian3.fromDegrees(
+          centerLon + dx / mPerDegLon, centerLat + dy / mPerDegLat, 0));
+      }
+
+      const entities = [];
+
+      // ── 圆柱：挤出圆面（半径 12 km × 高 60 km）────────────────────
+      entities.push(scene.entities.add(new engine.Entity({
+        name: '圆柱 12km×60km',
+        polygon: {
+          hierarchy: { positions: circlePositions(121.30, 31.20, 12_000) },
+          height: 60_000 / S,
+          color: new engine.Color(0.25, 0.65, 1.0, 0.55),
+        },
+      })));
+
+      // ── 长方体：挤出矩形（40 km × 20 km × 高 35 km）───────────────
+      entities.push(scene.entities.add(new engine.Entity({
+        name: '方体 40×20×35km',
+        polygon: {
+          hierarchy: { positions: boxPositions(121.62, 31.15, 20_000, 10_000) },
+          height: 35_000 / S,
+          color: new engine.Color(1, 0.8, 0.15, 0.55),
+        },
+      })));
+
+      // ── 锥体：半径递减叠层圆台（8 层近似，锥高 90 km）────────────
+      const coneLayers = 8, coneR = 16_000, coneH = 90_000;
+      for (let i = 0; i < coneLayers; i++) {
+        const r = coneR * (1 - i / coneLayers) + coneR * 0.06; // 保留尖端避免零面积
+        entities.push(scene.entities.add(new engine.Entity({
+          name: `锥体叠层 ${i + 1}`,
+          polygon: {
+            hierarchy: { positions: circlePositions(121.05, 31.35, r, 48) },
+            height: (coneH / coneLayers) / S,
+            color: new engine.Color(0.95, 0.3, 0.35, 0.5),
+          },
+        })));
+      }
+
+      // 地标标注
+      const marks = [
+        { name: '圆柱', lon: 121.30, lat: 31.20 },
+        { name: '方体', lon: 121.62, lat: 31.15 },
+        { name: '锥体', lon: 121.05, lat: 31.35 },
+      ];
+      for (const m of marks) {
+        entities.push(scene.entities.add(new engine.Entity({
+          name: m.name,
+          position: engine.Cartesian3.fromDegrees(m.lon, m.lat, 0),
+          point: { pixelSize: 10, color: engine.Color.WHITE },
+          label: { text: m.name, font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
+        })));
+      }
+
+      let solidsOn = true;
+      addBtn('实体显示开 / 关', () => {
+        solidsOn = !solidsOn;
+        for (const e of entities) e.show = solidsOn;
+      });
+      addBtn('环绕视角（低空侧视）', () => viewer.camera.flyTo({
+        destination: { lon: 121.35, lat: 30.7, height: 420_000 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-35) },
+        duration: 2.5,
+      }));
+
+      result.textContent =
+        `挤出体 3 组：圆柱 12km×60km · 方体 40×20×35km · 叠层锥 16km×90km\n` +
+        `挤出高度单位 = 米 / EARTH_SCALE（归一化）\n` +
+        `诚实注明：引擎无 Cylinder/BoxGraphics，锥体为 8 层圆台近似（非真斜面）`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [121.35, 30.9, 800_000],
+          imagery: 'gaode-sat',
+          title: '27 · 圆柱/方体/锥体',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '27 圆柱方体锥体 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

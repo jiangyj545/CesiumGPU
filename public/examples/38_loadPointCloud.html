@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>点云渲染（近似） · CesiumGPU 示例</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:430px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,150,.5);border:1px solid rgba(90,160,255,.4);border-radius:6px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>38 · 点云渲染（点阵近似）</h1>
+    <div class="desc">
+      对齐 EV-Globe 06_loadPointCloud。<b>近似说明</b>：LAS/LAZ/E3M 点云格式
+      暂不支持，本页按格网程序化生成数千点（Entity point 屏幕点），以高度映射
+      渐变色，演示引擎大体量点要素的渲染能力。中央摆放模型作比例参照。
+    </div>
+    <div id="controls"></div>
+    <div id="result">生成中…</div>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const ES = engine.Camera.EARTH_SCALE;
+
+    function placeMatrix(lon, lat, hMeters, headingDeg) {
+      const ecef = engine.Cartesian3.fromDegrees(lon, lat, hMeters);
+      const enu  = engine.Transforms.eastNorthUpToFixedFrame(ecef);
+      const rot  = engine.Matrix4.fromRotationZ(engine.CesiumMath.toRadians(headingDeg));
+      const yUp  = engine.Matrix4.fromRotationX(Math.PI / 2);
+      return engine.Matrix4.multiply(enu, engine.Matrix4.multiply(rot, yUp, new engine.Matrix4()),
+                                     new engine.Matrix4());
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.addEventListener('click', () => onClick(b));
+        controls.appendChild(b);
+        return b;
+      }
+
+      // ── 场地：北京西山山前（格网点阵，默认 50×50）─────────────────
+      const CENTER = { lon: 116.10, lat: 40.00 };
+      const rel = (dxM, dyM) => ({
+        lon: CENTER.lon + dxM / 111_320 / Math.cos(CENTER.lat * Math.PI / 180),
+        lat: CENTER.lat + dyM / 110_540,
+      });
+
+      // 合成"点云"高程：两座山丘 + 起伏噪声（模拟山地扫描点云）
+      function synthHeight(dx, dy) {
+        const d1 = Math.hypot(dx + 160, dy + 120) / 220;
+        const d2 = Math.hypot(dx - 190, dy - 150) / 180;
+        let h = 150 * Math.exp(-d1 * d1) + 110 * Math.exp(-d2 * d2);
+        h += 18 * Math.sin(dx / 40) * Math.cos(dy / 55) + 8 * Math.sin((dx + dy) / 25);
+        return Math.max(0, h);
+      }
+
+      // 高度 t∈[0,1] → 颜色：低=蓝 → 青 → 绿 → 黄 → 高=红
+      function heightColor(t) {
+        const seg = t * 4;                    // 4 段渐变
+        const f = Math.min(Math.floor(seg), 3);
+        const u = seg - f;
+        const STOPS = [                       // [r,g,b] 控制点
+          [0.15, 0.25, 0.95], [0.10, 0.85, 0.85], [0.25, 0.90, 0.25], [0.95, 0.85, 0.15], [0.95, 0.15, 0.15],
+        ];
+        const a = STOPS[f], b = STOPS[f + 1];
+        return new engine.Color(a[0] + (b[0] - a[0]) * u,
+                                a[1] + (b[1] - a[1]) * u,
+                                a[2] + (b[2] - a[2]) * u, 1);
+      }
+      // 等高分带：8 个分带取段心颜色
+      function bandedColor(t) {
+        return heightColor((Math.min(7, Math.floor(t * 8)) + 0.5) / 8);
+      }
+
+      // ── 点阵生成 / 重建（挂在 scene.entities 上才会被可视器渲染）──
+      const cloud = viewer.scene.entities;
+      let colorMode = 'gradient';   // 'gradient' | 'banded' | 'mono'
+      let pixelSize = 3;
+      let lastBuild = null;
+
+      function buildCloudColored(gridN, spanM) {
+        cloud.removeAll();
+        const step = (spanM * 2) / (gridN - 1);
+        const cells = [], heights = [];
+        for (let iy = 0; iy < gridN; iy++) {
+          for (let ix = 0; ix < gridN; ix++) {
+            const dx = -spanM + ix * step;
+            const dy = -spanM + iy * step;
+            cells.push([dx, dy]);
+            heights.push(synthHeight(dx, dy));
+          }
+        }
+        const hMin = Math.min(...heights), hMax = Math.max(...heights);
+        for (let i = 0; i < cells.length; i++) {
+          const t = (heights[i] - hMin) / (hMax - hMin || 1);
+          const color = colorMode === 'gradient' ? heightColor(t)
+                      : colorMode === 'banded'   ? bandedColor(t)
+                      : new engine.Color(0.75, 0.75, 0.78, 1);
+          const p = rel(cells[i][0], cells[i][1]);
+          cloud.add({
+            position: engine.Cartesian3.fromDegrees(p.lon, p.lat, heights[i]),
+            point: { color, pixelSize },
+          });
+        }
+        return { count: cells.length, hMin, hMax };
+      }
+
+      // ── 比例参照：场地中央一辆车 ────────────────────────────────────
+      const carP = rel(0, 0);
+      await engine.Model.fromGltfAsync({
+        url: '/data/gltf/groundvehicle.gltf', scene: viewer.scene,
+        modelMatrix: placeMatrix(carP.lon, carP.lat, 0, 30), scale: 30 / ES,
+      });
+
+      // ── 控件 ────────────────────────────────────────────────────────
+      const DENSITIES = [[50, 300], [60, 350], [70, 380]];   // [格网数, 半跨 m]
+      let densityIdx = 0;
+      let cloudOn = true;
+
+      const showBtn = addBtn('点云: 开', () => {
+        cloudOn = !cloudOn;
+        showBtn.textContent = `点云: ${cloudOn ? '开' : '关'}`;
+        showBtn.classList.toggle('active', cloudOn);
+        if (cloudOn) lastBuild = buildCloudColored(...DENSITIES[densityIdx]);
+        else cloud.removeAll();
+        refreshInfo();
+      });
+      showBtn.classList.add('active');
+
+      const sizeBtn = addBtn('点大小 3px', () => {
+        pixelSize = pixelSize >= 6 ? 2 : pixelSize + 1;
+        sizeBtn.textContent = `点大小 ${pixelSize}px`;
+        if (cloudOn) lastBuild = buildCloudColored(...DENSITIES[densityIdx]);
+        refreshInfo();
+      });
+
+      const MODES = [['gradient', '高程渐变'], ['banded', '等高分带'], ['mono', '单色灰']];
+      let modeIdx = 0;
+      const modeBtn = addBtn('配色: 高程渐变', () => {
+        modeIdx = (modeIdx + 1) % MODES.length;
+        colorMode = MODES[modeIdx][0];
+        modeBtn.textContent = `配色: ${MODES[modeIdx][1]}`;
+        if (cloudOn) lastBuild = buildCloudColored(...DENSITIES[densityIdx]);
+        refreshInfo();
+      });
+      modeBtn.classList.add('active');
+
+      const densBtn = addBtn('密度 50×50', () => {
+        densityIdx = (densityIdx + 1) % DENSITIES.length;
+        densBtn.textContent = `密度 ${DENSITIES[densityIdx][0]}×${DENSITIES[densityIdx][0]}`;
+        if (cloudOn) lastBuild = buildCloudColored(...DENSITIES[densityIdx]);
+        refreshInfo();
+      });
+      densBtn.classList.add('active');
+
+      function refreshInfo() {
+        const d = DENSITIES[densityIdx];
+        result.textContent =
+          `点数: ${cloudOn && lastBuild ? lastBuild.count : 0}   格网: ${d[0]}×${d[0]}   跨度: ${d[1] * 2} m\n` +
+          `高程范围: ${lastBuild ? lastBuild.hMin.toFixed(1) : '-'} ~ ${lastBuild ? lastBuild.hMax.toFixed(1) : '-'} m\n` +
+          `配色: ${MODES[modeIdx][1]}   点大小: ${pixelSize}px   状态: ${cloudOn ? '显示' : '隐藏'}\n` +
+          `提示: 拖动旋转可观察山体形态；中央车辆作比例参照`;
+      }
+
+      // 相机：东南侧斜视点云山体
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(CENTER.lon + 0.005, CENTER.lat - 0.005, 1100),
+        orientation: { heading: engine.CesiumMath.toRadians(35), pitch: engine.CesiumMath.toRadians(-32) },
+      });
+
+      lastBuild = buildCloudColored(...DENSITIES[densityIdx]);
+      refreshInfo();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.105, 39.995, 1100],
+          imagery: 'gaode-sat',
+          title: '38 · 点云渲染（近似）',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '38 点云渲染 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

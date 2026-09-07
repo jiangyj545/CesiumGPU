@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 70：建筑特效 BulidingEffect - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:300px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;}
+    .cg-panel label input[type=range]{flex:1;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>70 建筑特效 BulidingEffect</h1>
+    <p class="desc">重庆建筑面（buildings.geojson）批量着色：中心扩散的
+      呼吸波纹（按距中心距离相位化）+ 亮青轮廓描边。对齐 EV 08_bulidingEffect
+      的城市建筑泛光语义。</p>
+    <div id="controls"></div>
+    <label>波速 <input id="speed" type="range" min="0.3" max="3" step="0.1" value="1.2" /><span id="speedVal">1.2</span></label>
+    <div id="result">加载 buildings.geojson（10.5MB）…</div>
+    <p class="warn">⚠ 注：引擎 Entity polygon 暂无 extrudedHeight 拉伸，特效以
+      「呼吸波纹着色 + 轮廓描边」近似 EV 的建筑拉伸泛光。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const EARTH = 6378137;
+    const CENTER = { lon: 106.437, lat: 29.562 }; // buildings.geojson 数据中心（重庆）
+    const MAX_BUILDINGS = 300;
+    const RADIUS_DEG = 0.02; // 中心 ~2 km 范围
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const addBtn = (label, onClick) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      };
+
+      // ── 1. 加载并过滤建筑面（单次 fetch + 手动建实体，避免二次 parse）─
+      const resp = await fetch('/data/buildings.geojson');
+      if (!resp.ok) throw new Error(`buildings.geojson 加载失败: HTTP ${resp.status}`);
+      const geojson = await resp.json();
+      const toUnit = (lon, lat) => {
+        const m = engine.Cartesian3.fromDegrees(lon, lat, 0);
+        return new engine.Cartesian3(m.x / EARTH, m.y / EARTH, m.z / EARTH);
+      };
+      const ringCenter = (ring) => {
+        let sx = 0, sy = 0;
+        for (const [x, y] of ring) { sx += x; sy += y; }
+        return [sx / ring.length, sy / ring.length];
+      };
+      const dist2 = ([x, y]) =>
+        (x - CENTER.lon) ** 2 + (y - CENTER.lat) ** 2;
+
+      const picked = geojson.features
+        .filter((f) => f.geometry?.coordinates?.[0]?.length > 2)
+        .map((f) => ({ f, c: ringCenter(f.geometry.coordinates[0]) }))
+        .sort((a, b) => dist2(a.c) - dist2(b.c))
+        .slice(0, MAX_BUILDINGS);
+
+      // ── 2. 建实体：半透明面 + 轮廓描边，按距中心距离记录相位 ─────────
+      const entities = viewer.scene.entities;
+      const buildings = [];
+      for (const { f, c } of picked) {
+        const ring = f.geometry.coordinates[0];
+        const positions = ring.map(([lon, lat]) => toUnit(lon, lat));
+        const dPhase = Math.sqrt(dist2(c)) / RADIUS_DEG; // 0~1 相位系数
+        const fill = entities.add(new engine.Entity({
+          name: 'building-fill',
+          polygon: {
+            hierarchy: { positions },
+            color: new engine.Color(0.25, 0.55, 1.0, 0.45),
+          },
+        }));
+        const outline = entities.add(new engine.Entity({
+          name: 'building-outline',
+          polyline: {
+            positions: [...positions, positions[0]],
+            width: 1.2,
+            color: new engine.Color(0.5, 0.95, 1.0, 0.85),
+          },
+        }));
+        buildings.push({ fill, outline, dPhase });
+      }
+
+      viewer.camera.flyTo({
+        destination: { lon: CENTER.lon, lat: CENTER.lat - 0.008, height: 1800 },
+        orientation: { heading: 0, pitch: -Math.PI / 3.2 },
+      });
+
+      // ── 3. 呼吸波纹：中心扩散的亮度波 ──────────────────────────────
+      let speed = 1.2;
+      let on = true;
+      const speedEl = document.getElementById('speed');
+      const speedVal = document.getElementById('speedVal');
+      speedEl.addEventListener('input', () => {
+        speed = Number(speedEl.value);
+        speedVal.textContent = speed.toFixed(1);
+      });
+
+      let tick = 0;
+      const timer = setInterval(() => {
+        if (!on) return;
+        tick += 1;
+        const t = tick * 0.12 * speed;
+        for (const b of buildings) {
+          const wave = Math.max(0, Math.sin(t - b.dPhase * 5.0)); // 由近及远
+          const glow = 0.35 + 0.65 * wave;
+          b.fill.polygon = {
+            hierarchy: b.fill.polygon.hierarchy,
+            color: new engine.Color(
+              0.25 * glow + 0.15,
+              0.55 * glow + 0.1,
+              1.0 * glow,
+              0.3 + 0.4 * wave,
+            ),
+          };
+        }
+        if (tick % 20 === 0) refresh();
+      }, 120);
+
+      const fxBtn = addBtn('特效: 开', () => {
+        on = !on;
+        fxBtn.textContent = `特效: ${on ? '开' : '关'}`;
+        fxBtn.classList.toggle('active', on);
+        if (!on) { // 暂停时恢复静态基色
+          for (const b of buildings) {
+            b.fill.polygon = {
+              hierarchy: b.fill.polygon.hierarchy,
+              color: new engine.Color(0.25, 0.55, 1.0, 0.45),
+            };
+          }
+        }
+        refresh();
+      });
+      fxBtn.classList.add('active');
+      addBtn('正视建筑群', () => viewer.camera.flyTo({
+        destination: { lon: CENTER.lon, lat: CENTER.lat - 0.012, height: 1200 },
+        orientation: { heading: 0, pitch: -Math.PI / 4 },
+      }));
+
+      function refresh() {
+        result.textContent =
+          `建筑: ${buildings.length} 个面（中心 ${RADIUS_DEG}° 范围内选取）\n` +
+          `特效: 呼吸波纹（中心扩散，速度 ×${speed.toFixed(1)}）+ 青色描边\n` +
+          `数据: /data/buildings.geojson（重庆一带，10.5MB 单次加载）\n` +
+          `状态: ${on ? '运行中' : '已暂停（静态基色）'}`;
+      }
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [106.437, 29.55, 3_000],
+          imagery: 'gaode-sat',
+          title: '70 · 建筑特效 BulidingEffect',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '70 建筑特效 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 23：点聚合 PointCluster - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:200px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>23 点聚合 PointCluster</h1>
+    <p class="desc">fetch /data/gis_point.json，手写经纬网格聚合（对齐 EV clusterEvent 语义）：
+      簇显示数量标注、大小/颜色随簇规模分级，相机缩放自动重新分级展开。
+      引擎无图片 billboard，聚合点以 point+label 组合渲染。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 读取点集（GeometryCollection → [{lon,lat}]）──────────────
+      const resp = await fetch('/data/gis_point.json');
+      if (!resp.ok) throw new Error(`点数据加载失败：HTTP ${resp.status}`);
+      const geo = await resp.json();
+      const points = [];
+      const pushGeom = (g) => {
+        if (!g) return;
+        if (g.type === 'Point') points.push({ lon: g.coordinates[0], lat: g.coordinates[1] });
+        else if (g.type === 'GeometryCollection') g.geometries.forEach(pushGeom);
+        else if (g.type === 'FeatureCollection') g.features.forEach((f) => pushGeom(f.geometry));
+        else if (g.type === 'MultiPoint') g.coordinates.forEach((c) => points.push({ lon: c[0], lat: c[1] }));
+      };
+      pushGeom(geo);
+      if (points.length === 0) throw new Error('gis_point.json 未解析到任何点');
+
+      // ── 网格聚合：cellDeg 粒度分箱 ────────────────────────────────
+      function cluster(cellDeg) {
+        const bins = new Map(); // "gx|gy" → { lon, lat, count }
+        for (const p of points) {
+          const gx = Math.floor(p.lon / cellDeg);
+          const gy = Math.floor(p.lat / cellDeg);
+          const key = gx + '|' + gy;
+          let bin = bins.get(key);
+          if (!bin) {
+            bin = { lon: (gx + 0.5) * cellDeg, lat: (gy + 0.5) * cellDeg, count: 0 };
+            bins.set(key, bin);
+          }
+          bin.count++;
+        }
+        return [...bins.values()];
+      }
+
+      // ── entity 池（复用避免频繁增删）──────────────────────────────
+      const pool = [];
+      function poolGet(i) {
+        if (!pool[i]) {
+          pool[i] = scene.entities.add(new engine.Entity({
+            name: 'cluster',
+            position: new engine.Cartesian3(0, 0, 1),
+            point: { pixelSize: 16, color: engine.Color.GREEN },
+            label: { text: '0', font: 'bold 14px sans-serif', fillColor: engine.Color.WHITE, show: true },
+          }));
+        }
+        return pool[i];
+      }
+      function poolTrim(n) {
+        for (let i = n; i < pool.length; i++) scene.entities.remove(pool[i]);
+        pool.length = Math.min(pool.length, n);
+      }
+
+      const COLOR_GREEN = new engine.Color(0.2, 0.9, 0.4, 0.9);
+      const COLOR_YELLOW = new engine.Color(1, 0.85, 0.1, 0.9);
+      const COLOR_RED = new engine.Color(1, 0.25, 0.2, 0.9);
+
+      let cellDeg = 2;
+      let clustered = true;
+      function render() {
+        if (!clustered) {
+          points.forEach((p, i) => {
+            const e = poolGet(i);
+            e.position = engine.Cartesian3.fromDegrees(p.lon, p.lat, 0);
+            e.point = { pixelSize: 6, color: COLOR_GREEN };
+            e.label = { text: '', font: '12px sans-serif', fillColor: engine.Color.WHITE, show: false };
+          });
+          poolTrim(points.length);
+          return points.length;
+        }
+        const clusters = cluster(cellDeg);
+        clusters.forEach((c, i) => {
+          const e = poolGet(i);
+          const size = Math.min(12 + Math.log2(c.count + 1) * 4, 42);
+          e.position = engine.Cartesian3.fromDegrees(c.lon, c.lat, 0);
+          e.point = { pixelSize: size, color: c.count < 10 ? COLOR_GREEN : (c.count < 50 ? COLOR_YELLOW : COLOR_RED) };
+          e.label = { text: String(c.count), font: 'bold 14px sans-serif', fillColor: engine.Color.WHITE, show: true };
+        });
+        poolTrim(clusters.length);
+        return clusters.length;
+      }
+
+      // 相机高度 → 自适应粒度（缩放分级展开）
+      function cellByHeight(h) {
+        if (h < 2_000_000) return 0.5;
+        if (h < 5_000_000) return 1;
+        if (h < 9_000_000) return 2;
+        if (h < 14_000_000) return 5;
+        return 10;
+      }
+
+      let lastRender = 0;
+      let nShown = 0;
+      viewer.preRender = () => {
+        const now = performance.now();
+        if (now - lastRender < 400) return; // 限频：聚合计算降频
+        lastRender = now;
+        // 相机高度：归一化 ECEF 模长 → 米（引擎无 positionCartographic）
+        const camMag = engine.Cartesian3.magnitude(viewer.camera.position);
+        const h = Math.max((camMag - 1) * engine.Camera.EARTH_SCALE, 0);
+        const want = clustered ? cellByHeight(h) : cellDeg;
+        if (want !== cellDeg || nShown === 0) {
+          cellDeg = want;
+          nShown = render();
+        }
+      };
+
+      addBtn('聚合开 / 关', () => { clustered = !clustered; nShown = render(); });
+      addBtn('细粒度 0.5°', () => { cellDeg = 0.5; clustered = true; nShown = render(); });
+      addBtn('中粒度 2°', () => { cellDeg = 2; clustered = true; nShown = render(); });
+      addBtn('粗粒度 10°', () => { cellDeg = 10; clustered = true; nShown = render(); });
+      addBtn('飞到点密集区（杭州）', () => viewer.camera.flyTo({
+        destination: { lon: 120.2, lat: 30.3, height: 1_500_000 }, duration: 2.5,
+      }));
+
+      nShown = render();
+      setInterval(() => {
+        result.textContent =
+          `原始点 ${points.length} 个\n当前：${clustered ? `网格聚合（粒度 ${cellDeg}°）` : '原始点铺显'}\n` +
+          `渲染实体 ${nShown} 个（池复用，缩放自动重新分级）`;
+      }, 400);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110, 30, 6_000_000],
+          imagery: 'gaode-sat',
+          title: '23 · 点聚合 PointCluster',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '23 点聚合 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

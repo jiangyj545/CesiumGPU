@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 85：简版军标标绘 MilStdPlot - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:270px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:200px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>85 简版军标标绘</h1>
+    <p class="desc">迁移自 EV-Globe 13_MilStd*（EM 私有标绘库，降级为简版）。
+      6 种简版符号以 Entity polygon/polyline/label 裁形拼绘：
+      先点上方按钮选择符号，再点地图放置；按住已放置符号可拖动。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const RE = C3.EARTH_RADIUS;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      const lonLatH = (lon, lat, h = 0) => {
+        const p = C3.fromDegrees(lon, lat, h);
+        return new C3(p.x / RE, p.y / RE, p.z / RE);
+      };
+      const entities = viewer.scene.entities;
+
+      // ── 屏幕投影 / 反投影（CSS 像素空间，与鼠标事件一致）───────────────
+      function toPixel(world) {
+        const vp = viewer.scene.camera.viewProjectionMatrix.values; // column-major
+        const cx = vp[0] * world.x + vp[4] * world.y + vp[8] * world.z + vp[12];
+        const cy = vp[1] * world.x + vp[5] * world.y + vp[9] * world.z + vp[13];
+        const cw = vp[3] * world.x + vp[7] * world.y + vp[11] * world.z + vp[15];
+        if (cw <= 0) return null;                 // 相机背后
+        return [
+          ((cx / cw) * 0.5 + 0.5) * viewer.canvas.clientWidth,
+          (0.5 - (cy / cw) * 0.5) * viewer.canvas.clientHeight,
+        ];
+      }
+      function pickLonLat(px, py) {
+        const w = viewer.canvas.clientWidth;
+        const h = viewer.canvas.clientHeight;
+        const hit = viewer.camera.pickGlobe((px / w) * 2 - 1, 1 - (py / h) * 2);
+        if (!hit) return null;
+        return {
+          lon: (Math.atan2(hit.y, hit.x) * 180) / Math.PI,
+          lat: (Math.atan2(hit.z, Math.hypot(hit.x, hit.y)) * 180) / Math.PI,
+        };
+      }
+
+      // ── 简版符号库：锚点 (lon,lat) → EntityOptions[] ───────────────────
+      /** 圆/椭圆环顶点（度） */
+      function ring(lon, lat, rx, ry, n = 24) {
+        const pts = [];
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2;
+          pts.push([lon + Math.cos(a) * rx, lat + Math.sin(a) * ry]);
+        }
+        return pts;
+      }
+      const poly = (pts, rgb, a) => ({
+        polygon: {
+          hierarchy: { positions: pts.map(([lo, la]) => lonLatH(lo, la, 200)) },
+          color: new engine.Color(rgb[0], rgb[1], rgb[2], a),
+        },
+      });
+      const line = (pts, w, rgb, a) => ({
+        polyline: {
+          positions: pts.map(([lo, la]) => lonLatH(lo, la, 200)),
+          width: w,
+          color: new engine.Color(rgb[0], rgb[1], rgb[2], a),
+        },
+      });
+      const text = (lon, lat, t, dy = -0.12) => ({
+        position: lonLatH(lon, lat + dy, 200),
+        label: { text: t, font: '13px sans-serif', fillColor: engine.Color.WHITE },
+      });
+
+      const SYMBOL_DEFS = {
+        attack: { label: '进攻箭头', build: (lon, lat) => [
+          { ...poly([[lon - 0.10, lat - 0.28], [lon + 0.10, lat - 0.28],
+            [lon + 0.10, lat + 0.04], [lon + 0.04, lat + 0.04], [lon, lat + 0.34],
+            [lon - 0.04, lat + 0.04], [lon - 0.10, lat + 0.04]], [1, 0.25, 0.2], 0.8),
+            ...text(lon, lat, '进攻') },
+        ] },
+        muster: { label: '集结点', build: (lon, lat) => [
+          { ...poly(ring(lon, lat, 0.20, 0.14), [0.25, 0.55, 1], 0.55),
+            position: lonLatH(lon, lat, 200),
+            point: { color: engine.Color.WHITE, pixelSize: 6 },
+            ...text(lon, lat, '集结') },
+        ] },
+        hq: { label: '指挥所', build: (lon, lat) => [
+          line([[lon, lat - 0.24], [lon, lat + 0.26]], 2, [1, 1, 1], 0.9),
+          { ...poly([[lon, lat + 0.26], [lon + 0.26, lat + 0.17], [lon, lat + 0.08]],
+            [0.9, 0.2, 0.2], 0.85),
+            ...text(lon, lat, '指挥所', -0.34) },
+        ] },
+        armor: { label: '装甲单元', build: (lon, lat) => [
+          { ...poly(ring(lon, lat, 0.30, 0.18, 20), [0.3, 0.85, 0.4], 0.6),
+            ...text(lon, lat, '装') },
+        ] },
+        artillery: { label: '炮兵', build: (lon, lat) => [
+          { ...poly(ring(lon, lat, 0.17, 0.12), [1, 0.65, 0.15], 0.6),
+            position: lonLatH(lon, lat, 200),
+            point: { color: new engine.Color(1, 0.6, 0.1, 1), pixelSize: 5 },
+            ...text(lon, lat, '炮') },
+        ] },
+        radar: { label: '雷达站', build: (lon, lat) => {
+          const arc = [];
+          for (let i = 0; i <= 8; i++) {
+            const a = (i / 8) * Math.PI / 2;    // 朝北 90° 扇形
+            arc.push([lon + Math.sin(a) * 0.22, lat + Math.cos(a) * 0.16]);
+          }
+          return [
+            { ...poly([[lon, lat], ...arc], [0.2, 0.9, 0.9], 0.6),
+              ...text(lon, lat, '雷达', -0.22) },
+          ];
+        } },
+      };
+
+      // ── 符号实例管理：放置 / 重建 / 移除（走 collectionChanged 安全通道）─
+      const symbols = [];                         // { type, lon, lat, ents }
+      function place(type, lon, lat) {
+        const ents = SYMBOL_DEFS[type].build(lon, lat)
+          .map((opt) => entities.add(new engine.Entity(opt)));
+        symbols.push({ type, lon, lat, ents });
+        refresh();
+      }
+      function moveSymbol(sym, lon, lat) {
+        for (const e of sym.ents) entities.remove(e);
+        sym.lon = lon; sym.lat = lat;
+        sym.ents = SYMBOL_DEFS[sym.type].build(lon, lat)
+          .map((opt) => entities.add(new engine.Entity(opt)));
+      }
+      function clearAll() {
+        for (const s of symbols) for (const e of s.ents) entities.remove(e);
+        symbols.length = 0;
+        refresh('已清空全部标号');
+      }
+
+      // ── 交互：选型放置 + 拖动 ─────────────────────────────────────────
+      let selectedType = 'attack';
+      let dragging = null;
+      let dragMoved = false;
+
+      const typeBtns = {};
+      for (const [type, def] of Object.entries(SYMBOL_DEFS)) {
+        const btn = addBtn(def.label, () => {
+          selectedType = type;
+          for (const b of Object.values(typeBtns)) b.classList.remove('active');
+          btn.classList.add('active');
+          refresh(`已选「${def.label}」，点击地图放置`);
+        });
+        btn.classList.add('active');
+        typeBtns[type] = btn;
+      }
+      addBtn('清除全部', clearAll);
+      addBtn('重置示例', () => {
+        clearAll();
+        place('attack', 116.2, 38.6);
+        place('muster', 117.4, 38.2);
+        place('hq', 117.0, 39.0);
+        place('radar', 118.6, 38.7);
+      });
+
+      const handler = new engine.ScreenSpaceEventHandler(viewer.canvas);
+      handler.setInputAction((pos) => {
+        dragMoved = false;
+        for (const sym of symbols) {
+          const head = toPixel(lonLatH(sym.lon, sym.lat, 0));
+          if (!head) continue;
+          if (Math.hypot(pos.x - head[0], pos.y - head[1]) < 42) {
+            dragging = sym;
+            return;
+          }
+        }
+      }, 'LEFT_DOWN');
+      handler.setInputAction((pos) => {
+        if (!dragging) return;
+        const ll = pickLonLat(pos.x, pos.y);
+        if (ll) { moveSymbol(dragging, ll.lon, ll.lat); dragMoved = true; }
+      }, 'MOUSE_MOVE');
+      handler.setInputAction(() => { dragging = null; }, 'LEFT_UP');
+      handler.setInputAction((pos) => {
+        if (dragMoved) return;                    // 拖动结束的 click 不放置
+        const ll = pickLonLat(pos.x, pos.y);
+        if (ll) place(selectedType, ll.lon, ll.lat);
+      }, 'LEFT_CLICK');
+
+      // ── 初始示例态势 ──────────────────────────────────────────────────
+      place('attack', 116.2, 38.6);
+      place('muster', 117.4, 38.2);
+      place('hq', 117.0, 39.0);
+      place('radar', 118.6, 38.7);
+
+      function refresh(note) {
+        const counts = {};
+        for (const s of symbols) counts[s.type] = (counts[s.type] || 0) + 1;
+        result.textContent =
+          `已选符号: ${SYMBOL_DEFS[selectedType].label}\n` +
+          `标号总数: ${symbols.length}   ` +
+          Object.entries(counts).map(([t, n]) =>
+            `${SYMBOL_DEFS[t].label}×${n}`).join('  ') + '\n' +
+          '操作: 点按钮选型 → 点地图放置；按住符号拖动\n' +
+          (note || '');
+      }
+      refresh();
+
+      viewer.camera.setView({
+        destination: C3.fromDegrees(117.3, 37.4, 1_200_000),
+      });
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [117.3, 37.4, 1_200_000],
+          imagery: 'gaode-sat',
+          title: '85 · 简版军标标绘',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '85 简版军标标绘 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

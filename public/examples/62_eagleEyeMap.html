@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 62：鹰眼图 EagleEyeMap - CesiumGPU</title>
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;}
+    #overview{position:absolute;right:16px;bottom:16px;width:280px;height:210px;z-index:9400;
+      border:2px solid rgba(125,211,252,.8);border-radius:6px;overflow:hidden;
+      box-shadow:0 4px 16px rgba(0,0,0,.5);background:#0a1420;}
+    #overview .frame{position:absolute;inset:0;pointer-events:none;z-index:2;}
+    #overview .frame::before{content:'';position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(125,211,252,.35);}
+    #overview .frame::after{content:'';position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(125,211,252,.35);}
+    #overview .center-dot{position:absolute;left:50%;top:50%;width:10px;height:10px;margin:-5px 0 0 -5px;
+      border:2px solid #fbbf24;border-radius:50%;box-shadow:0 0 8px rgba(251,191,36,.9);pointer-events:none;z-index:3;}
+    #overview .tag{position:absolute;left:8px;top:6px;z-index:3;padding:2px 8px;border-radius:4px;
+      font:11px/1.6 sans-serif;color:#bae6fd;background:rgba(10,20,35,.75);border:1px solid rgba(125,211,252,.4);}
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:290px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="overview">
+    <div class="tag">鹰眼（固定高度俯视）</div>
+    <div class="frame"></div>
+    <div class="center-dot"></div>
+  </div>
+  <div class="cg-panel">
+    <h1>62 鹰眼图 EagleEyeMap</h1>
+    <p class="desc">右下角小 Viewer 作鹰眼缩略图：以矢量底图 + 固定 6000 km 高度
+      nadir 俯视呈现主相机指向的地表中心（2D 缩略语义）。对齐 EV 08_eagleEyeMap
+      的主图-鹰眼联动。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const addBtn = (label, onClick) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      };
+
+      // ── 鹰眼小 Viewer（矢量底图，独立 WebGPU context）───────────────
+      const ov = document.getElementById('overview');
+      const eagle = new engine.Viewer(ov);
+      await eagle.initialize();
+      window.eagleViewer = eagle; // debug hook
+      eagle.globe.layers.addImageryProvider(
+        new engine.XyzImageryProvider(DemoUtils.IMAGERY_PRESETS['gaode-vec']));
+
+      // ── 联动：主相机 → 鹰眼固定高度俯视 ────────────────────────────
+      let locked = true;
+      const OVERVIEW_HEIGHT = 6_000_000; // 鹰眼固定视高（米）
+      function updateEagle() {
+        if (!locked) return;
+        const p = viewer.camera.position;
+        const r = Math.hypot(p.x, p.y, p.z);
+        const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
+        const lat = Math.asin(Math.max(-1, Math.min(1, p.z / r))) * 180 / Math.PI;
+        eagle.camera.setView({
+          destination: { lon, lat, height: OVERVIEW_HEIGHT },
+          orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 }, // nadir 俯视
+        });
+      }
+      viewer.preRender = updateEagle;
+
+      // ── UI ─────────────────────────────────────────────────────────
+      const lockBtn = addBtn('联动: 开', () => {
+        locked = !locked;
+        lockBtn.textContent = `联动: ${locked ? '开' : '关'}`;
+        lockBtn.classList.toggle('active', locked);
+        refresh();
+      });
+      lockBtn.classList.add('active');
+      addBtn('鹰眼置顶/还原', () => {
+        ov.style.width = ov.style.width === '420px' ? '280px' : '420px';
+        ov.style.height = ov.style.width === '420px' ? '315px' : '210px';
+      });
+      addBtn('飞往武汉', () => viewer.camera.flyTo({
+        destination: { lon: 114.3, lat: 30.6, height: 800_000 },
+        orientation: { heading: 0, pitch: -Math.PI / 3 },
+      }));
+
+      function refresh() {
+        result.textContent =
+          `主图: 高德卫星（自由交互）\n` +
+          `鹰眼: 高德矢量 · 固定 ${OVERVIEW_HEIGHT / 1000} km 俯视主相机中心\n` +
+          `联动: ${locked ? '开（preRender 每帧 setView）' : '关（可手动操作鹰眼）'}\n` +
+          `黄点 = 主视锥中心落点`;
+      }
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.0, 30.9, 1_600_000],
+          imagery: 'gaode-sat',
+          title: '62 · 鹰眼图 EagleEyeMap',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '62 鹰眼图 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

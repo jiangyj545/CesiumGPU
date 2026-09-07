@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>57 聚光探照灯 Spotlight · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>57 聚光探照灯 Spotlight</h1>
+    <p class="desc">示例内实现 IPass 扩展点（viewer.scene.effects.add）：光锥体积 = 灯点→地面环三角带（旋转光束条纹）+ 地面光斑圆盘（脉动辉光），additive 发光，片元级射线-球遮挡剔除。配合 CircleScan 地面波纹。相机 UBO 写入用引擎公开的 writeCameraUniforms。</p>
+    <div id="controls">
+      <button id="btnA" class="active">青色灯</button>
+      <button id="btnB" class="active">金色灯</button>
+      <button id="btnScan" class="active">地面波纹</button>
+      <label>旋转速度 <input id="speed" type="range" min="0" max="6" step="0.2" value="2.4" style="width:120px"> <span id="speedVal">2.4</span></label>
+    </div>
+    <div id="info">初始化…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = n * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, n * (1 - E2) * s / A);
+    }
+
+    // ── 光锥 WGSL（示例内嵌，演示 IPass 扩展点写法）──────────────────────
+    const SPOT_SHADER = /* wgsl */`
+struct CameraUniforms {
+  viewMatrix      : mat4x4<f32>,
+  projMatrix      : mat4x4<f32>,
+  viewProjMatrix  : mat4x4<f32>,
+  cameraPosition  : vec4<f32>,
+  viewportSize    : vec2<f32>,
+  nearFar         : vec2<f32>,
+}
+struct SpotUniforms {
+  color : vec4<f32>,   // 灯色 RGBA
+  time  : f32,
+  speed : f32,
+  _pad0 : f32,
+  _pad1 : f32,
+}
+@group(0) @binding(0) var<uniform> camera : CameraUniforms;
+@group(0) @binding(1) var<uniform> spot   : SpotUniforms;
+const GLOBE_OCCLUDE_R2 : f32 = 0.998 * 0.998;
+
+struct VSIn {
+  @location(0) position : vec3<f32>,
+  @location(1) uv       : vec2<f32>,   // 锥面: (角比例, 高0顶-1底)  光斑: (半径比, 2)
+}
+struct VSOut {
+  @builtin(position) clipPos  : vec4<f32>,
+  @location(0)       worldPos : vec3<f32>,
+  @location(1)       uv       : vec2<f32>,
+}
+@vertex fn vs_main(input : VSIn) -> VSOut {
+  var out : VSOut;
+  out.worldPos = input.position;
+  out.clipPos  = camera.viewProjMatrix * vec4<f32>(input.position, 1.0);
+  out.uv       = input.uv;
+  return out;
+}
+@fragment fn fs_main(input : VSOut) -> @location(0) vec4<f32> {
+  let camPos = camera.cameraPosition.xyz;
+  let oc   = input.worldPos - camPos;
+  let a    = dot(oc, oc);
+  let b    = 2.0 * dot(camPos, oc);
+  let c    = dot(camPos, camPos) - GLOBE_OCCLUDE_R2;
+  let disc = b * b - 4.0 * a * c;
+  if (disc > 0.0) {
+    let t = (-b - sqrt(disc)) / (2.0 * a);
+    if (t > 1e-3 && t < 1.0 - 1e-3) { discard; }
+  }
+
+  if (input.uv.y < 1.5) {
+    // 锥面：旋转光束条纹 + 顶部亮、底部散
+    let v    = input.uv.y;
+    let ang  = input.uv.x * 6.2831853;
+    let beam = pow(0.5 + 0.5 * sin(ang * 3.0 - spot.time * spot.speed), 2.0);
+    let alpha = spot.color.a * pow(1.0 - v, 1.25) * (0.22 + 0.78 * beam);
+    return vec4<f32>(spot.color.rgb * alpha * 1.8, alpha);
+  } else {
+    // 地面光斑：径向辉光 + 脉动
+    let r     = input.uv.x;
+    let glow  = pow(1.0 - r, 2.2);
+    let pulse = 0.78 + 0.22 * sin(spot.time * 2.2);
+    let alpha = spot.color.a * glow * pulse * 0.85;
+    return vec4<f32>(spot.color.rgb * alpha, alpha);
+  }
+}
+`;
+
+    /** 示例内 IPass：灯点→地面环光锥 + 地面光斑（duck-typing 实现 IPass 接口）。 */
+    class Spotlight {
+      label = 'Spotlight';
+      show = true;
+      speed = 2.4;
+
+      constructor(context, camera, { lat, lon, hMeters, baseKm, color }) {
+        this._ctx = context;
+        this._camera = camera;
+        this._color = color;
+        const SEG = 28;
+        const c = lonLat(lat, lon);                            // 灯下地面点
+        const rLen = baseKm * 1000 / A;
+        const m2 = Math.hypot(c.x, c.y, c.z);
+        const up = new engine.Cartesian3(c.x / m2, c.y / m2, c.z / m2);
+        // 局部切平面基（east/north）
+        const east = new engine.Cartesian3(-up.y, up.x, 0);
+        const em = Math.hypot(east.x, east.y, east.z) || 1;
+        east.x /= em; east.y /= em; east.z /= em;
+        const north = new engine.Cartesian3(
+          up.y * east.z - up.z * east.y,
+          up.z * east.x - up.x * east.z,
+          up.x * east.y - up.y * east.x);
+
+        const apex = new engine.Cartesian3(up.x * (1 + hMeters / A), up.y * (1 + hMeters / A), up.z * (1 + hMeters / A));
+        const ring = [];
+        for (let i = 0; i <= SEG; i++) {
+          const t = i / SEG * Math.PI * 2;
+          const e = east.x * Math.cos(t) * rLen + north.x * Math.sin(t) * rLen;
+          const n2 = east.y * Math.cos(t) * rLen + north.y * Math.sin(t) * rLen;
+          const u = east.z * Math.cos(t) * rLen + north.z * Math.sin(t) * rLen;
+          const p = new engine.Cartesian3(up.x + e, up.y + n2, up.z + u);
+          const pm = Math.hypot(p.x, p.y, p.z);
+          ring.push(new engine.Cartesian3(p.x / pm, p.y / pm, p.z / pm));
+        }
+
+        // 顶点 [px,py,pz,u,v]：锥面（apex u=0）+ 光斑盘（v=2）
+        const verts = [];
+        const idx = [];
+        for (let i = 0; i < SEG; i++) {
+          const u0 = i / SEG, u1 = (i + 1) / SEG;
+          const b0 = verts.length / 5;
+          verts.push(apex.x, apex.y, apex.z, (u0 + u1) / 2, 0);
+          verts.push(ring[i].x, ring[i].y, ring[i].z, u0, 1);
+          verts.push(ring[i + 1].x, ring[i + 1].y, ring[i + 1].z, u1, 1);
+          idx.push(b0, b0 + 1, b0 + 2);
+        }
+        // 光斑盘（中心 + 环 fan）
+        const cIdx = verts.length / 5;
+        verts.push(up.x, up.y, up.z, 0, 2);
+        for (let i = 0; i <= SEG; i++) {
+          verts.push(ring[i].x, ring[i].y, ring[i].z, i / SEG, 2);
+        }
+        for (let i = 0; i < SEG; i++) {
+          idx.push(cIdx, cIdx + 1 + i, cIdx + 2 + i);
+        }
+
+        this._vertexData = new Float32Array(verts);
+        this._indexData = new Uint32Array(idx);
+        this._indexCount = idx.length;
+        this._camBytes = engine.CAMERA_UBO_SIZE;
+      }
+
+      prepare() {
+        if (this._pipeline) return;
+        const device = this._ctx.device;
+        const module = this._ctx.createShaderModule(SPOT_SHADER, 'SpotlightShader');
+        const layout = device.createBindGroupLayout({
+          entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+          ],
+        });
+        this._pipeline = device.createRenderPipeline({
+          label: 'SpotlightPipeline',
+          layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+          vertex: {
+            module, entryPoint: 'vs_main',
+            buffers: [{
+              arrayStride: 20,
+              attributes: [
+                { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                { shaderLocation: 1, offset: 12, format: 'float32x2' },
+              ],
+            }],
+          },
+          fragment: {
+            module, entryPoint: 'fs_main',
+            targets: [{
+              format: this._ctx.preferredFormat,
+              blend: {
+                color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+              },
+            }],
+          },
+          primitive: { topology: 'triangle-list', cullMode: 'none' },
+        });
+        this._camUBO = device.createBuffer({ size: this._camBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        this._parUBO = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        this._vbo = device.createBuffer({ size: this._vertexData.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+        this._ibo = device.createBuffer({ size: this._indexData.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+        this._ctx.writeBuffer(this._vbo, 0, this._vertexData);
+        this._ctx.writeBuffer(this._ibo, 0, this._indexData);
+        this._bind = device.createBindGroup({
+          layout,
+          entries: [
+            { binding: 0, resource: { buffer: this._camUBO } },
+            { binding: 1, resource: { buffer: this._parUBO } },
+          ],
+        });
+      }
+
+      execute(encoder, target, time) {
+        this.prepare();
+        if (!this._pipeline) return;
+        const cam = this._camera;
+        const camData = new Float32Array(this._camBytes / 4);
+        engine.writeCameraUniforms(camData, {
+          viewMatrix: cam.viewMatrix.values,
+          projectionMatrix: cam.projectionMatrix.values,
+          viewProjectionMatrix: cam.viewProjectionMatrix.values,
+          position: cam.position,
+          viewportWidth: this._ctx.drawingBufferWidth,
+          viewportHeight: this._ctx.drawingBufferHeight,
+          near: cam.frustum.near, far: cam.frustum.far,
+        });
+        this._ctx.writeBuffer(this._camUBO, 0, camData);
+        this._ctx.writeBuffer(this._parUBO, 0,
+          new Float32Array([this._color[0], this._color[1], this._color[2], this._color[3], time, this.speed, 0, 0]));
+        const pass = encoder.beginRenderPass({
+          label: this.label,
+          colorAttachments: [{ view: target, loadOp: 'load', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+        });
+        pass.setPipeline(this._pipeline);
+        pass.setBindGroup(0, this._bind);
+        pass.setVertexBuffer(0, this._vbo);
+        pass.setIndexBuffer(this._ibo, 'uint32');
+        pass.drawIndexed(this._indexCount);
+        pass.end();
+      }
+
+      destroy() {
+        this._vbo?.destroy(); this._ibo?.destroy();
+        this._camUBO?.destroy(); this._parUBO?.destroy();
+        this._pipeline = null;
+      }
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 两盏探照灯（北京城区，双色）──────────────────────────────────
+      const lampA = new Spotlight(viewer.context, viewer.camera, {
+        lat: 39.909, lon: 116.397, hMeters: 26_000, baseKm: 13,
+        color: [0.2, 0.85, 1.0, 0.85],
+      });
+      const lampB = new Spotlight(viewer.context, viewer.camera, {
+        lat: 39.92, lon: 116.43, hMeters: 32_000, baseKm: 16,
+        color: [1.0, 0.75, 0.25, 0.85],
+      });
+      viewer.scene.effects.add(lampA);
+      viewer.scene.effects.add(lampB);
+
+      // 地面波纹（引擎 CircleScan 配合）
+      const scan = new engine.CircleScan(viewer.context, {
+        center: { lon: 116.41, lat: 39.915 },
+        radius: 22_000, color: [0.3, 0.8, 1.0, 0.5], speed: 2.2, rings: 3,
+      });
+      scan.setCamera(viewer.camera);
+      viewer.scene.effects.add(scan);
+
+      // 灯点标记
+      [[39.909, 116.397], [39.92, 116.43]].forEach(([lat, lon]) => {
+        viewer.scene.entities.add({
+          name: '灯点', position: lonLat(lat, lon),
+          point: { color: new engine.Color(1, 1, 0.9, 1), pixelSize: 6 },
+        });
+      });
+
+      // ── 控件 ─────────────────────────────────────────────────────────
+      const btnA = document.getElementById('btnA');
+      const btnB = document.getElementById('btnB');
+      const btnScan = document.getElementById('btnScan');
+      btnA.addEventListener('click', () => {
+        lampA.show = !lampA.show;
+        btnA.classList.toggle('active', lampA.show); refresh();
+      });
+      btnB.addEventListener('click', () => {
+        lampB.show = !lampB.show;
+        btnB.classList.toggle('active', lampB.show); refresh();
+      });
+      btnScan.addEventListener('click', () => {
+        scan.show = !scan.show;
+        btnScan.classList.toggle('active', scan.show); refresh();
+      });
+      const speedEl = document.getElementById('speed');
+      speedEl.addEventListener('input', () => {
+        lampA.speed = lampB.speed = Number(speedEl.value);
+        document.getElementById('speedVal').textContent = lampA.speed.toFixed(1);
+        refresh();
+      });
+
+      function refresh() {
+        info.textContent =
+          `青灯: ${lampA.show ? '开' : '关'}   金灯: ${lampB.show ? '开' : '关'}   波纹: ${scan.show ? '开' : '关'}\n` +
+          `光束旋转: ${lampA.speed.toFixed(1)}   实现: 示例内 IPass（WGSL 光锥）`;
+      }
+      refresh();
+    }
+
+    DemoUtils.startup({ engine, title: '57 · 聚光探照灯 Spotlight', view: [116.41, 39.86, 120_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

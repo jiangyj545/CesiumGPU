@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 69：体积圆柱 VolumeCylinder - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:300px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;}
+    .cg-panel label input[type=range]{flex:1;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>69 体积圆柱 VolumeCylinder</h1>
+    <p class="desc">半透明渐变圆柱体（雷达扫描柱语义）：边缘菲涅尔增亮、
+      顶部渐隐、自下而上扫描光带；地球遮挡在片元内以射线-球求交剔除。
+      对齐 EV 08_volumeCylinder 的体渲染语义（无体数据，以程序化渐变近似）。</p>
+    <div id="controls"></div>
+    <label>半径 <input id="radius" type="range" min="10" max="80" step="2" value="30" /><span id="radiusVal">30km</span></label>
+    <label>高度 <input id="height" type="range" min="4" max="30" step="1" value="12" /><span id="heightVal">12km</span></label>
+    <label>扫描速度 <input id="speed" type="range" min="0.2" max="3" step="0.1" value="1" /><span id="speedVal">1.0</span></label>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    /* VolumeCylinderPass —— 半透明渐变圆柱（additive）。
+     * 颜色带：edge fresnel × 顶渐隐 × 上升扫描光带。
+     * 遮挡：相机→片段射线与半径 0.998 单位球求交，远侧 discard
+     * （镜像引擎 DynamicWall 的 IPass 无深度附件遮挡方案）。 */
+    const CYL_VS = /* wgsl */`
+      struct UBO {
+        viewProj : mat4x4<f32>,  // @0
+        camPos   : vec4<f32>,    // @64
+        params   : vec4<f32>,    // @80 x=time y=speed
+        color    : vec4<f32>,    // @96
+      }
+      @group(0) @binding(0) var<uniform> u : UBO;
+      struct Out {
+        @builtin(position) pos : vec4<f32>,
+        @location(0) worldPos : vec3<f32>,
+        @location(1) normal : vec3<f32>,
+        @location(2) v : f32,
+      }
+      @vertex fn main(@location(0) worldPos : vec3<f32>,
+                      @location(1) v : f32,
+                      @location(2) normal : vec3<f32>) -> Out {
+        var o : Out;
+        o.pos = u.viewProj * vec4<f32>(worldPos, 1.0);
+        o.worldPos = worldPos;
+        o.normal = normal;
+        o.v = v;
+        return o;
+      }
+    `;
+    const CYL_FS = /* wgsl */`
+      struct UBO {
+        viewProj : mat4x4<f32>,
+        camPos   : vec4<f32>,
+        params   : vec4<f32>,   // x=time y=speed
+        color    : vec4<f32>,
+      }
+      @group(0) @binding(0) var<uniform> u : UBO;
+      @fragment fn main(@location(0) worldPos : vec3<f32>,
+                        @location(1) normal : vec3<f32>,
+                        @location(2) v : f32) -> @location(0) vec4<f32> {
+        let ro = u.camPos.xyz;
+        let toFrag = worldPos - ro;
+        let dist = length(toFrag);
+        let rd = toFrag / max(dist, 1e-9);
+        // 地球遮挡：射线与 R=0.998 单位球求交，最近交点在片段之前 → discard
+        let R = 0.998;
+        let b = dot(ro, rd);
+        let c = dot(ro, ro) - R * R;
+        let disc = b * b - c;
+        if (disc > 0.0) {
+          let t0 = -b - sqrt(disc);
+          if (t0 > 0.0 && t0 < dist) { discard; }
+        }
+        // 菲涅尔边缘增亮
+        let V = -rd;
+        let fres = 1.0 - abs(dot(normalize(normal), V));
+        // 高度渐隐：顶部淡出，底部稍亮
+        let heightFade = pow(1.0 - v, 1.6) * 0.85 + 0.15;
+        // 上升扫描光带
+        let band = 0.55 + 0.45 * sin((v * 3.0 - u.params.x * u.params.y * 0.8) * 6.2832);
+        let a = u.color.a * heightFade * band * (0.35 + fres * 0.65);
+        return vec4<f32>(u.color.rgb * a, a);
+      }
+    `;
+
+    const EARTH = 6378137;
+    const CENTER = { lon: 114.3, lat: 30.6 }; // 武汉
+    const RADIAL = 64, RINGS = 20;
+
+    class VolumeCylinderPass {
+      label = 'VolumeCylinder';
+      show = true;
+      constructor(context, options) {
+        this._ctx = context;
+        this._camera = options.camera;
+        this._radiusKm = options.radiusKm ?? 30;
+        this._heightKm = options.heightKm ?? 12;
+        this._speed = options.speed ?? 1;
+        this._color = options.color ?? [0.2, 0.9, 0.5, 0.55];
+        this._geoKey = '';
+        this._uboData = new Float32Array(28); // 112 B
+      }
+
+      /** 圆柱侧面 + 顶盖网格。attr: worldPos(3)+v(1)+normal(3)。 */
+      _buildGeometry() {
+        const rN = (this._radiusKm * 1000) / EARTH;
+        const hN = (this._heightKm * 1000) / EARTH;
+        const c = engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat, 0);
+        const n = [c.x / EARTH, c.y / EARTH, c.z / EARTH];
+        const nl = Math.hypot(n[0], n[1], n[2]);
+        n[0] /= nl; n[1] /= nl; n[2] /= nl;
+        // 局部切向基（east / north）
+        const lonR = CENTER.lon * Math.PI / 180, latR = CENTER.lat * Math.PI / 180;
+        const east = [-Math.sin(lonR), Math.cos(lonR), 0];
+        const north = [
+          -Math.sin(latR) * Math.cos(lonR),
+          -Math.sin(latR) * Math.sin(lonR),
+          Math.cos(latR),
+        ];
+        const verts = [];
+        const indices = [];
+        const pt = (ang, r, h) => ([
+          n[0] + (east[0] * Math.cos(ang) + north[0] * Math.sin(ang)) * r + n[0] * h,
+          n[1] + (east[1] * Math.cos(ang) + north[1] * Math.sin(ang)) * r + n[1] * h,
+          n[2] + (east[2] * Math.cos(ang) + north[2] * Math.sin(ang)) * r + n[2] * h,
+        ]);
+        // 侧面
+        for (let i = 0; i <= RINGS; i++) {
+          const v = i / RINGS;
+          for (let j = 0; j <= RADIAL; j++) {
+            const ang = (j / RADIAL) * Math.PI * 2;
+            const p = pt(ang, rN, v * hN);
+            const nx = east[0] * Math.cos(ang) + north[0] * Math.sin(ang);
+            const ny = east[1] * Math.cos(ang) + north[1] * Math.sin(ang);
+            const nz = east[2] * Math.cos(ang) + north[2] * Math.sin(ang);
+            verts.push(p[0], p[1], p[2], v, nx, ny, nz);
+          }
+        }
+        const rowLen = RADIAL + 1;
+        for (let i = 0; i < RINGS; i++) {
+          for (let j = 0; j < RADIAL; j++) {
+            const a = i * rowLen + j, b = (i + 1) * rowLen + j;
+            indices.push(a, b, a + 1, a + 1, b, b + 1);
+          }
+        }
+        // 顶盖（fan，v=1 渐隐后几乎不可见，补全轮廓）
+        const capCenterIdx = verts.length / 7;
+        const cp = pt(0, 0, hN);
+        verts.push(cp[0], cp[1], cp[2], 1, n[0], n[1], n[2]);
+        const capStart = verts.length / 7;
+        for (let j = 0; j <= RADIAL; j++) {
+          const ang = (j / RADIAL) * Math.PI * 2;
+          const p = pt(ang, rN, hN);
+          verts.push(p[0], p[1], p[2], 1, n[0], n[1], n[2]);
+        }
+        for (let j = 0; j < RADIAL; j++) {
+          indices.push(capCenterIdx, capStart + j, capStart + j + 1);
+        }
+        return { verts: new Float32Array(verts), indices: new Uint32Array(indices) };
+      }
+
+      prepare() { /* 延迟到 execute */ }
+
+      _ensureResources() {
+        const key = `${this._radiusKm}_${this._heightKm}`;
+        if (this._pipeline && this._geoKey === key) return;
+        const device = this._ctx.device;
+
+        if (!this._pipeline) {
+          this._ubo = device.createBuffer({
+            label: 'Cyl.UBO', size: 112,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+          const bgl = device.createBindGroupLayout({
+            entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
+          });
+          const additive = {
+            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          };
+          this._pipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+            vertex: {
+              module: this._ctx.createShaderModule(CYL_VS, 'Cyl.VS'), entryPoint: 'main',
+              buffers: [{
+                arrayStride: 28,
+                attributes: [
+                  { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                  { shaderLocation: 1, offset: 12, format: 'float32' },
+                  { shaderLocation: 2, offset: 16, format: 'float32x3' },
+                ],
+              }],
+            },
+            fragment: {
+              module: this._ctx.createShaderModule(CYL_FS, 'Cyl.FS'), entryPoint: 'main',
+              targets: [{ format: this._ctx.preferredFormat, blend: additive }],
+            },
+            primitive: { topology: 'triangle-list', cullMode: 'none' }, // 双面
+          });
+          this._bindGroup = device.createBindGroup({
+            layout: bgl, entries: [{ binding: 0, resource: { buffer: this._ubo } }],
+          });
+        }
+
+        // 几何随半径/高度重建
+        this._vertexBuffer?.destroy();
+        this._indexBuffer?.destroy();
+        const { verts, indices } = this._buildGeometry();
+        this._vertexBuffer = device.createBuffer({
+          label: 'Cyl.Verts', size: verts.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this._ctx.writeBuffer(this._vertexBuffer, 0, verts);
+        this._indexBuffer = device.createBuffer({
+          label: 'Cyl.Idx', size: indices.byteLength,
+          usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        this._ctx.writeBuffer(this._indexBuffer, 0, indices);
+        this._indexCount = indices.length;
+        this._geoKey = key;
+      }
+
+      execute(encoder, target, time) {
+        if (!this.show) return;
+        this._ensureResources();
+        const cam = this._camera;
+        const d = this._uboData;
+        d.set(cam.viewProjectionMatrix.values, 0);        // viewProj @0
+        d[16] = cam.position.x; d[17] = cam.position.y; d[18] = cam.position.z; // camPos @64
+        d[20] = time; d[21] = this._speed;                // params @80
+        d[24] = this._color[0]; d[25] = this._color[1];
+        d[26] = this._color[2]; d[27] = this._color[3];   // color @96
+        this._ctx.writeBuffer(this._ubo, 0, d);
+
+        const pass = encoder.beginRenderPass({
+          label: this.label,
+          colorAttachments: [{
+            view: target, loadOp: 'load', storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          }],
+        });
+        pass.setPipeline(this._pipeline);
+        pass.setBindGroup(0, this._bindGroup);
+        pass.setVertexBuffer(0, this._vertexBuffer);
+        pass.setIndexBuffer(this._indexBuffer, 'uint32');
+        pass.drawIndexed(this._indexCount);
+        pass.end();
+      }
+
+      destroy() {
+        this._vertexBuffer?.destroy(); this._indexBuffer?.destroy();
+        this._ubo?.destroy();
+        this._pipeline = null;
+      }
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const addBtn = (label, onClick) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      };
+
+      const cyl = new VolumeCylinderPass(viewer.context, {
+        camera: viewer.camera,
+        radiusKm: 30, heightKm: 12, speed: 1,
+        color: [0.2, 0.95, 0.55, 0.55], // 雷达绿
+      });
+      viewer.scene.effects.add(cyl);
+
+      let on = true;
+      const cylBtn = addBtn('圆柱: 开', () => {
+        on = !on;
+        cyl.show = on;
+        cylBtn.textContent = `圆柱: ${on ? '开' : '关'}`;
+        cylBtn.classList.toggle('active', on);
+        refresh();
+      });
+      cylBtn.classList.add('active');
+      const COLORS = {
+        '雷达绿': [0.2, 0.95, 0.55, 0.55],
+        '警戒橙': [1.0, 0.45, 0.1, 0.55],
+        '扫描青': [0.2, 0.8, 1.0, 0.55],
+      };
+      for (const [name, color] of Object.entries(COLORS)) {
+        addBtn(name, () => { cyl._color = color; refresh(); });
+      }
+      addBtn('俯视圆柱', () => viewer.camera.flyTo({
+        destination: { lon: 114.3, lat: 30.35, height: 90_000 },
+        orientation: { heading: 0, pitch: -Math.PI / 2.2 },
+      }));
+
+      const bind = (id, prop, fmt) => {
+        const el = document.getElementById(id);
+        const val = document.getElementById(id + 'Val');
+        el.addEventListener('input', () => {
+          cyl[prop] = Number(el.value);
+          val.textContent = fmt(Number(el.value));
+          refresh();
+        });
+      };
+      bind('radius', '_radiusKm', (v) => `${Math.round(v)}km`);
+      bind('height', '_heightKm', (v) => `${Math.round(v)}km`);
+      bind('speed', '_speed', (v) => v.toFixed(1));
+
+      function refresh() {
+        const name = Object.entries(COLORS).find(([, c]) => c === cyl._color)?.[0] ?? '自定义';
+        result.textContent =
+          `圆柱: 武汉上空 半径 ${Math.round(cyl._radiusKm)} km × 高 ${Math.round(cyl._heightKm)} km\n` +
+          `渲染: ${RADIAL}×${RINGS} 侧面网格 + 顶盖 · additive · 菲涅尔边缘增亮\n` +
+          `动画: 上升扫描光带 ×${cyl._speed.toFixed(1)} · 颜色 ${name}\n` +
+          `遮挡: 片元内射线-球求交剔除（IPass 无深度附件）\n` +
+          `状态: ${on ? '运行中' : '已关闭'}`;
+      }
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [114.3, 30.42, 140_000],
+          imagery: 'gaode-sat',
+          title: '69 · 体积圆柱 VolumeCylinder',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '69 体积圆柱 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

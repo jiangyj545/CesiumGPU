@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>47 动态水面 DynamicWater · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:250px;max-width:340px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>47 动态水面 DynamicWater</h1>
+    <p class="desc">IPass 特效：地表凸多边形水体面，三层行波 + value noise 程序化扰动法线——波峰提亮、镜面波光、菲涅尔增强。地球远侧水面被片元级射线-球求交正确剔除。</p>
+    <div id="controls">
+      <button id="btnTaihu" class="active">太湖水面</button>
+      <button id="btnQiandao" class="active">千岛湖水面</button>
+      <label>波速 <input id="speed" type="range" min="0" max="4" step="0.1" value="1" style="width:130px"> <span id="speedVal">1.0x</span></label>
+      <label>波高 <input id="wave" type="range" min="0" max="1" step="0.05" value="0.35" style="width:130px"> <span id="waveVal">0.35</span></label>
+      <button id="btnFly">飞往太湖</button>
+    </div>
+    <div id="info">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    // ── 经纬度（度）→ 归一化 ECEF（Earth radius = 1，地表）────────────────
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_, h = 0) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + h) * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + h) * s / A);
+    }
+    // 地表凸多边形环（近似椭圆盘），n 段
+    function ellipseRing(lon0, lat0, rLonKm, rLatKm, n = 48) {
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        const t = (i / n) * Math.PI * 2;
+        pts.push(lonLat(lat0 + Math.sin(t) * rLatKm / 111.32, lon0 + Math.cos(t) * rLonKm / (111.32 * Math.cos(lat0 * D2R))));
+      }
+      return pts;
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+      const S = engine.Camera.EARTH_SCALE;
+
+      // ── 两个动态水面 pass（同引擎类，不同参数）────────────────────────
+      const taihu = new engine.DynamicWater(viewer.context, {
+        positions: ellipseRing(120.15, 31.45, 55, 32),           // 太湖近似椭圆
+        color: [0.05, 0.20, 0.34, 0.82],
+        speed: 1.0, waveScale: 0.35, glint: 1.0,
+        camera: viewer.camera,
+      });
+      const qiandao = new engine.DynamicWater(viewer.context, {
+        positions: ellipseRing(118.95, 29.55, 40, 25),           // 千岛湖
+        color: [0.02, 0.24, 0.20, 0.85],                          // 偏绿的深湖水
+        speed: 0.6, waveScale: 0.25, glint: 0.8,
+        camera: viewer.camera,
+      });
+      viewer.scene.effects.add(taihu);
+      viewer.scene.effects.add(qiandao);
+
+      // 沿岸警戒墙（复用 DynamicWall，展示水面 + 墙组合）
+      const wall = new engine.DynamicWall(viewer.context, {
+        positions: ellipseRing(120.15, 31.45, 57, 34, 64),
+        height: 0.0008, color: [0.25, 0.75, 1.0, 0.55], speed: 0.6, repeat: 6,
+        camera: viewer.camera,
+      });
+      viewer.scene.effects.add(wall);
+
+      // ── 控件 ─────────────────────────────────────────────────────────
+      const btnTaihu = document.getElementById('btnTaihu');
+      const btnQiandao = document.getElementById('btnQiandao');
+      btnTaihu.addEventListener('click', () => {
+        taihu.show = !taihu.show; wall.show = taihu.show;
+        btnTaihu.classList.toggle('active', taihu.show); refresh();
+      });
+      btnQiandao.addEventListener('click', () => {
+        qiandao.show = !qiandao.show;
+        btnQiandao.classList.toggle('active', qiandao.show); refresh();
+      });
+      document.getElementById('btnFly').addEventListener('click', () => {
+        viewer.camera.flyTo({
+          destination: { longitude: 120.15, latitude: 31.45, height: 260_000 },
+          duration: 2.2,
+        });
+      });
+      const speedEl = document.getElementById('speed'), waveEl = document.getElementById('wave');
+      speedEl.addEventListener('input', () => {
+        taihu.speed = Number(speedEl.value); qiandao.speed = taihu.speed * 0.6;
+        document.getElementById('speedVal').textContent = taihu.speed.toFixed(1) + 'x';
+      });
+      waveEl.addEventListener('input', () => {
+        taihu.waveScale = Number(waveEl.value); qiandao.waveScale = taihu.waveScale * 0.7;
+        document.getElementById('waveVal').textContent = taihu.waveScale.toFixed(2);
+      });
+
+      function refresh() {
+        info.textContent =
+          `太湖: ${taihu.show ? '显示' : '隐藏'}   千岛湖: ${qiandao.show ? '显示' : '隐藏'}\n` +
+          `波速: ${taihu.speed.toFixed(1)}x   波高: ${taihu.waveScale.toFixed(2)}\n` +
+          `特效: DynamicWater IPass ×2 + DynamicWall ×1`;
+      }
+      refresh();
+    }
+
+    DemoUtils.startup({ engine, title: '47 · 动态水面 DynamicWater', view: [120.3, 30.6, 900_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

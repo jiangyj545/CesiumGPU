@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 28：墙与走廊 Wall/Corridor - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>28 墙与走廊 Wall / Corridor</h1>
+    <p class="desc">墙体用引擎原生 DynamicWall 特效（光带上涌动画）；corridor 引擎未提供，
+      以宽幅半透明 polyline 近似（诚实注明）。场景：西安放大环形墙 + 高速走廊。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 环形墙路径（西安放大城墙 6km × 4.5km，闭合）──────────────
+      const wallLon = 108.94, wallLat = 34.27;
+      const halfW = 0.027, halfH = 0.02; // 度
+      const wallPath = [
+        [wallLon - halfW, wallLat - halfH],
+        [wallLon + halfW, wallLat - halfH],
+        [wallLon + halfW, wallLat + halfH],
+        [wallLon - halfW, wallLat + halfH],
+        [wallLon - halfW, wallLat - halfH], // 闭合
+      ].map(([lon, lat]) => engine.Cartesian3.fromDegrees(lon, lat, 0));
+
+      // 原生 DynamicWall 特效（挂 scene.effects，光带上涌）
+      scene.effects.add(new engine.DynamicWall(viewer.context, {
+        positions: wallPath,
+        height: 4000 / engine.Camera.EARTH_SCALE, // 4 km（归一化）
+        color: [0.25, 0.8, 1.0, 0.85],
+        speed: 1.2,
+        repeat: 4,
+        camera: viewer.scene.camera,
+      }));
+      // 内圈第二道墙（对比色 / 慢速）
+      scene.effects.add(new engine.DynamicWall(viewer.context, {
+        positions: [
+          engine.Cartesian3.fromDegrees(wallLon - halfW / 2, wallLat - halfH / 2, 0),
+          engine.Cartesian3.fromDegrees(wallLon + halfW / 2, wallLat - halfH / 2, 0),
+          engine.Cartesian3.fromDegrees(wallLon + halfW / 2, wallLat + halfH / 2, 0),
+          engine.Cartesian3.fromDegrees(wallLon - halfW / 2, wallLat + halfH / 2, 0),
+          engine.Cartesian3.fromDegrees(wallLon - halfW / 2, wallLat - halfH / 2, 0),
+        ],
+        height: 2500 / engine.Camera.EARTH_SCALE,
+        color: [1.0, 0.45, 0.2, 0.8],
+        speed: 0.7,
+        repeat: 3,
+        camera: viewer.scene.camera,
+      }));
+
+      // ── corridor 近似：宽幅半透明 polyline（高速走廊）────────────
+      const corridorPath = [
+        [108.75, 34.20], [108.85, 34.24], [108.94, 34.27],
+        [109.05, 34.31], [109.18, 34.36],
+      ].map(([lon, lat]) => engine.Cartesian3.fromDegrees(lon, lat, 500));
+      scene.entities.add(new engine.Entity({
+        name: '高速走廊（宽 polyline 近似 corridor）',
+        polyline: {
+          positions: corridorPath,
+          width: 26,
+          color: new engine.Color(0.95, 0.85, 0.2, 0.35),
+        },
+      }));
+      // 走廊中心线（亮色细线）
+      scene.entities.add(new engine.Entity({
+        name: '走廊中心线',
+        polyline: {
+          positions: corridorPath,
+          width: 3,
+          color: new engine.Color(1, 0.95, 0.5, 0.95),
+        },
+      }));
+
+      addBtn('城墙正视（低空）', () => viewer.camera.flyTo({
+        destination: { lon: 108.94, lat: 34.12, height: 9_000 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-8) },
+        duration: 2.5,
+      }));
+      addBtn('斜俯全域', () => viewer.camera.flyTo({
+        destination: { lon: 108.98, lat: 34.20, height: 42_000 },
+        orientation: { heading: engine.CesiumMath.toRadians(-30), pitch: engine.CesiumMath.toRadians(-40) },
+        duration: 2.5,
+      }));
+      addBtn('飞走廊道西端', () => viewer.camera.flyTo({
+        destination: { lon: 108.75, lat: 34.20, height: 6_000 },
+        orientation: { heading: engine.CesiumMath.toRadians(75), pitch: engine.CesiumMath.toRadians(-18) },
+        duration: 2.5,
+      }));
+
+      result.textContent =
+        `DynamicWall 环形墙 ×2（外 4km 高青色 / 内 2.5km 高橙色，光带上涌）\n` +
+        `corridor 近似：宽幅半透明 polyline 26px + 中心亮线\n` +
+        `诚实注明：引擎无 CorridorGraphics，走廊为贴地宽线近似`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [108.98, 34.20, 42_000],
+          imagery: 'gaode-sat',
+          title: '28 · 墙与走廊',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '28 墙与走廊 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

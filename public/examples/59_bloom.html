@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 59：泛光后处理 Bloom - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:320px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;}
+    .cg-panel label input[type=range]{flex:1;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>59 泛光后处理 Bloom</h1>
+    <p class="desc">自实现 IPass 泛光管线：夜景城市灯光点 → bright-pass 提亮 →
+      高斯模糊水平/垂直两趟 → 与场景叠加（additive）。对齐 EV 08_bloom 的
+      PostProcessStage 泛光语义（引擎无 PostProcessStage，以自绘发光体 + 自管
+      offscreen 管线实现同构效果）。</p>
+    <div id="controls"></div>
+    <label>阈值 <input id="threshold" type="range" min="0.05" max="0.9" step="0.01" value="0.35" /><span id="thresholdVal">0.35</span></label>
+    <label>模糊步长 <input id="stepSize" type="range" min="1" max="8" step="0.5" value="3" /><span id="stepSizeVal">3.0</span></label>
+    <label>强度 <input id="strength" type="range" min="0" max="3" step="0.05" value="1.2" /><span id="strengthVal">1.20</span></label>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    /* BloomPass —— 页面内自定义 IPass（模式照引擎 src/effect/DynamicWall.ts）。
+     * 子 pass：lights(夜景灯光点, additive → 自持全分辨率 sceneTex)
+     *   → bright-pass(半分辨率, 阈值提亮) → 高斯 H → 高斯 V(两趟)
+     *   → 合成 scene + blur*strength → swap-chain（loadOp:'load' 不清屏）。
+     * UBO 160B：view(64) + proj(64) + viewProj(64) + params(16)。
+     * 灯光 billboard 需要在 view 空间展开后再投影，故 view/proj 分开传。 */
+    const LIGHTS_VS = /* wgsl */`
+      struct UBO {
+        view     : mat4x4<f32>,
+        proj     : mat4x4<f32>,
+        viewProj : mat4x4<f32>,
+        params   : vec4<f32>,
+      }
+      @group(0) @binding(0) var<uniform> u : UBO;
+      struct Out {
+        @builtin(position) pos : vec4<f32>,
+        @location(0) corner : vec2<f32>,
+        @location(1) rand : vec2<f32>,
+      }
+      @vertex fn main(@location(0) worldPos : vec3<f32>,
+                      @location(1) corner : vec2<f32>,
+                      @location(2) rand : vec2<f32>) -> Out {
+        var vp = u.view * vec4<f32>(worldPos, 1.0);
+        vp.xy += corner * (0.006 + rand.x * 0.007);
+        var o : Out;
+        o.pos = u.proj * vp;
+        o.corner = corner;
+        o.rand = rand;
+        return o;
+      }
+    `;
+    const LIGHTS_FS = /* wgsl */`
+      struct UBO {
+        view     : mat4x4<f32>,
+        proj     : mat4x4<f32>,
+        viewProj : mat4x4<f32>,
+        params   : vec4<f32>,
+      }
+      @group(0) @binding(0) var<uniform> u : UBO;
+      @fragment fn main(@location(0) corner : vec2<f32>,
+                        @location(1) rand : vec2<f32>) -> @location(0) vec4<f32> {
+        let d = length(corner);
+        if (d > 1.0) { discard; }
+        let glow = smoothstep(1.0, 0.0, d);
+        let twinkle = 0.55 + 0.45 * sin(u.params.x * (1.2 + rand.x * 2.4) + rand.y * 6.2832);
+        let warm = mix(vec3<f32>(1.0, 0.82, 0.5), vec3<f32>(0.65, 0.85, 1.0), rand.x);
+        let a = glow * glow * twinkle * (0.35 + rand.y * 0.65);
+        return vec4<f32>(warm * a, a);
+      }
+    `;
+    const FULLSCREEN_VS = /* wgsl */`
+      struct Out {
+        @builtin(position) pos : vec4<f32>,
+        @location(0) uv : vec2<f32>,
+      }
+      @vertex fn main(@builtin(vertex_index) vi : u32) -> Out {
+        var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -3.0), vec2<f32>(-1.0, 1.0), vec2<f32>(3.0, 1.0));
+        let xy = p[vi];
+        var o : Out;
+        o.pos = vec4<f32>(xy, 0.0, 1.0);
+        o.uv = xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+        return o;
+      }
+    `;
+    const BRIGHT_FS = /* wgsl */`
+      @group(0) @binding(0) var samp : sampler;
+      @group(0) @binding(1) var tex : texture_2d<f32>;
+      @group(0) @binding(2) var<uniform> params : vec4<f32>; // y = threshold
+      @fragment fn main(@location(0) uv : vec2<f32>) -> @location(0) vec4<f32> {
+        let c = textureSample(tex, samp, uv).rgb;
+        let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let w = max(lum - params.y, 0.0) / max(lum, 1e-4);
+        return vec4<f32>(c * w, 1.0);
+      }
+    `;
+    const BLUR_FS = /* wgsl */`
+      @group(0) @binding(0) var samp : sampler;
+      @group(0) @binding(1) var tex : texture_2d<f32>;
+      @group(0) @binding(2) var<uniform> dir : vec4<f32>; // xy = stepPx*axis/texSize
+      @fragment fn main(@location(0) uv : vec2<f32>) -> @location(0) vec4<f32> {
+        let w = array<f32, 5>(0.2270270270, 0.1945945946, 0.1216216216, 0.0540540541, 0.0162162162);
+        var c = textureSample(tex, samp, uv).rgb * w[0];
+        for (var i = 1; i < 5; i = i + 1) {
+          let f = dir.xy * f32(i);
+          c = c + (textureSample(tex, samp, uv + f).rgb + textureSample(tex, samp, uv - f).rgb) * w[i];
+        }
+        return vec4<f32>(c, 1.0);
+      }
+    `;
+    const COMPOSITE_FS = /* wgsl */`
+      @group(0) @binding(0) var samp : sampler;
+      @group(0) @binding(1) var sceneTex : texture_2d<f32>;
+      @group(0) @binding(2) var blurTex : texture_2d<f32>;
+      @group(0) @binding(3) var<uniform> params : vec4<f32>; // w = strength
+      @fragment fn main(@location(0) uv : vec2<f32>) -> @location(0) vec4<f32> {
+        let s = textureSample(sceneTex, samp, uv).rgb;
+        let b = textureSample(blurTex, samp, uv).rgb;
+        return vec4<f32>(s + b * params.w, 1.0);
+      }
+    `;
+
+    class BloomPass {
+      label = 'Bloom';
+      show = true;
+      constructor(context, options) {
+        this._ctx = context;
+        this._camera = options.camera;
+        this._threshold = options.threshold ?? 0.35;
+        this._stepSize = options.stepSize ?? 3;
+        this._strength = options.strength ?? 1.2;
+        this._uboData = new Float32Array(52); // 208 B = view+proj+viewProj+params
+        this._rtSize = [0, 0];
+      }
+
+      /** 城市簇 → 夜景灯光点 quad 顶点（viewPos, corner, rand）。
+       *  viewPos 在 CPU 侧预乘 view 矩阵（灯点静止，view 每帧变化——
+       *  因此不能预乘；改为传 worldPos，VS 内乘 view）。 */
+      _buildLights() {
+        const clusters = [
+          [106.55, 29.56, 0.45], [104.07, 30.66, 0.55], [114.30, 30.59, 0.40],
+          [112.94, 28.23, 0.30], [108.94, 34.34, 0.40], [113.62, 34.75, 0.35],
+        ];
+        const verts = [];
+        const EARTH = 6378137;
+        const rand = (s) => {
+          const t = Math.sin(s * 127.1 + 311.7) * 43758.5453;
+          return t - Math.floor(t);
+        };
+        let seed = 1;
+        for (const [lon, lat, spread] of clusters) {
+          for (let i = 0; i < 250; i++) {
+            seed += 1;
+            const dLon = (rand(seed) + rand(seed + 977) - 1) * spread * 1.6;
+            const dLat = (rand(seed + 331) + rand(seed + 557) - 1) * spread;
+            const m = engine.Cartesian3.fromDegrees(lon + dLon, lat + dLat, 400 + rand(seed + 13) * 1200);
+            const wx = m.x / EARTH, wy = m.y / EARTH, wz = m.z / EARTH;
+            const r1 = rand(seed + 71), r2 = rand(seed + 137);
+            for (const [cx, cy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+              verts.push(wx, wy, wz, cx, cy, r1, r2);
+            }
+          }
+        }
+        return new Float32Array(verts);
+      }
+
+      prepare() { /* 延迟到 execute（需要画布尺寸） */ }
+
+      _ensureResources(w, h) {
+        if (this._pipeline && this._rtSize[0] === w && this._rtSize[1] === h) return;
+        this.destroy(); // 释放旧 offscreen 资源（幂等）
+        const device = this._ctx.device;
+        const FMT = this._ctx.preferredFormat;
+        const hw = Math.max(1, w >> 1), hh = Math.max(1, h >> 1);
+        const RT = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
+        const mkTex = (label, tw, th) => device.createTexture({ label, size: [tw, th], format: 'rgba8unorm', usage: RT });
+
+        this._sceneTex = mkTex('Bloom.Scene', w, h);
+        this._brightTex = mkTex('Bloom.Bright', hw, hh);
+        this._blurTexA = mkTex('Bloom.BlurA', hw, hh);
+        this._blurTexB = mkTex('Bloom.BlurB', hw, hh);
+        this._sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        // 灯光点 quad 顶点 + 索引
+        const verts = this._buildLights();
+        this._vertexBuffer = device.createBuffer({
+          label: 'Bloom.Lights', size: verts.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this._ctx.writeBuffer(this._vertexBuffer, 0, verts);
+        this._quadCount = verts.length / 7 / 4;
+        const indices = new Uint32Array(this._quadCount * 6);
+        for (let q = 0; q < this._quadCount; q++) {
+          const b = q * 4, o = q * 6;
+          indices[o] = b; indices[o + 1] = b + 1; indices[o + 2] = b + 2;
+          indices[o + 3] = b + 1; indices[o + 4] = b + 3; indices[o + 5] = b + 2;
+        }
+        this._indexBuffer = device.createBuffer({
+          label: 'Bloom.LightIdx', size: indices.byteLength,
+          usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        this._ctx.writeBuffer(this._indexBuffer, 0, indices);
+
+        this._ubo = device.createBuffer({
+          label: 'Bloom.UBO', size: 208,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._paramBuf = device.createBuffer({
+          label: 'Bloom.Param', size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._dirBufH = device.createBuffer({
+          label: 'Bloom.DirH', size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._dirBufV = device.createBuffer({
+          label: 'Bloom.DirV', size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._strengthBuf = device.createBuffer({
+          label: 'Bloom.Strength', size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        const addBlend = {
+          color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        };
+        const mod = (code, lbl) => this._ctx.createShaderModule(code, lbl);
+
+        // lights 管线（additive → rgba8unorm）
+        const lightsBGL = device.createBindGroupLayout({
+          entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
+        });
+        this._lightsPipeline = device.createRenderPipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [lightsBGL] }),
+          vertex: {
+            module: mod(LIGHTS_VS, 'Bloom.LightsVS'), entryPoint: 'main',
+            buffers: [{
+              arrayStride: 28,
+              attributes: [
+                { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                { shaderLocation: 1, offset: 12, format: 'float32x2' },
+                { shaderLocation: 2, offset: 20, format: 'float32x2' },
+              ],
+            }],
+          },
+          fragment: { module: mod(LIGHTS_FS, 'Bloom.LightsFS'), entryPoint: 'main', targets: [{ format: 'rgba8unorm', blend: addBlend }] },
+          primitive: { topology: 'triangle-list' },
+        });
+        this._lightsBG = device.createBindGroup({
+          layout: lightsBGL, entries: [{ binding: 0, resource: { buffer: this._ubo } }],
+        });
+
+        // 全屏后处理管线工厂：binding 0=sampler 1=纹理 2=uniform(可选)
+        const fullscreenPipeline = (fsCode, label, fmt, withUniform) => {
+          const bglEntries = [
+            { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+          ];
+          if (withUniform) bglEntries.push({ binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } });
+          const bgl = device.createBindGroupLayout({ entries: bglEntries });
+          const pipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+            vertex: { module: mod(FULLSCREEN_VS, label + '.VS'), entryPoint: 'main' },
+            fragment: { module: mod(fsCode, label + '.FS'), entryPoint: 'main', targets: [{ format: fmt }] },
+            primitive: { topology: 'triangle-list' },
+          });
+          return { pipeline, bgl };
+        };
+
+        // bright-pass
+        {
+          const { pipeline, bgl } = fullscreenPipeline(BRIGHT_FS, 'Bloom.Bright', 'rgba8unorm', true);
+          this._brightPipeline = pipeline;
+          this._brightBG = device.createBindGroup({
+            layout: bgl,
+            entries: [
+              { binding: 0, resource: this._sampler },
+              { binding: 1, resource: this._sceneTex.createView() },
+              { binding: 2, resource: { buffer: this._paramBuf } },
+            ],
+          });
+        }
+        // 高斯两趟（H/V 各自方向 uniform）
+        {
+          const { pipeline, bgl } = fullscreenPipeline(BLUR_FS, 'Bloom.Blur', 'rgba8unorm', true);
+          this._blurPipeline = pipeline;
+          this._blurH_BG = device.createBindGroup({
+            layout: bgl,
+            entries: [
+              { binding: 0, resource: this._sampler },
+              { binding: 1, resource: this._brightTex.createView() },
+              { binding: 2, resource: { buffer: this._dirBufH } },
+            ],
+          });
+          this._blurV_BG = device.createBindGroup({
+            layout: bgl,
+            entries: [
+              { binding: 0, resource: this._sampler },
+              { binding: 1, resource: this._blurTexA.createView() },
+              { binding: 2, resource: { buffer: this._dirBufV } },
+            ],
+          });
+        }
+        // 合成（scene + blur*strength → swap-chain）
+        {
+          const bgl = device.createBindGroupLayout({
+            entries: [
+              { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+              { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+              { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+              { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            ],
+          });
+          const addOver = {
+            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          };
+          this._compositePipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+            vertex: { module: mod(FULLSCREEN_VS, 'Bloom.CompVS'), entryPoint: 'main' },
+            fragment: { module: mod(COMPOSITE_FS, 'Bloom.CompFS'), entryPoint: 'main', targets: [{ format: FMT, blend: addOver }] },
+            primitive: { topology: 'triangle-list' },
+          });
+          this._compositeBG = device.createBindGroup({
+            layout: bgl,
+            entries: [
+              { binding: 0, resource: this._sampler },
+              { binding: 1, resource: this._sceneTex.createView() },
+              { binding: 2, resource: this._blurTexB.createView() },
+              { binding: 3, resource: { buffer: this._strengthBuf } },
+            ],
+          });
+        }
+        this._rtSize = [w, h];
+      }
+
+      execute(encoder, target, time) {
+        if (!this.show) return;
+        const w = this._ctx.drawingBufferWidth, h = this._ctx.drawingBufferHeight;
+        this._ensureResources(w, h);
+
+        // ── UBO：view@0 / proj@64 / viewProj@128 / params@192（float 48）─
+        const cam = this._camera;
+        const d = this._uboData;
+        d.set(cam.viewMatrix.values, 0);
+        d.set(cam.projectionMatrix.values, 16);
+        d.set(cam.viewProjectionMatrix.values, 32);
+        d[48] = time; d[49] = this._threshold; d[50] = this._stepSize; d[51] = this._strength;
+        this._ctx.writeBuffer(this._ubo, 0, d);
+        this._ctx.writeBuffer(this._paramBuf, 0, new Float32Array([time, this._threshold, 0, 0]));
+        const hw = Math.max(1, this._rtSize[0] >> 1), hh = Math.max(1, this._rtSize[1] >> 1);
+        const step = this._stepSize;
+        this._ctx.writeBuffer(this._dirBufH, 0, new Float32Array([step / hw, 0, 0, 0]));
+        this._ctx.writeBuffer(this._dirBufV, 0, new Float32Array([0, step / hh, 0, 0]));
+        this._ctx.writeBuffer(this._strengthBuf, 0, new Float32Array([0, 0, 0, this._strength]));
+
+        const begin = (view, loadOp) => encoder.beginRenderPass({
+          colorAttachments: [{ view, loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+        });
+
+        // 1) 灯光点 → sceneTex（additive 累积亮部）
+        let pass = begin(this._sceneTex.createView(), 'clear');
+        pass.setPipeline(this._lightsPipeline);
+        pass.setBindGroup(0, this._lightsBG);
+        pass.setVertexBuffer(0, this._vertexBuffer);
+        pass.setIndexBuffer(this._indexBuffer, 'uint32');
+        pass.drawIndexed(this._quadCount * 6);
+        pass.end();
+
+        // 2) bright-pass：提取 > 阈值的亮部 → 半分辨率
+        pass = begin(this._brightTex.createView(), 'clear');
+        pass.setPipeline(this._brightPipeline);
+        pass.setBindGroup(0, this._brightBG);
+        pass.draw(3);
+        pass.end();
+
+        // 3) 高斯水平 → blurA
+        pass = begin(this._blurTexA.createView(), 'clear');
+        pass.setPipeline(this._blurPipeline);
+        pass.setBindGroup(0, this._blurH_BG);
+        pass.draw(3);
+        pass.end();
+
+        // 4) 高斯垂直 → blurB
+        pass = begin(this._blurTexB.createView(), 'clear');
+        pass.setPipeline(this._blurPipeline);
+        pass.setBindGroup(0, this._blurV_BG);
+        pass.draw(3);
+        pass.end();
+
+        // 5) 合成 scene + blur*strength，叠加到 swap-chain（不清屏）
+        pass = begin(target, 'load');
+        pass.setPipeline(this._compositePipeline);
+        pass.setBindGroup(0, this._compositeBG);
+        pass.draw(3);
+        pass.end();
+      }
+
+      destroy() {
+        for (const t of [this._sceneTex, this._brightTex, this._blurTexA, this._blurTexB]) t?.destroy();
+        this._vertexBuffer?.destroy(); this._indexBuffer?.destroy();
+        this._ubo?.destroy(); this._paramBuf?.destroy();
+        this._dirBufH?.destroy(); this._dirBufV?.destroy(); this._strengthBuf?.destroy();
+        this._sceneTex = this._brightTex = this._blurTexA = this._blurTexB = null;
+        this._pipeline = null;
+      }
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // 夜景氛围：隐藏影像、球体基色改深夜蓝
+      const layers = viewer.globe.layers;
+      for (const l of layers) l.show = false;
+      viewer.globe.baseColor = new engine.Color(0.012, 0.02, 0.045, 1);
+
+      // ── 泛光特效：城市灯光 + bloom 管线 ─────────────────────────────
+      const bloom = new BloomPass(viewer.context, {
+        camera: viewer.camera,
+        threshold: 0.35, stepSize: 3, strength: 1.2,
+      });
+      viewer.scene.effects.add(bloom);
+
+      // ── UI ─────────────────────────────────────────────────────────
+      let on = true, night = true;
+      const bloomBtn = addBtn('泛光: 开', () => {
+        on = !on;
+        bloom.show = on;
+        bloomBtn.textContent = `泛光: ${on ? '开' : '关'}`;
+        bloomBtn.classList.toggle('active', on);
+        refresh();
+      });
+      bloomBtn.classList.add('active');
+      const nightBtn = addBtn('切换白天/夜景', () => {
+        night = !night;
+        for (const l of layers) l.show = !night;
+        viewer.globe.baseColor = night
+          ? new engine.Color(0.012, 0.02, 0.045, 1)
+          : new engine.Color(0.18, 0.22, 0.28, 1);
+        refresh();
+      });
+
+      const bind = (id, prop) => {
+        const el = document.getElementById(id);
+        const val = document.getElementById(id + 'Val');
+        el.addEventListener('input', () => {
+          bloom[prop] = Number(el.value);
+          val.textContent = Number(el.value).toFixed(2);
+          refresh();
+        });
+      };
+      bind('threshold', '_threshold');
+      bind('stepSize', '_stepSize');
+      bind('strength', '_strength');
+
+      function refresh() {
+        result.textContent =
+          `管线: lights → bright(>${bloom._threshold.toFixed(2)}) → 高斯H/V(${bloom._stepSize}px)\n` +
+          `     → scene + blur*${bloom._strength.toFixed(2)} → swap-chain (additive)\n` +
+          `灯光点: 6 城市簇 × 250 billboard 闪烁\n` +
+          `状态: ${on ? '运行中' : '已关闭'} · ${night ? '夜景' : '白天'}模式`;
+      }
+      setInterval(refresh, 1000);
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [106.44, 29.50, 1_200_000],
+          imagery: 'gaode-sat',
+          title: '59 · 泛光后处理 Bloom',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '59 泛光后处理 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

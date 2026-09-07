@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 76：缓冲区分析 BufferZone - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:320px;max-width:430px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+    .cg-panel #controls button{padding:5px 10px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;max-height:200px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>76 缓冲区分析</h1>
+    <p class="desc">DrawHandler 取点/取线后在前端生成缓冲多边形（服务端空间分析的
+      前端近似）：<b>点缓冲</b> = 半径 r 的 96 段圆 polygon；<b>线缓冲</b> = 沿线
+      左右偏移 r 构成“胶囊”包络（自交路径为近似并集）。缓冲面面积用
+      Measure.area 求值。</p>
+    <label>缓冲半径 <span id="radiusVal">5.0</span> km</label>
+    <input id="radiusSlider" type="range" min="0.5" max="20" step="0.5" value="5" />
+    <div id="controls">
+      <button id="btnPoint">点缓冲</button>
+      <button id="btnLine">线缓冲</button>
+      <button id="btnClear">清除全部</button>
+    </div>
+    <div id="result">选半径 → 点「点缓冲」后在球面点一点，或「线缓冲」画一条线（右键结束）。</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const radiusSlider = document.getElementById('radiusSlider');
+      const radiusVal = document.getElementById('radiusVal');
+      const btnPoint = document.getElementById('btnPoint');
+      const btnLine = document.getElementById('btnLine');
+
+      // ── 0. 公共小工具 ───────────────────────────────────────────────
+      const RATIO = 6356752.3142 / 6378137; // 引擎面约定：y/z 极半径压缩
+      function toLonLat(p) { // 归一化 ECEF → {lon, lat}(度)
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const ux = p.x / mag, uy = (p.y / mag) / RATIO, uz = (p.z / mag) / RATIO;
+        return {
+          lon: Math.atan2(uy, ux) * 180 / Math.PI,
+          lat: Math.atan2(uz, Math.hypot(ux, uy)) * 180 / Math.PI,
+        };
+      }
+      const toUnit = (lon, lat) => engine.Cartesian3.fromDegrees(lon, lat, 0); // 归一化 ECEF
+
+      let radiusM = 5000;
+      radiusSlider.addEventListener('input', () => {
+        radiusM = radiusSlider.valueAsNumber * 1000;
+        radiusVal.textContent = radiusSlider.value;
+      });
+
+      /** 点缓冲：以 (lon,lat) 为圆心生成 r 米的 96 段圆环（局部平面近似，
+       *  经度方向按 cos(lat) 修正）*/
+      function circleRing(lon, lat, r) {
+        const dLat = r / 111_320;
+        const dLon = r / (111_320 * Math.max(0.2, Math.cos(lat * Math.PI / 180)));
+        const ring = [];
+        for (let i = 0; i < 96; i++) {
+          const a = (i / 96) * Math.PI * 2;
+          ring.push(toUnit(lon + dLon * Math.cos(a), lat + dLat * Math.sin(a)));
+        }
+        return ring;
+      }
+
+      /** 线缓冲：折线左右各偏移 r 的“胶囊”包络 polygon（平滑路径下即
+       *  精确并集；急转弯自交处为近似）。端部用 10 段半圆帽。*/
+      function capsuleRing(ptsLL, r) {
+        if (ptsLL.length < 2) return circleRing(ptsLL[0].lon, ptsLL[0].lat, r);
+        const n = ptsLL.length;
+        const left = [], right = [];
+        for (let i = 0; i < n; i++) {
+          // 顶点切向 = 前后段方向的平均（端点取单段方向）
+          const prev = ptsLL[Math.max(0, i - 1)];
+          const next = ptsLL[Math.min(n - 1, i + 1)];
+          let dx = next.lon - prev.lon, dy = next.lat - prev.lat;
+          const len = Math.hypot(dx, dy) || 1;
+          dx /= len; dy /= len;
+          // 法向（平面近似）：(-dy, dx)
+          const dLat = r / 111_320;
+          const dLon = r / (111_320 * Math.max(0.2, Math.cos(ptsLL[i].lat * Math.PI / 180)));
+          left.push({ lon: ptsLL[i].lon - dy * dLon, lat: ptsLL[i].lat + dx * dLat });
+          right.push({ lon: ptsLL[i].lon + dy * dLon, lat: ptsLL[i].lat - dx * dLat });
+        }
+        const ring = [];
+        const arc = (center, startDirDeg, r) => {
+          for (let k = 0; k <= 10; k++) {
+            const a = ((startDirDeg + (k / 10) * 180) * Math.PI) / 180;
+            const dLat = r * Math.sin(a) / 111_320;
+            const dLon = r * Math.cos(a) / (111_320 * Math.max(0.2, Math.cos(center.lat * Math.PI / 180)));
+            ring.push(toUnit(center.lon + dLon, center.lat + dLat));
+          }
+        };
+        // 左链 → 末端半圆帽 → 右链反向 → 起端半圆帽
+        left.forEach((p) => ring.push(toUnit(p.lon, p.lat)));
+        const dirEnd = Math.atan2(
+          ptsLL[n - 1].lat - ptsLL[n - 2].lat, ptsLL[n - 1].lon - ptsLL[n - 2].lon) * 180 / Math.PI;
+        arc(ptsLL[n - 1], dirEnd - 90, r);
+        for (let i = right.length - 1; i >= 0; i--) ring.push(toUnit(right[i].lon, right[i].lat));
+        const dirStart = Math.atan2(
+          ptsLL[0].lat - ptsLL[1].lat, ptsLL[0].lon - ptsLL[1].lon) * 180 / Math.PI;
+        arc(ptsLL[0], dirStart - 90, r);
+        return ring;
+      }
+
+      // ── 1. DrawHandler：取点 / 取线 ──────────────────────────────────
+      const draw = new engine.DrawHandler(viewer);
+      let mode = null; // 'point' | 'polyline'
+      let buffers = 0;
+
+      function setActive(btn) {
+        [btnPoint, btnLine].forEach((b) => b.classList.toggle('active', b === btn));
+      }
+
+      function addBufferPolygon(ring, originLabel, anchor) {
+        buffers++;
+        const area = engine.Measure.area(ring);
+        viewer.scene.entities.add({
+          name: `缓冲区#${buffers}`,
+          polygon: { hierarchy: { positions: ring }, color: new engine.Color(0.25, 0.55, 1.0, 0.28) },
+          position: anchor,
+          label: {
+            text: `${originLabel}  r=${(radiusM / 1000).toFixed(1)}km  S=${engine.MeasureCollection.formatArea(area)}`,
+            fillColor: new engine.Color(0.65, 0.85, 1.0, 1.0),
+          },
+        });
+        return area;
+      }
+
+      draw.drawEnd.addListener(({ positions }) => {
+        if (mode === 'point' && positions.length >= 1) {
+          const { lon, lat } = toLonLat(positions[0]);
+          const ring = circleRing(lon, lat, radiusM);
+          const area = addBufferPolygon(ring, '点缓冲', positions[0]);
+          result.textContent =
+            `点缓冲 #${buffers}\n圆心 ${lon.toFixed(5)}°, ${lat.toFixed(5)}°\n` +
+            `半径 ${(radiusM / 1000).toFixed(1)} km\n缓冲面积 ${engine.MeasureCollection.formatArea(area)}`;
+        } else if (mode === 'polyline' && positions.length >= 2) {
+          const ll = positions.map(toLonLat);
+          const ring = capsuleRing(ll, radiusM);
+          const area = addBufferPolygon(ring, '线缓冲', positions[0]);
+          const length = engine.Measure.distance(positions);
+          result.textContent =
+            `线缓冲 #${buffers}\n折线 ${positions.length} 点，长度 ${engine.MeasureCollection.formatDistance(length)}\n` +
+            `半径 ${(radiusM / 1000).toFixed(1)} km\n包络面积 ${engine.MeasureCollection.formatArea(area)}`;
+        } else {
+          result.textContent = '点数不足（线缓冲需 ≥2 点）。';
+        }
+        mode = null;
+        setActive(null);
+      });
+
+      btnPoint.addEventListener('click', () => {
+        mode = 'point'; setActive(btnPoint); draw.start('point');
+        result.textContent = '点缓冲：在球面上点一下。';
+      });
+      btnLine.addEventListener('click', () => {
+        mode = 'polyline'; setActive(btnLine); draw.start('polyline');
+        result.textContent = '线缓冲：左键取点（可多点），右键结束。';
+      });
+      document.getElementById('btnClear').addEventListener('click', () => {
+        draw.stop(); mode = null; setActive(null);
+        viewer.scene.entities.removeAll();
+        buffers = 0;
+        result.textContent = '已清空所有缓冲区。';
+      });
+
+      // ── 2. 初始：长江荆江段示意航线 ─────────────────────────────────
+      const demoLine = [[112.15, 30.68], [112.55, 30.55], [112.95, 30.42], [113.3, 30.35]]
+        .map(([lon, lat]) => toUnit(lon, lat));
+      viewer.scene.entities.add({
+        name: '示例航线',
+        polyline: { positions: demoLine, width: 3, color: new engine.Color(1.0, 0.85, 0.3, 1.0) },
+      });
+      result.textContent += '\n（画面已预置一条橙色示意航线，可对其做线缓冲对照）';
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.6, 30.5, 500_000],
+          imagery: 'gaode-sat',
+          title: '76 · 缓冲区分析 BufferZone',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '76 缓冲区分析 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

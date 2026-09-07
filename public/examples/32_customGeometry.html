@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 32：自定义几何顶点 CustomGeometry - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>32 自定义几何顶点</h1>
+    <p class="desc">手写顶点缓冲直提 Primitive（GeometryPipeline 的数据管线终端用法）：
+      金字塔（4 侧面 + 底面，面法线手工叉积）与 sin 波浪绸带面（32×16 网格），
+      ENU 局部坐标偏移放样到地表。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const scene = viewer.scene;
+      const context = viewer.context;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── ENU 局部放样器：地表锚点 + 东/北/天 单位轴偏移（米）────────
+      function makeLocal(originLon, originLat) {
+        const origin = engine.Cartesian3.fromDegrees(originLon, originLat, 0);
+        const enu = engine.Transforms.eastNorthUpToFixedFrame(origin);
+        const v = enu.values; // 列主序：col0=east, col1=north, col2=up
+        const east = new engine.Cartesian3(v[0], v[1], v[2]);
+        const north = new engine.Cartesian3(v[4], v[5], v[6]);
+        const up = new engine.Cartesian3(v[8], v[9], v[10]);
+        return (dxM, dyM, dhM) => {
+          const p = engine.Cartesian3.clone(origin);
+          p.x += (east.x * dxM + north.x * dyM + up.x * dhM) / S;
+          p.y += (east.y * dxM + north.y * dyM + up.y * dhM) / S;
+          p.z += (east.z * dxM + north.z * dyM + up.z * dhM) / S;
+          return p;
+        };
+      }
+      function faceNormal(a, b, c) {
+        const ab = engine.Cartesian3.subtract(b, a, new engine.Cartesian3());
+        const ac = engine.Cartesian3.subtract(c, a, new engine.Cartesian3());
+        return engine.Cartesian3.normalize(
+          engine.Cartesian3.cross(ab, ac, new engine.Cartesian3()),
+          new engine.Cartesian3());
+      }
+
+      // ── 金字塔：5 顶点 / 6 面（含底面）────────────────────────────
+      function buildPyramid(centerLon, centerLat, halfM, heightM) {
+        const local = makeLocal(centerLon, centerLat);
+        const base = [
+          local(-halfM, -halfM, 0), local(halfM, -halfM, 0),
+          local(halfM, halfM, 0), local(-halfM, halfM, 0),
+        ];
+        const apex = local(0, 0, heightM);
+        const verts = [];   // [pos3, normal3, uv2]
+        const indices = [];
+        const push = (v, n) => verts.push(v.x, v.y, v.z, n.x, n.y, n.z, 0, 0);
+        const faces = [
+          [base[0], base[1], apex], [base[1], base[2], apex],
+          [base[2], base[3], apex], [base[3], base[0], apex],
+        ];
+        let vi = 0;
+        for (const f of faces) {
+          const n = faceNormal(f[0], f[1], f[2]);
+          for (const p of f) push(p, n);
+          indices.push(vi, vi + 1, vi + 2);
+          vi += 3;
+        }
+        // 底面（法线朝下）
+        const upN = faceNormal(base[0], base[1], base[2]);
+        const nDown = new engine.Cartesian3(-upN.x, -upN.y, -upN.z);
+        push(base[0], nDown); push(base[1], nDown);
+        push(base[2], nDown); push(base[3], nDown);
+        indices.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
+        return { vertices: new Float32Array(verts), indices: new Uint32Array(indices) };
+      }
+
+      // ── sin 波浪绸带面（32×16 网格）───────────────────────────────
+      function buildWave(centerLon, centerLat, halfWM, halfHM, ampM, waves = 3) {
+        const local = makeLocal(centerLon, centerLat);
+        const NX = 32, NY = 16;
+        const verts = [];
+        const indices = [];
+        const heightAt = (u, v) => Math.sin(u * Math.PI * 2 * waves) * ampM * (0.4 + 0.6 * v);
+        for (let iy = 0; iy <= NY; iy++) {
+          for (let ix = 0; ix <= NX; ix++) {
+            const u = ix / NX, v = iy / NY;
+            const dx = (u - 0.5) * 2 * halfWM;
+            const dy = (v - 0.5) * 2 * halfHM;
+            const p = local(dx, dy, heightAt(u, v));
+            // 数值微分近似法线
+            const e = 1e-3;
+            const px = local(dx + e * 2 * halfWM, dy, heightAt(u + e, v));
+            const py = local(dx, dy + e * 2 * halfHM, heightAt(u, v + e));
+            const n = faceNormal(px, py, p);
+            verts.push(p.x, p.y, p.z, n.x, n.y, n.z, u, v);
+          }
+        }
+        for (let iy = 0; iy < NY; iy++) {
+          for (let ix = 0; ix < NX; ix++) {
+            const a = iy * (NX + 1) + ix;
+            indices.push(a, a + NX + 1, a + 1, a + 1, a + NX + 1, a + NX + 2);
+          }
+        }
+        return { vertices: new Float32Array(verts), indices: new Uint32Array(indices) };
+      }
+
+      const pyramid = buildPyramid(97.0, 40.2, 60_000, 90_000);
+      scene.addPrimitive(new engine.Primitive(context, {
+        vertices: pyramid.vertices,
+        indices: pyramid.indices,
+        color: new engine.Color(0.95, 0.75, 0.2, 1),
+      }));
+
+      const wave = buildWave(99.0, 39.6, 180_000, 90_000, 30_000, 3);
+      scene.addPrimitive(new engine.Primitive(context, {
+        vertices: wave.vertices,
+        indices: wave.indices,
+        color: new engine.Color(0.2, 0.7, 0.9, 1),
+      }));
+
+      // 标注
+      scene.entities.add(new engine.Entity({
+        name: '金字塔',
+        position: engine.Cartesian3.fromDegrees(97.0, 40.2, 0),
+        point: { pixelSize: 10, color: engine.Color.WHITE },
+        label: { text: '金字塔 6 面手工法线', font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
+      }));
+      scene.entities.add(new engine.Entity({
+        name: '波浪面',
+        position: engine.Cartesian3.fromDegrees(99.0, 39.6, 0),
+        point: { pixelSize: 10, color: engine.Color.WHITE },
+        label: { text: '波浪绸带 32×16', font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
+      }));
+
+      addBtn('侧视低角度', () => viewer.camera.flyTo({
+        destination: { lon: 96.4, lat: 38.4, height: 900_000 },
+        orientation: { heading: engine.CesiumMath.toRadians(35), pitch: engine.CesiumMath.toRadians(-22) },
+        duration: 2.5,
+      }));
+      addBtn('俯视', () => viewer.camera.flyTo({
+        destination: { lon: 98.0, lat: 40.5, height: 1_400_000 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-75) },
+        duration: 2.5,
+      }));
+
+      result.textContent =
+        `金字塔 6 面（4 侧 + 底，面法线叉积）· 波浪绸带 33×17 顶点 / 1024 三角\n` +
+        `顶点布局 [pos3, normal3, uv2] 交错 + Uint32 索引，直接提交 Primitive\n` +
+        `说明：引擎未导出 GeometryPipeline，示例即其数据管线终端用法`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [98.0, 40.5, 1_400_000],
+          imagery: 'gaode-sat',
+          title: '32 · 自定义几何顶点',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '32 自定义几何 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

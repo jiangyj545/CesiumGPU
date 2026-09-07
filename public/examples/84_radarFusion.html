@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 84：雷达融合 RadarFusion - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>84 雷达融合</h1>
+    <p class="desc">迁移自 EV-Globe 13_radarFusion。
+      三个雷达站（北京 / 济南 / 沈阳）扇形扫掠交错旋转，探测圈相互交叠；
+      6 个目标点在覆盖区内按不同相位闪烁，可逐站显隐观察融合覆盖。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const RE = C3.EARTH_RADIUS;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      const lonLatH = (lon, lat, h = 0) => {
+        const p = C3.fromDegrees(lon, lat, h);
+        return new C3(p.x / RE, p.y / RE, p.z / RE);
+      };
+
+      // ── 三站定义：半径 / 周期 / 旋向 / 色系各不相同 ─────────────────────
+      const STATIONS = [
+        { name: '北京', lon: 116.4, lat: 39.9, radius: 280_000, period: 7,
+          dir: 1, rgb: [0.20, 0.90, 1.00] },
+        { name: '济南', lon: 117.0, lat: 36.65, radius: 260_000, period: 9,
+          dir: -1, rgb: [1.00, 0.60, 0.15] },
+        { name: '沈阳', lon: 123.43, lat: 41.8, radius: 300_000, period: 11,
+          dir: 1, rgb: [0.65, 0.40, 1.00] },
+      ];
+      const SECTORS = 16;                         // 每站 16 片（22.5°/片）
+      const TAIL = 4;                             // 拖尾片数
+
+      const entities = viewer.scene.entities;
+
+      /** 以 (lon,lat) 为心的一张扇形片顶点（中心 + 弧带 3 点） */
+      function sectorPositions(st, a0, a1) {
+        const mPerDegLon = 111_320 * Math.cos(st.lat * Math.PI / 180);
+        const pts = [lonLatH(st.lon, st.lat, 300)];
+        for (let i = 0; i <= 3; i++) {
+          const a = a0 + (a1 - a0) * (i / 3);
+          pts.push(lonLatH(
+            st.lon + (Math.cos(a) * st.radius) / mPerDegLon,
+            st.lat + (Math.sin(a) * st.radius) / 110_540,
+            300));
+        }
+        return pts;
+      }
+
+      // ── 建站：站心标记 + 16 片余辉实体 ─────────────────────────────────
+      const stations = STATIONS.map((st) => {
+        entities.add(new engine.Entity({
+          position: lonLatH(st.lon, st.lat, 0),
+          point: { color: new engine.Color(st.rgb[0], st.rgb[1], st.rgb[2], 1), pixelSize: 11 },
+          label: {
+            text: `${st.name}站`,
+            font: '13px sans-serif',
+            fillColor: engine.Color.WHITE,
+          },
+        }));
+        const slices = [];
+        for (let i = 0; i < SECTORS; i++) {
+          const a0 = (i / SECTORS) * Math.PI * 2;
+          const a1 = a0 + (Math.PI * 2) / SECTORS;
+          slices.push(entities.add(new engine.Entity({
+            polygon: {
+              hierarchy: { positions: sectorPositions(st, a0, a1) },
+              color: new engine.Color(st.rgb[0], st.rgb[1], st.rgb[2], 0.5),
+            },
+            show: false,
+          })));
+        }
+        return { ...st, slices, on: true, lastLead: -1 };
+      });
+
+      function setSliceAlpha(ent, rgb, rank) {
+        const alpha = Math.max(0.5 - (0.42 / TAIL) * rank, 0.08);
+        ent.polygon = {
+          hierarchy: ent.polygon.hierarchy,
+          color: new engine.Color(rgb[0], rgb[1], rgb[2], alpha),
+        };
+      }
+
+      // ── 目标点：覆盖交叠区内 6 个，错相闪烁 ────────────────────────────
+      const TARGETS = [
+        [117.5, 38.5], [118.6, 38.0], [116.0, 38.2],
+        [119.6, 39.6], [117.2, 37.4], [119.2, 40.6],
+      ];
+      const targetEnts = TARGETS.map(([lon, lat]) => entities.add(new engine.Entity({
+        position: lonLatH(lon, lat, 8000),
+        point: { color: engine.Color.YELLOW, pixelSize: 9 },
+        label: { text: 'TGT', font: '11px sans-serif',
+          fillColor: new engine.Color(1, 1, 0.4, 0.9) },
+      })));
+
+      // ── 逐帧：各站独立旋转扫掠 + 目标闪烁 ──────────────────────────────
+      const clock = new engine.Clock({ shouldAnimate: true });
+      let prevT = clock.currentTime;
+      let elapsed = 0;
+      let blinkOn = true;
+
+      viewer.preRender = () => {
+        clock.tick();
+        const dt = Math.min(
+          clock.currentTime.secondsDifference(prevT), 0.05);
+        prevT = clock.currentTime;
+        if (dt <= 0) return;
+        elapsed += dt;
+
+        for (const st of stations) {
+          if (!st.on) continue;
+          const phase = (((elapsed / st.period) % 1) + 1) % 1;
+          const lead = Math.floor(phase * SECTORS) % SECTORS;
+          if (lead === st.lastLead) continue;
+          st.lastLead = lead;
+          for (let r = 0; r < SECTORS; r++) {
+            const idx = st.dir > 0
+              ? ((lead - r) % SECTORS + SECTORS) % SECTORS
+              : (lead + r) % SECTORS;
+            const ent = st.slices[idx];
+            const visible = r < TAIL;
+            if (ent.show !== visible) ent.show = visible;
+            if (visible) setSliceAlpha(ent, st.rgb, r);
+          }
+        }
+
+        if (blinkOn) {
+          targetEnts.forEach((ent, i) => {
+            const visible = Math.sin(elapsed * 4 + i * 1.3) > -0.25;
+            if (ent.show !== visible) ent.show = visible;
+          });
+        }
+      };
+
+      // ── 交互：逐站显隐 + 目标闪烁开关 ──────────────────────────────────
+      stations.forEach((st) => {
+        const label = `${st.name}站扫描`;
+        const btn = addBtn(label, () => {
+          st.on = !st.on;
+          if (!st.on) for (const s of st.slices) s.show = false;
+          btn.textContent = st.on ? label : label + '（关）';
+          btn.classList.toggle('active', st.on);
+        });
+        btn.classList.add('active');
+      });
+      const blinkBtn = addBtn('目标闪烁', () => {
+        blinkOn = !blinkOn;
+        if (!blinkOn) for (const t of targetEnts) t.show = true;
+        blinkBtn.textContent = blinkOn ? '目标闪烁' : '目标闪烁（关）';
+        blinkBtn.classList.toggle('active', blinkOn);
+      });
+      blinkBtn.classList.add('active');
+
+      function refresh() {
+        const lines = stations.map((st) => {
+          const phase = (((elapsed / st.period) % 1) + 1) % 1;
+          const deg = (phase * 360).toFixed(0).padStart(3);
+          return `${st.name}站 方位 ${deg}° ` +
+            `半径 ${(st.radius / 1000).toFixed(0)} km 周期 ${st.period}s ` +
+            `${st.dir > 0 ? '顺时针' : '逆时针'} ${st.on ? '开' : '关'}`;
+        });
+        result.textContent = lines.join('\n') +
+          `\n目标: ${TARGETS.length} 个（错相闪烁，位于多站交叠覆盖区）\n` +
+          '实现: 3×16 扇形 Entity.show 轮询，无 GPU 特效依赖';
+      }
+      setInterval(refresh, 250);
+
+      // 俯视华北—渤海湾，三站覆盖交叠可见
+      viewer.camera.setView({
+        destination: C3.fromDegrees(118.6, 36.2, 1_900_000),
+      });
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [118.6, 36.2, 1_900_000],
+          imagery: 'gaode-sat',
+          title: '84 · 雷达融合',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '84 雷达融合 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

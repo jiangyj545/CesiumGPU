@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 18：离线 DEM 地形加载 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:290px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>18 离线 DEM 地形加载</h1>
+    <p class="desc">LocalQuantizedMeshProvider 直连本地 quantized-mesh 地形
+      服务（localhost:8888，湖北 L0-14），强调"离线服务接入"：
+      地形开/关一键对比椭球与真实地表，再对湖北主要城市点做
+      terrainLayer.sampleHeight 采样验证高程。对应 EV-Globe 02_DEM /
+      02_demExternal / 02_GoogleDem 的服务端地形接入主题。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 引擎暂无地形 wireframe 公开 API，线框模式未提供；
+      贴地渲染与贴地量测见示例 14。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const globe = viewer.globe;
+      const controls = document.getElementById('controls');
+      const result = document.getElementById('result');
+
+      // ── 1. 离线地形 provider（显式 URL 便于替换为自己的服务）────────
+      const provider = new engine.LocalQuantizedMeshProvider({
+        url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+        maximumLevel: 14,
+      });
+
+      // ── 2. 地形开/关对比 ────────────────────────────────────────────
+      let terrainOn = false;
+      function setTerrain(on) {
+        // 传 null 即回到 0 高椭球（引擎内部销毁 TerrainLayer 释放 GPU 资源）
+        globe.setTerrainProvider(on ? provider : null);
+        terrainOn = on;
+        for (const btn of controls.querySelectorAll('button[data-role]')) {
+          btn.classList.toggle('active', btn.dataset.role === (on ? 'on' : 'off'));
+        }
+        refresh();
+      }
+
+      function addBtn(label, role, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.dataset.role = role;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+      addBtn('地形开', 'on', () => setTerrain(true));
+      addBtn('地形关', 'off', () => setTerrain(false));
+      addBtn('飞到神农架山区', null, () => {
+        viewer.camera.flyTo({
+          destination: { lon: 110.67, lat: 31.74, height: 30_000 },
+          duration: 3,
+        });
+      });
+
+      // ── 3. 高程采样验证 ─────────────────────────────────────────────
+      // sampleHeight 仅对"已加载瓦片"有效；瓦片按相机视锥落点加载，
+      // 落点与相机坐标存在朝向偏移 → 启动后在相机周边扫描非零锚点，
+      // 近点全部挂在锚点上（公开 API 实现，不依赖内部字段）。
+      let anchor = null;   // [lon, lat] 已加载区锚点
+      function calibrateAnchor() {
+        const t = globe.terrainLayer;
+        if (!t) return;
+        const CX = 112.5, CY = 30.9, R = 0.7, N = 15;
+        outer:
+        for (let i = 0; i < N; i++) {
+          for (let j = 0; j < N; j++) {
+            const lon = CX - R + (2 * R) * i / (N - 1);
+            const lat = CY - R + (2 * R) * j / (N - 1);
+            if (t.sampleHeight(lon, lat) !== 0) { anchor = [lon, lat]; break outer; }
+          }
+        }
+      }
+      const FAR = [
+        ['神农架(远)', 110.67, 31.74],
+        ['恩施(远)', 109.49, 30.27],
+      ];
+      function refresh() {
+        const t = globe.terrainLayer;   // null = 椭球模式
+        const lines = [`地形模式: ${terrainOn ? '在线（8888 离线服务）' : '关闭（0 高椭球）'}`, '── 已加载区采样 ──'];
+        if (anchor) {
+          const [ax, ay] = anchor;
+          const near = [
+            ['锚点', ax, ay],
+            ['近点B', ax + 0.03, ay + 0.02],
+            ['近点C', ax - 0.03, ay - 0.02],
+          ];
+          for (const [name, lon, lat] of near) {
+            const h = t ? t.sampleHeight(lon, lat) : 0;
+            lines.push(`${name}（${lon.toFixed(3)}, ${lat.toFixed(3)}）: ${h.toFixed(1)} m`);
+          }
+        } else {
+          lines.push('（尚未定位到已加载瓦片，等待流式加载…）');
+        }
+        lines.push('── 远城点（飞近后才有值，否则 0）──');
+        for (const [name, lon, lat] of FAR) {
+          const h = t ? t.sampleHeight(lon, lat) : 0;
+          lines.push(`${name}（${lon}, ${lat}）: ${h.toFixed(1)} m`);
+        }
+        result.textContent = lines.join('\n');
+      }
+      setInterval(refresh, 1500);
+
+      // ── 初始：开地形，视角定在湖北 ─────────────────────────────────
+      setTerrain(true);
+      refresh();
+      // 等首波瓦片落地后校准锚点，之后随加载推进重校
+      setTimeout(calibrateAnchor, 8000);
+      setTimeout(calibrateAnchor, 16000);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.5, 30.9, 20_000],
+          imagery: 'gaode-sat',
+          title: '18 · 离线 DEM 地形加载',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '18 离线 DEM 地形加载 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

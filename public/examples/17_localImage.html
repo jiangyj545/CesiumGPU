@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 17：本地单图贴地 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:290px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.on{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>17 本地单图贴地</h1>
+    <p class="desc">SingleTileImageryProvider 语义的近似实现：单张大图按
+      Web-Mercator 瓦片金字塔裁剪供给影像层——网络不佳/纯离线时只靠一张
+      图即可成图。全球图贴球、区域大图贴故宫范围（含区域边界标注，
+      近似 EV-Globe 区域影像抬升的范围可视）；放大后清晰度受原图分辨率
+      限制，与 Cesium 单图影像行为一致。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 近似实现：引擎未导出 SingleTileImageryProvider /
+      RectangleGeometry，本页以页面内 SingleTileProvider（实现
+      ImageryProvider 接口）裁剪单图模拟；影像层本身无高度属性，
+      "区域抬升"以边界框标注近似。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const layers = viewer.globe.layers;
+      const controls = document.getElementById('controls');
+      const result = document.getElementById('result');
+      const MAX_LEVEL = 14;
+
+      // 纬度 → mercator v（0=北纬85.05, 1=南纬85.05）
+      function mercV(latDeg) {
+        const phi = engine.CesiumMath.toRadians(Math.max(-85.0511, Math.min(85.0511, latDeg)));
+        return (1 - Math.log(Math.tan(Math.PI / 4 + phi / 2)) / Math.PI) / 2;
+      }
+
+      // ── SingleTileProvider：单图裁剪成 XYZ 瓦片金字塔 ────────────────
+      // 鸭子类型实现引擎 ImageryProvider 接口
+      // （url/maximumLevel/tileSize/subdomains/ready/resolveUrl/requestTile）
+      class SingleTileProvider {
+        constructor(imgUrl, rect) {
+          this.url = 'single-tile://' + imgUrl;
+          this._imgUrl = imgUrl;
+          this._img = null;                       // HTMLImageElement，首请求时懒加载
+          // rect: [west, south, east, north]（度）
+          this._uW = (rect[0] + 180) / 360;
+          this._uE = (rect[2] + 180) / 360;
+          this._vTop = mercV(rect[3]);
+          this._vBottom = mercV(rect[1]);
+          this._rect = rect;
+        }
+        get maximumLevel() { return MAX_LEVEL; }
+        get tileSize() { return 256; }
+        get subdomains() { return []; }
+        get ready() { return true; }
+        resolveUrl(_key) { return this._imgUrl; }
+        async requestTile(key) {
+          if (!this._img) {
+            const img = new Image();
+            img.src = this._imgUrl;
+            await img.decode();                   // 本地静态资源，确定性可解码
+            this._img = img;
+          }
+          const n = 2 ** key.level;
+          const u0 = key.x / n, u1 = (key.x + 1) / n;   // 瓦片 uv 范围
+          const v0 = key.y / n, v1 = (key.y + 1) / n;
+          // 图片 uv ∩ 瓦片 uv
+          const iu0 = Math.max(u0, this._uW), iu1 = Math.min(u1, this._uE);
+          const iv0 = Math.max(v0, this._vTop), iv1 = Math.min(v1, this._vBottom);
+          if (iu1 <= iu0 || iv1 <= iv0) return null;    // 无交集：该瓦片透明
+          const img = this._img;
+          const du = this._uE - this._uW, dv = this._vBottom - this._vTop;
+          const sx = (iu0 - this._uW) / du * img.naturalWidth;
+          const sy = (iv0 - this._vTop) / dv * img.naturalHeight;
+          const sw = Math.max((iu1 - iu0) / du * img.naturalWidth, 1e-3);
+          const sh = Math.max((iv1 - iv0) / dv * img.naturalHeight, 1e-3);
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = 256;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, sx, sy, sw, sh,
+            (iu0 - u0) * 256, (iv0 - v0) * 256, (iu1 - iu0) * 256, (iv1 - iv0) * 256);
+          return canvas.transferToImageBitmap();
+        }
+      }
+
+      // ── 场景定义 ────────────────────────────────────────────────────
+      const SCENES = [
+        {
+          name: '全球世界图', img: '/images/world.jpg',
+          rect: [-180, -85.05, 180, 85.05], view: [105, 36, 14_000_000],
+        },
+        {
+          name: '故宫区域图', img: '/data/images/gugong.jpg',
+          rect: [116.20, 39.75, 116.60, 40.05], view: [116.397, 39.917, 12_000],
+          outline: true,
+        },
+      ];
+
+      let activeScene = null;
+      let activeLayer = null;
+
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // 区域边界标注（近似"区域影像抬升"的范围可视）
+      function drawRectOutline(rect) {
+        const ring = [
+          [rect[0], rect[1]], [rect[2], rect[1]], [rect[2], rect[3]],
+          [rect[0], rect[3]], [rect[0], rect[1]],
+        ].map(([lon, lat]) => {
+          const p = engine.Cartesian3.fromDegrees(lon, lat);
+          const s = 1 / 6378137; // 米 → 归一化 ECEF
+          return new engine.Cartesian3(p.x * s, p.y * s, p.z * s);
+        });
+        viewer.scene.entities.add({
+          name: 'single-tile-outline',
+          polyline: {
+            positions: ring,
+            width: 2,
+            color: new engine.Color(1, 0.8, 0.2, 0.9),
+          },
+        });
+      }
+
+      async function applyScene(scene) {
+        if (activeLayer) { layers.remove(activeLayer); activeLayer = null; }
+        activeLayer = layers.addImageryProvider(new SingleTileProvider(scene.img, scene.rect));
+        activeScene = scene;
+        if (scene.outline) drawRectOutline(scene.rect);
+        await viewer.camera.flyTo({
+          destination: { lon: scene.view[0], lat: scene.view[1], height: scene.view[2] },
+          duration: 2,
+        });
+        refresh();
+      }
+
+      for (const scene of SCENES) {
+        addBtn(scene.name, () => applyScene(scene));
+      }
+      addBtn('清除单图层', () => {
+        if (activeLayer) { layers.remove(activeLayer); activeLayer = null; }
+        refresh();
+      });
+
+      function refresh() {
+        result.textContent = activeScene
+          ? `当前图层: ${activeScene.name}\n源图: ${activeScene.img}\n` +
+            `范围: [${activeScene.rect.join(', ')}]（度）\n` +
+            `瓦片金字塔: 0→${MAX_LEVEL} 级，256px，mercator 裁剪`
+          : '未加载单图（全球其他区域为引擎默认底色）';
+        for (const btn of controls.querySelectorAll('button')) {
+          btn.classList.toggle('on', !!activeScene && btn.textContent === activeScene.name);
+        }
+      }
+
+      // ── 初始：全球世界图 ────────────────────────────────────────────
+      await applyScene(SCENES[0]);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 14_000_000],
+          imagery: 'none', // 单图层由示例自管
+          title: '17 · 本地单图贴地',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '17 本地单图贴地 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

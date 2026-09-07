@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 21：CZML 时间轴加载 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:200px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>21 CZML 时间轴加载</h1>
+    <p class="desc">fetch /data/simple.czml，轻量 CZML 适配器：解析 document clock +
+      position/cartesian 与 polyline 区间属性，引擎 Clock 语义驱动插值动画。
+      reference 引用型数据（卫星位置转发）统计跳过并降级演示。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── CZML 时间工具：ISO → 相对 clock 起点的秒 ───────────────────
+      let t0 = 0; // clock interval 起点（ms）
+      function isoToRel(iso) {
+        const t = Date.parse(iso);
+        return Number.isFinite(t) ? (t - t0) / 1000 : NaN;
+      }
+      function parseInterval(text) {
+        const [a, b] = String(text).split('/');
+        return [isoToRel(a), isoToRel(b)];
+      }
+
+      // CZML 属性形态：平铺采样数组 [t,x,y,z,…] / interval 采样数组
+      function flattenSamples(value, pick) {
+        if (Array.isArray(value) && typeof value[0] === 'number') {
+          const out = [];
+          for (let i = 0; i + 3 < value.length; i += 4) {
+            out.push({ t: value[i], v: [value[i + 1], value[i + 2], value[i + 3]] });
+          }
+          return out;
+        }
+        if (Array.isArray(value) && value[0] && typeof value[0] === 'object') {
+          const out = [];
+          for (const item of value) {
+            const [ta] = parseInterval(item.interval);
+            const v = pick(item);
+            if (v) out.push({ t: ta, v });
+          }
+          return out;
+        }
+        return null;
+      }
+
+      // 采样插值（t 相对秒；返回米制坐标数组或 null）
+      function sampleAt(samples, t) {
+        if (!samples || samples.length === 0) return null;
+        if (t <= samples[0].t) return samples[0].v;
+        if (t >= samples[samples.length - 1].t) return samples[samples.length - 1].v;
+        for (let i = 0; i < samples.length - 1; i++) {
+          const a = samples[i], b = samples[i + 1];
+          if (t >= a.t && t <= b.t) {
+            const k = (t - a.t) / Math.max(b.t - a.t, 1e-6);
+            if (typeof a.v[0] === 'number') {
+              return a.v.map((x, j) => x + (b.v[j] - x) * k); // 单点线性插值
+            }
+            return k < 0.5 ? a.v : b.v; // 折线取近端
+          }
+        }
+        return null;
+      }
+
+      // ── 解析 CZML 文档 ────────────────────────────────────────────
+      const resp = await fetch('/data/simple.czml');
+      if (!resp.ok) throw new Error(`CZML 加载失败：HTTP ${resp.status}`);
+      const packets = await resp.json();
+      const docPacket = packets.find((p) => p.id === 'document') || {};
+      const clockDef = docPacket.clock || {};
+      const interval = String(clockDef.interval || '').split('/');
+      t0 = Date.parse(interval[0]);
+      const duration = (Date.parse(interval[1]) - t0) / 1000 || 3600;
+      let simTime = isoToRel(clockDef.currentTime) || 0;
+
+      const movers = [];   // { entity, samples }
+      const lines = [];    // { entity, samples, showIntervals }
+      let nRef = 0, nStatic = 0;
+
+      for (const pkt of packets) {
+        if (pkt.id === 'document') continue;
+
+        const posDef = pkt.position;
+        let posSamples = null;
+        if (typeof posDef?.reference === 'string' || Array.isArray(posDef?.references)) {
+          nRef++;
+        } else if (posDef) {
+          posSamples = flattenSamples(posDef.cartesian ?? posDef.cartographicDegrees,
+            (it) => it.cartesian ?? it.cartographicDegrees);
+          if (!posSamples) nRef++;
+        }
+
+        const lineDef = pkt.polyline;
+        let lineSamples = null, showIntervals = null;
+        if (lineDef) {
+          if (typeof lineDef.positions?.reference === 'string' || Array.isArray(lineDef.positions?.references)) {
+            nRef++;
+          } else {
+            lineSamples = flattenSamples(lineDef.positions?.cartesian ?? lineDef.positions?.cartographicDegrees,
+              (it) => it.cartesian ?? it.cartographicDegrees);
+            if (!lineSamples) nRef++;
+          }
+          const showDef = lineDef.show;
+          if (Array.isArray(showDef) && typeof showDef[0] === 'object') {
+            showIntervals = showDef.map((s) => {
+              const [ta, tb] = parseInterval(s.interval);
+              return { t0: ta, t1: tb, on: !!s.boolean };
+            });
+          } else if (typeof showDef === 'boolean') {
+            showIntervals = [{ t0: 0, t1: Infinity, on: showDef }];
+          } else {
+            showIntervals = [{ t0: 0, t1: Infinity, on: true }];
+          }
+        }
+
+        if (posSamples && posSamples.length >= 1) {
+          const entity = scene.entities.add(new engine.Entity({
+            name: pkt.name || pkt.id,
+            position: new engine.Cartesian3(posSamples[0].v[0] / S, posSamples[0].v[1] / S, posSamples[0].v[2] / S),
+            point: { pixelSize: 14, color: engine.Color.YELLOW },
+            label: { text: pkt.name || pkt.id, font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
+          }));
+          movers.push({ entity, samples: posSamples });
+        } else if (lineSamples && lineSamples.length >= 1) {
+          const entity = scene.entities.add(new engine.Entity({
+            name: pkt.name || pkt.id,
+            polyline: {
+              positions: lineSamples[0].v.map((x) => new engine.Cartesian3(x[0] / S, x[1] / S, x[2] / S)),
+              width: 2,
+              color: new engine.Color(0.3, 0.85, 1.0, 0.85),
+            },
+          }));
+          lines.push({ entity, samples: lineSamples, showIntervals });
+        } else {
+          nStatic++;
+        }
+      }
+
+      // ── 兜底演示：样例全为 reference 引用时，用合成轨道动画保证画面非空 ──
+      let fallbackMover = null;
+      if (movers.length === 0 && lines.length === 0) {
+        const orb = (t) => {
+          const a = (t / duration) * Math.PI * 2 * 6;
+          const r = 7_200_000;
+          return new engine.Cartesian3(
+            (r * Math.cos(a)) / S,
+            (r * Math.sin(a)) / S,
+            (r * 0.35 * Math.sin(a * 2)) / S);
+        };
+        const entity = scene.entities.add(new engine.Entity({
+          name: '合成轨道演示',
+          position: orb(simTime),
+          point: { pixelSize: 16, color: engine.Color.YELLOW },
+          label: { text: '合成轨道（降级演示）', font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
+        }));
+        fallbackMover = { entity, orb };
+      }
+
+      // ── 时间轴驱动（Clock 语义：multiplier 倍速推进 simTime）────────
+      let playing = true;
+      let speed = clockDef.multiplier || 60;
+      let lastReal = performance.now();
+      addBtn('播放 / 暂停', () => { playing = !playing; });
+      addBtn('×60', () => { speed = 60; });
+      addBtn('×600', () => { speed = 600; });
+      addBtn('回起点', () => { simTime = 0; });
+
+      viewer.preRender = () => {
+        const now = performance.now();
+        if (playing) simTime += ((now - lastReal) / 1000) * speed;
+        lastReal = now;
+        if (clockDef.range === 'LOOP_STOP') {
+          simTime = Math.min(Math.max(simTime, 0), duration);
+          if (simTime >= duration) simTime = 0; // 循环回绕
+        }
+        for (const m of movers) {
+          const v = sampleAt(m.samples, simTime);
+          if (v) m.entity.position = new engine.Cartesian3(v[0] / S, v[1] / S, v[2] / S);
+        }
+        for (const l of lines) {
+          const on = l.showIntervals.some((iv) => simTime >= iv.t0 && simTime <= iv.t1 && iv.on);
+          l.entity.show = on;
+          const v = sampleAt(l.samples, simTime);
+          if (on && v && v.length >= 2 && typeof v[0][0] === 'number') {
+            l.entity.polyline = {
+              positions: v.map((x) => new engine.Cartesian3(x[0] / S, x[1] / S, x[2] / S)),
+              width: 2,
+              color: new engine.Color(0.3, 0.85, 1.0, 0.85),
+            };
+          }
+        }
+        if (fallbackMover) fallbackMover.entity.position = fallbackMover.orb(simTime);
+      };
+
+      addBtn('飞到数据范围', () => viewer.camera.flyTo({
+        destination: { lon: 105, lat: 25, height: 22_000_000 },
+        duration: 2,
+      }));
+
+      const fmtT = (sec) => {
+        const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      };
+      setInterval(() => {
+        result.textContent =
+          `CZML 包 ${packets.length} 个 · clock ${interval[0]} → ${interval[1]}\n` +
+          `动画点 ${movers.length} · 动画线 ${lines.length} · 静态包 ${nStatic}\n` +
+          `reference 引用跳过 ${nRef} 包${fallbackMover ? '（已降级为合成轨道演示）' : ''}\n` +
+          `时间轴 ${fmtT(simTime)} / ${fmtT(duration)} ×${speed} ${playing ? '播放中' : '已暂停'}`;
+      }, 300);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 25, 22_000_000],
+          imagery: 'gaode-sat',
+          title: '21 · CZML 时间轴加载',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '21 CZML 时间轴 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

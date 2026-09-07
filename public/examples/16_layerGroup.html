@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 16：影像图层组管理 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel h2{font-size:13px;color:#ffd479;margin:8px 0 4px;font-weight:600;}
+    .cg-panel .grp{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;}
+    .cg-panel button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel .row{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;}
+    .cg-panel input[type=range]{flex:1;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:240px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>16 影像图层组管理</h1>
+    <p class="desc">把影像图层按业务分组：底图组（高德卫星 + 天地图注记）
+      与专题组（离线 Mapnik + 天地图影像半透明）。组级显隐/置顶/透明度
+      是对组内图层的批量操作；下方 stats 面板实时输出每层瓦片调度计数
+      （选中/在飞请求/待上传/失败），对应 EV-Globe 01_imageLayerGroup
+      主题，并吸收 01_imageOptimization / 01_imageRequestMerge 的调优观测。</p>
+    <h2>底图组（高德卫星 + 注记）</h2>
+    <div class="grp" id="baseGrp"></div>
+    <div class="row">组透明度<input id="baseAlpha" type="range" min="0" max="1" step="0.05" value="1" /><span id="baseAlphaVal">100%</span></div>
+    <h2>专题组（Mapnik + 天地图影像）</h2>
+    <div class="grp" id="themeGrp"></div>
+    <div class="row">组透明度<input id="themeAlpha" type="range" min="0" max="1" step="0.05" value="0.6" /><span id="themeAlphaVal">60%</span></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const TDT_TK = '1006be64546f4c8fe11ea687163c54f7';
+      const layers = viewer.globe.layers;
+      const result = document.getElementById('result');
+
+      // ── 两组图层：组 = ImageryLayer 数组，组操作即批量操作 ──────────
+      const baseGroup = [
+        layers.addImageryProvider(
+          new engine.XyzImageryProvider(DemoUtils.IMAGERY_PRESETS['gaode-sat'])),
+        layers.addImageryProvider(engine.XyzImageryProvider.tianditu(TDT_TK, 'cva')),
+      ];
+      const themeGroup = [
+        layers.addImageryProvider(new engine.XyzImageryProvider({
+          url: 'http://localhost:8890/tiles/Mapnik/{z}/{x}/{y}.png',
+          maximumLevel: 16, tileSize: 256 })),
+        layers.addImageryProvider(engine.XyzImageryProvider.tianditu(TDT_TK, 'img')),
+      ];
+      themeGroup.forEach((l) => { l.alpha = 0.6; });
+
+      function bindGroup(grpElId, group, alphaId, alphaValId) {
+        const grpEl = document.getElementById(grpElId);
+        const mk = (label, fn) => {
+          const b = document.createElement('button');
+          b.textContent = label;
+          b.addEventListener('click', () => { fn(); refresh(); });
+          grpEl.appendChild(b);
+          return b;
+        };
+        mk('组显示/隐藏', () => {
+          const anyShown = group.some((l) => l.show);
+          group.forEach((l) => { l.show = !anyShown; });
+        });
+        mk('组置顶', () => group.forEach((l) => layers.raiseToTop(l)));
+        mk('组内互换顺序', () => {
+          // 交换组内两层的栈位置：移除后按逆序重新入栈
+          for (const l of group) layers.remove(l);
+          for (const l of [...group].reverse()) {
+            layers.addImageryProvider(l); // ImageryLayer 实例可直接入栈
+          }
+        });
+        const slider = document.getElementById(alphaId);
+        const valEl = document.getElementById(alphaValId);
+        slider.addEventListener('input', () => {
+          const v = Number(slider.value);
+          valEl.textContent = Math.round(v * 100) + '%';
+          group.forEach((l) => { l.alpha = v; });
+          refresh();
+        });
+      }
+
+      bindGroup('baseGrp', baseGroup, 'baseAlpha', 'baseAlphaVal');
+      bindGroup('themeGrp', themeGroup, 'themeAlpha', 'themeAlphaVal');
+
+      // ── stats 面板：每层瓦片调度计数（对应影像调优/请求合并观测）────
+      function refresh() {
+        const statsLine = (l, tag) => {
+          const s = l.stats;
+          return `${tag} show=${l.show ? 1 : 0} alpha=${l.alpha.toFixed(2)} ` +
+            `选中=${s.selectedTiles} 在飞=${s.inFlightRequests} ` +
+            `待传=${s.pendingUploads} 失败=${s.failedTiles}`;
+        };
+        const lines = [
+          '── 图层栈（栈0 最底 → 栈顶后加者）──',
+          ...[...layers].map((l, i) => {
+            const tag = baseGroup.includes(l) ? '[底图]' : '[专题]';
+            return `栈${i} ${statsLine(l, tag)}`;
+          }),
+        ];
+        result.textContent = lines.join('\n');
+      }
+      setInterval(refresh, 1000);
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110, 32, 6_500_000],
+          imagery: 'none', // 两组图层由示例自管
+          title: '16 · 影像图层组管理',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '16 影像图层组管理 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

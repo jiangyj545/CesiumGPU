@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 72：导航罗盘/比例尺 Navigation - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+    /* 罗盘 HUD（右下角，DOM overlay） */
+    #compassWrap{position:absolute;right:16px;bottom:16px;z-index:9000;text-align:center;
+      user-select:none;cursor:grab;}
+    #compassWrap:active{cursor:grabbing;}
+    #compassWrap canvas{display:block;filter:drop-shadow(0 2px 8px rgba(0,0,0,.5));}
+    #headingText{margin-top:2px;font:12px/1.4 Consolas,Monaco,monospace;color:#9fe8ff;
+      text-shadow:0 1px 3px #000;}
+    /* 比例尺（左下角） */
+    #scaleBar{position:absolute;left:16px;bottom:16px;z-index:9000;pointer-events:none;
+      color:#dff1ff;font:11px/1.4 Consolas,Monaco,monospace;text-shadow:0 1px 3px #000;
+      text-align:center;}
+    #scaleLine{height:5px;border:2px solid #dff1ff;border-top:none;margin-top:2px;
+      box-shadow:0 1px 3px rgba(0,0,0,.6);}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>72 导航罗盘 / 比例尺</h1>
+    <p class="desc">纯 DOM/canvas overlay 实现的导航 HUD：罗盘针随相机 heading 旋转
+      （heading 由相机 direction 在切平面上的投影解算）、右下角显示缩放级别、
+      左下角比例尺按视高与 FOV 换算。拖动罗盘可旋转视角，双击复位指北。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <div id="compassWrap">
+    <canvas id="compass" width="96" height="96"></canvas>
+    <div id="headingText">0°</div>
+  </div>
+  <div id="scaleBar">
+    <span id="scaleText">—</span>
+    <div id="scaleLine" style="width:100px"></div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 1. 相机姿态解算（度）────────────────────────────────────────
+      // heading：direction 在“过相机位置的切平面”上的投影与正北的夹角，
+      // 0 = 北，顺时针为正（对齐 Camera.setView 的 orientation 约定）。
+      function cameraHeadingDeg(cam) {
+        const up = engine.Cartesian3.normalize(cam.position, new engine.Cartesian3());
+        // 正北 = 全局 Z 轴（极轴）在切平面上的投影
+        const north = engine.Cartesian3.subtract(
+          new engine.Cartesian3(0, 0, 1),
+          engine.Cartesian3.multiplyByScalar(up, up.z, new engine.Cartesian3()),
+          new engine.Cartesian3());
+        if (engine.Cartesian3.magnitudeSquared(north) < 1e-12) return 0;
+        engine.Cartesian3.normalize(north, north);
+        const east = engine.Cartesian3.cross(north, up, new engine.Cartesian3());
+        const hdg = Math.atan2(
+          engine.Cartesian3.dot(cam.direction, east),
+          engine.Cartesian3.dot(cam.direction, north));
+        return ((hdg * 180 / Math.PI) + 360) % 360;
+      }
+      function cameraHeightM(cam) {
+        return (engine.Cartesian3.magnitude(cam.position) - 1) * 6378137;
+      }
+
+      // ── 2. 罗盘绘制（canvas 2D）─────────────────────────────────────
+      const compass = document.getElementById('compass');
+      const cctx = compass.getContext('2d');
+      const headingText = document.getElementById('headingText');
+
+      function drawCompass(headingDeg) {
+        const S = 96, C = S / 2, R = 42;
+        cctx.clearRect(0, 0, S, S);
+        // 外圈底盘（随相机反向旋转：罗盘刻度盘转 -heading）
+        cctx.save();
+        cctx.translate(C, C);
+        cctx.rotate(-headingDeg * Math.PI / 180);
+        cctx.beginPath();
+        cctx.arc(0, 0, R, 0, Math.PI * 2);
+        cctx.fillStyle = 'rgba(10,20,36,.72)';
+        cctx.fill();
+        cctx.lineWidth = 2;
+        cctx.strokeStyle = 'rgba(140,190,255,.8)';
+        cctx.stroke();
+        // 刻度（每 15°）
+        for (let a = 0; a < 360; a += 15) {
+          const rad = (a - 90) * Math.PI / 180;
+          const major = a % 90 === 0;
+          cctx.beginPath();
+          cctx.moveTo(Math.cos(rad) * (R - 2), Math.sin(rad) * (R - 2));
+          cctx.lineTo(Math.cos(rad) * (R - (major ? 12 : 7)), Math.sin(rad) * (R - (major ? 12 : 7)));
+          cctx.strokeStyle = major ? '#eaf4ff' : 'rgba(160,200,255,.5)';
+          cctx.lineWidth = major ? 2 : 1;
+          cctx.stroke();
+        }
+        // 方位字（盘面跟随旋转）
+        cctx.fillStyle = '#ff8f8f';
+        cctx.font = 'bold 13px sans-serif';
+        cctx.textAlign = 'center';
+        cctx.textBaseline = 'middle';
+        cctx.fillText('N', 0, -R + 20);
+        cctx.fillStyle = 'rgba(220,236,255,.9)';
+        cctx.font = '10px sans-serif';
+        cctx.fillText('E', R - 19, 0);
+        cctx.fillText('S', 0, R - 19);
+        cctx.fillText('W', -R + 19, 0);
+        cctx.restore();
+        // 中心指针（固定朝上 = 当前视线方向）
+        cctx.beginPath();
+        cctx.moveTo(C, C - 26);
+        cctx.lineTo(C - 7, C + 10);
+        cctx.lineTo(C, C + 4);
+        cctx.lineTo(C + 7, C + 10);
+        cctx.closePath();
+        cctx.fillStyle = '#ffd479';
+        cctx.fill();
+      }
+
+      // ── 3. 比例尺换算：米/像素 = 2·h·tan(fov/2) / 画布高 ─────────────
+      const scaleText = document.getElementById('scaleText');
+      const scaleLine = document.getElementById('scaleLine');
+      function updateScale(cam) {
+        const h = cameraHeightM(cam);
+        const canvasH = viewer.canvas.clientHeight || 600;
+        const mpp = 2 * h * Math.tan(cam.frustum.fov / 2) / canvasH;
+        // 取 1/2/5×10^n 的“好看”长度，让线条约 100px
+        const target = Math.max(mpp * 100, 1e-6);
+        const pow = Math.pow(10, Math.floor(Math.log10(target)));
+        let nice = pow;
+        for (const k of [5, 2, 1]) { if (target >= k * pow) { nice = k * pow; break; } }
+        const px = Math.max(20, Math.min(240, Math.round(nice / mpp)));
+        scaleLine.style.width = px + 'px';
+        scaleText.textContent = nice >= 1000 ? `${(nice / 1000).toLocaleString()} km` : `${nice.toLocaleString()} m`;
+      }
+
+      // ── 4. 每帧同步 HUD（preRender 在渲染前触发，读姿态零延迟）──────
+      viewer.preRender = () => {
+        const hdg = cameraHeadingDeg(viewer.camera);
+        drawCompass(hdg);
+        headingText.textContent = `${hdg.toFixed(1)}°`;
+        updateScale(viewer.camera);
+      };
+      drawCompass(0);
+
+      // ── 5. 交互：拖罗盘旋转、双击指北、按钮组 ────────────────────────
+      function currentLonLatHeight() {
+        const p = viewer.camera.position;
+        const r = engine.Cartesian3.magnitude(p);
+        return {
+          lon: Math.atan2(p.y, p.x) * 180 / Math.PI,
+          lat: Math.asin(engine.CesiumMath.clamp(p.z / r, -1, 1)) * 180 / Math.PI,
+          height: (r - 1) * 6378137,
+        };
+      }
+      function setHeading(headingDeg) {
+        const { lon, lat, height } = currentLonLatHeight();
+        viewer.camera.setView({
+          destination: { lon, lat, height },
+          orientation: {
+            heading: headingDeg * Math.PI / 180,
+            pitch: -Math.PI / 2,
+          },
+        });
+      }
+
+      let dragging = false;
+      compass.addEventListener('pointerdown', (e) => { dragging = true; e.preventDefault(); });
+      window.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        const rect = compass.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        // 指针相对罗盘中心的方位角 → 直接作为相机 heading（盘面反向联动）
+        const ang = ((Math.atan2(e.clientX - cx, -(e.clientY - cy)) * 180 / Math.PI) + 360) % 360;
+        setHeading(ang);
+      });
+      window.addEventListener('pointerup', () => { dragging = false; });
+      compass.addEventListener('dblclick', () => setHeading(0));
+
+      addBtn('指北 (N)', () => setHeading(0));
+      addBtn('放大', () => viewer.camera.zoom(-engine.Cartesian3.magnitude(viewer.camera.position) * 0.12));
+      addBtn('缩小', () => viewer.camera.zoom(engine.Cartesian3.magnitude(viewer.camera.position) * 0.12));
+      addBtn('俯视湖北', () => {
+        viewer.camera.flyTo({ destination: { lon: 112.4, lat: 30.9, height: 400_000 } });
+      });
+
+      result.textContent = '拖动罗盘旋转视角；双击罗盘或点「指北」复位。\n比例尺随视高与 FOV 实时换算。';
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.4, 30.9, 2_000_000],
+          imagery: 'gaode-sat',
+          title: '72 · 导航罗盘/比例尺 Navigation',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '72 导航罗盘 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

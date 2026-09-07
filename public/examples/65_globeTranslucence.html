@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 65：半透明球 GlobeTranslucence - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:300px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;}
+    .cg-panel label input[type=range]{flex:1;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>65 半透明球 GlobeTranslucence</h1>
+    <p class="desc">透明度滑条调节球体整体不透明度（画布 alpha 合成），配合
+      "透视模式"隐藏球面并显示经纬骨架线，实现透看球体内部/背面的近似效果。
+      对齐 EV 08_globeTranslucence（引擎 G-Buffer 为不透明管线，以画布透明 +
+      骨架显隐近似）。</p>
+    <div id="controls"></div>
+    <label>球体不透明度 <input id="alpha" type="range" min="0.1" max="1" step="0.01" value="1" /><span id="alphaVal">100%</span></label>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 注：引擎 G-Buffer 管线不支持逐片元球体透明，透明度作用于
+      画布合成层；"透视模式"以骨架线近似 EV 的地下透视。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    /** 生成经纬骨架线实体（透视模式下替代球面）。 */
+    function buildGraticule(viewer, engine) {
+      const EARTH = 6378137;
+      const lift = 1.0008; // 微抬避免贴面闪烁
+      const toUnit = (lon, lat) => {
+        const m = engine.Cartesian3.fromDegrees(lon, lat, 0);
+        return new engine.Cartesian3(m.x / EARTH * lift, m.y / EARTH * lift, m.z / EARTH * lift);
+      };
+      const entities = viewer.scene.entities;
+      const made = [];
+      // 纬线：-80° ~ 80° 每 20°
+      for (let lat = -80; lat <= 80; lat += 20) {
+        const positions = [];
+        for (let lon = -180; lon <= 180; lon += 4) positions.push(toUnit(lon, lat));
+        made.push(entities.add(new engine.Entity({
+          name: `graticule-lat-${lat}`,
+          polyline: { positions, width: lat === 0 ? 2 : 1, color: new engine.Color(0.3, 0.75, 1, 0.5) },
+        })));
+      }
+      // 经线：-180° ~ 180° 每 30°
+      for (let lon = -180; lon < 180; lon += 30) {
+        const positions = [];
+        for (let lat = -90; lat <= 90; lat += 4) positions.push(toUnit(lon, lat));
+        made.push(entities.add(new engine.Entity({
+          name: `graticule-lon-${lon}`,
+          polyline: { positions, width: lon === 0 ? 2 : 1, color: new engine.Color(0.3, 0.75, 1, 0.5) },
+        })));
+      }
+      return made;
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const addBtn = (label, onClick) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      };
+
+      const graticule = buildGraticule(viewer, engine);
+      for (const e of graticule) e.show = false;
+
+      let seeThrough = false;
+      const seeBtn = addBtn('透视模式: 关', () => {
+        seeThrough = !seeThrough;
+        seeBtn.textContent = `透视模式: ${seeThrough ? '开' : '关'}`;
+        seeBtn.classList.toggle('active', seeThrough);
+        viewer.globe.show = !seeThrough;                 // 隐藏球面 → 透看背面
+        for (const e of graticule) e.show = seeThrough;  // 显示骨架
+        refresh();
+      });
+
+      addBtn('低轨视角', () => viewer.camera.flyTo({
+        destination: { lon: 114.3, lat: 30.6, height: 350_000 },
+        orientation: { heading: 0, pitch: -Math.PI / 2.6 },
+      }));
+      addBtn('全球视角', () => viewer.camera.flyTo({
+        destination: { lon: 105, lat: 30, height: 20_000_000 },
+      }));
+
+      // ── 透明度滑条：作用于画布合成层 ────────────────────────────────
+      const slider = document.getElementById('alpha');
+      const alphaVal = document.getElementById('alphaVal');
+      slider.addEventListener('input', () => {
+        const v = Number(slider.value);
+        viewer.canvas.style.opacity = String(v);
+        alphaVal.textContent = Math.round(v * 100) + '%';
+        refresh();
+      });
+
+      function refresh() {
+        result.textContent =
+          `不透明度: ${Math.round(Number(slider.value) * 100)}%（画布 alpha 合成）\n` +
+          `透视模式: ${seeThrough ? '开（球面隐藏 + 经纬骨架）' : '关（实体球面）'}\n` +
+          `页面背景: 深空色，低透明度时透出星空底色`;
+      }
+      document.body.style.background = 'radial-gradient(circle at 50% 40%, #0b1530 0%, #020409 70%)';
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 30, 16_000_000],
+          imagery: 'gaode-sat',
+          title: '65 · 半透明球 GlobeTranslucence',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '65 半透明球 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 31：球体与管体 Sphere/Tube - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>31 球体与管体 Sphere / Tube</h1>
+    <p class="desc">EllipsoidGeometry（UV 球细分）→ 顶点交错化 → Primitive 提交。
+      演示不同半径/细分的球体与半透明椭球罩；管体无 TubeGeometry，
+      以「沿弧线布设珠串椭球」近似（诚实注明）。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const scene = viewer.scene;
+      const context = viewer.context;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── EllipsoidGeometry 分离数组 → Primitive 交错顶点 ───────────
+      function interleave(geom) {
+        const n = geom.vertexCount;
+        const out = new Float32Array(n * 8); // [pos3, normal3, uv2]
+        for (let i = 0; i < n; i++) {
+          out[i * 8 + 0] = geom.positions[i * 3 + 0];
+          out[i * 8 + 1] = geom.positions[i * 3 + 1];
+          out[i * 8 + 2] = geom.positions[i * 3 + 2];
+          out[i * 8 + 3] = geom.normals[i * 3 + 0];
+          out[i * 8 + 4] = geom.normals[i * 3 + 1];
+          out[i * 8 + 5] = geom.normals[i * 3 + 2];
+          out[i * 8 + 6] = geom.uvs[i * 2 + 0];
+          out[i * 8 + 7] = geom.uvs[i * 2 + 1];
+        }
+        return { vertices: out, indices: geom.indices };
+      }
+
+      // 放置在地表的球体 Primitive（radii 单位米，内部归一化）
+      function makeSphere(centerLon, centerLat, radiusM, color, opts = {}) {
+        const geom = new engine.EllipsoidGeometry({
+          radii: new engine.Cartesian3(radiusM, radiusM, radiusM),
+          stackPartitions: opts.stacks || 32,
+          slicePartitions: opts.slices || 48,
+        }).createGeometry();
+        const { vertices, indices } = interleave(geom);
+        const p = engine.Cartesian3.fromDegrees(centerLon, centerLat, 0);
+        return new engine.Primitive(context, {
+          vertices,
+          indices: new Uint32Array(indices),
+          position: new engine.Cartesian3(p.x / S, p.y / S, p.z / S),
+          color,
+          translucent: !!opts.translucent,
+          alpha: opts.alpha,
+        });
+      }
+
+      // ── 三球（不同半径/细分）+ 半透明椭球罩 ───────────────────────
+      const spheres = [];
+      spheres.push(makeSphere(112.5, 43.2, 80_000, new engine.Color(0.85, 0.3, 0.25, 1), { stacks: 24, slices: 36 }));
+      spheres.push(makeSphere(113.6, 43.5, 120_000, new engine.Color(0.3, 0.75, 0.95, 1), { stacks: 32, slices: 48 }));
+      spheres.push(makeSphere(114.8, 43.8, 160_000, new engine.Color(0.4, 0.9, 0.5, 1), { stacks: 40, slices: 60 }));
+      const shell = makeSphere(113.6, 43.5, 260_000, new engine.Color(1, 0.9, 0.3, 0.18), { translucent: true, alpha: 0.18, stacks: 32, slices: 48 });
+      for (const sp of spheres) scene.addPrimitive(sp);
+      scene.addTransparentPrimitive(shell);
+
+      // ── 管体近似：沿弧线珠串（半透明小椭球 + 中心折线）────────────
+      function arcPoints(from, to, peakM, n) {
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+          const k = i / n;
+          pts.push(engine.Cartesian3.fromDegrees(
+            from[0] + (to[0] - from[0]) * k,
+            from[1] + (to[1] - from[1]) * k,
+            Math.sin(k * Math.PI) * peakM + 100_000));
+        }
+        return pts;
+      }
+      const tubePath = arcPoints([110.8, 42.6], [116.6, 44.4], 420_000, 14);
+      const tubeBeadRadius = 42_000;
+      for (const p of tubePath) {
+        const bead = new engine.EllipsoidGeometry({
+          radii: new engine.Cartesian3(tubeBeadRadius, tubeBeadRadius, tubeBeadRadius),
+          stackPartitions: 16, slicePartitions: 24,
+        }).createGeometry();
+        const { vertices, indices } = interleave(bead);
+        scene.addTransparentPrimitive(new engine.Primitive(context, {
+          vertices,
+          indices: new Uint32Array(indices),
+          position: new engine.Cartesian3(p.x / S, p.y / S, p.z / S),
+          color: new engine.Color(0.75, 0.45, 0.95, 0.45),
+          translucent: true,
+          alpha: 0.45,
+        }));
+      }
+      scene.entities.add(new engine.Entity({
+        name: '管体中心线',
+        polyline: {
+          positions: tubePath,
+          width: 2,
+          color: new engine.Color(0.95, 0.75, 1.0, 0.9),
+        },
+      }));
+
+      addBtn('侧视全景', () => viewer.camera.flyTo({
+        destination: { lon: 112.0, lat: 41.6, height: 1_500_000 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-28) },
+        duration: 2.5,
+      }));
+      addBtn('球体近景', () => viewer.camera.flyTo({
+        destination: { lon: 112.0, lat: 42.8, height: 700_000 },
+        orientation: { heading: engine.CesiumMath.toRadians(20), pitch: engine.CesiumMath.toRadians(-18) },
+        duration: 2.5,
+      }));
+
+      result.textContent =
+        `实心球 ×3（半径 80/120/160 km，细分 24-40×36-60）+ 半透明罩 ×1\n` +
+        `管体 = 沿弧线 15 颗珠串椭球（r 42 km，半透明）+ 中心线\n` +
+        `诚实注明：引擎无 Sphere/TubeGraphics，管体为珠串近似`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.0, 41.6, 1_500_000],
+          imagery: 'gaode-sat',
+          title: '31 · 球体与管体',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '31 球体管体 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

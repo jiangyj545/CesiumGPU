@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 46：视角历史与书签 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:390px;
+      max-height:calc(100vh - 40px);overflow:auto;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);font:13px/1.6 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9fd0ff;}
+    .cg-panel .desc{font-size:12px;color:#8fa8c8;margin:0 0 8px;}
+    .cg-panel h2{font-size:12px;margin:8px 0 4px;color:#7fb4e8;}
+    .cg-panel button{margin:3px 5px 3px 0;padding:4px 9px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#dbeaff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel button:disabled{opacity:.4;cursor:default;}
+    .cg-panel input[type=text]{padding:4px 8px;font-size:12px;color:#dbeaff;
+      background:rgba(20,35,60,.7);border:1px solid rgba(120,180,255,.3);border-radius:5px;width:120px;}
+    .cg-panel ul{list-style:none;margin:4px 0;padding:0;font-size:12px;}
+    .cg-panel li{display:flex;align-items:center;gap:6px;padding:3px 6px;margin:2px 0;
+      background:rgba(30,50,85,.4);border-radius:4px;}
+    .cg-panel li .bm-name{flex:1;color:#cfe4ff;cursor:pointer;}
+    .cg-panel li .bm-name:hover{color:#fff;text-decoration:underline;}
+    .cg-panel li .bm-del{padding:1px 7px;background:rgba(160,50,50,.5);}
+    .cg-panel #result{font:11px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>46 视角历史与书签</h1>
+    <p class="desc">setView 历史栈（后退 / 前进）+ 书签保存列表（localStorage 持久化，
+      刷新页面不丢失）。</p>
+
+    <h2>历史栈</h2>
+    <div>
+      <button id="btnBack">← 后退</button>
+      <button id="btnFwd">前进 →</button>
+      <button id="btnMark">记录当前视角</button>
+      <button id="btnClear">清空历史</button>
+    </div>
+
+    <h2>书签</h2>
+    <div>
+      <input type="text" id="bmName" placeholder="书签名…" maxlength="20" />
+      <button id="btnSave">保存当前视角</button>
+    </div>
+    <ul id="bmList"></ul>
+
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const MATH = engine.CesiumMath;
+      const result = document.getElementById('result');
+      const $ = (id) => document.getElementById(id);
+
+      // ── 视角快照：从相机位置/朝向反算 {lon,lat,height,heading,pitch} ──
+      function capture() {
+        const cam = viewer.camera;
+        const r = C3.magnitude(cam.position);
+        const lon = MATH.toDegrees(Math.atan2(cam.position.y, cam.position.x));
+        const lat = MATH.toDegrees(Math.asin(
+          Math.max(-1, Math.min(1, cam.position.z / r))));
+        const height = (r - 1) * 6378137;
+        // 姿态反算：up = normalize(position)，direction 投影到局部 ENU
+        const inv = 1 / r;
+        const ux = cam.position.x * inv, uy = cam.position.y * inv, uz = cam.position.z * inv;
+        // east = normalize(ẑ × up)，north = up × east
+        let ex = -uy, ey = ux, ez = 0;
+        const em = Math.hypot(ex, ey);
+        if (em < 1e-9) { ex = 1; ey = 0; } else { ex /= em; ey /= em; }
+        const nx = uz * ey - uy * ez, ny = ux * ez - uz * ex, nz = ux * ey - uy * ex;
+        const d = cam.direction;
+        const heading = Math.atan2(d.x * ex + d.y * ey + d.z * ez,
+                                   d.x * nx + d.y * ny + d.z * nz);
+        const pitch = Math.asin(Math.max(-1, Math.min(1,
+          d.x * ux + d.y * uy + d.z * uz)));
+        return { lon, lat, height, heading, pitch };
+      }
+
+      function applyView(v, animated) {
+        if (animated) {
+          viewer.camera.flyTo({
+            destination: { lon: v.lon, lat: v.lat, height: v.height },
+            orientation: { heading: v.heading, pitch: v.pitch },
+            duration: 1.5,
+          });
+        } else {
+          viewer.camera.cancelFlight();
+          viewer.camera.setView({
+            destination: { lon: v.lon, lat: v.lat, height: v.height },
+            orientation: { heading: v.heading, pitch: v.pitch },
+          });
+        }
+      }
+
+      const describe = (v) =>
+        `${v.lon.toFixed(2)}, ${v.lat.toFixed(2)} · ` +
+        `${v.height >= 1e6 ? (v.height / 1e6).toFixed(1) + 'Mm' : (v.height / 1000).toFixed(1) + 'km'}`;
+
+      // ── 历史栈（初始视角入栈，指针管理后退/前进）────────────────────
+      const history = [];
+      let histIdx = -1;
+      let navigating = false;          // 后退/前进期间的快照抑制
+
+      function pushHistory(v) {
+        // 指针不在栈顶时，截断前进分支（浏览器历史语义）
+        if (histIdx < history.length - 1) history.length = histIdx + 1;
+        // 与栈顶几乎相同的视角不重复记录
+        const top = history[history.length - 1];
+        if (top && Math.abs(top.lon - v.lon) < 1e-4 && Math.abs(top.lat - v.lat) < 1e-4 &&
+            Math.abs(top.height - v.height) < 1) return;
+        history.push(v);
+        if (history.length > 50) history.shift();   // 上限 50 条
+        histIdx = history.length - 1;
+        updateHistUi();
+      }
+
+      function updateHistUi() {
+        $('btnBack').disabled = histIdx <= 0;
+        $('btnFwd').disabled = histIdx >= history.length - 1;
+      }
+
+      $('btnBack').addEventListener('click', () => {
+        if (histIdx > 0) {
+          histIdx--; navigating = true;
+          applyView(history[histIdx], false);
+          updateHistUi();
+        }
+      });
+      $('btnFwd').addEventListener('click', () => {
+        if (histIdx < history.length - 1) {
+          histIdx++; navigating = true;
+          applyView(history[histIdx], false);
+          updateHistUi();
+        }
+      });
+      $('btnMark').addEventListener('click', () => pushHistory(capture()));
+      $('btnClear').addEventListener('click', () => {
+        history.length = 0; histIdx = -1;
+        pushHistory(capture());
+      });
+
+      // 相机静止 1s 后自动记录（flyTo 完成 / 拖拽结束）：
+      // 引擎无 per-frame 钩子，用读数循环做位置变化检测
+      let lastCamKey = '';
+      let stableSince = 0;
+      function detectIdle(now) {
+        if (navigating) { navigating = false; lastCamKey = ''; return; }
+        const v = capture();
+        const key = `${v.lon.toFixed(6)}|${v.lat.toFixed(6)}|${v.height.toFixed(0)}`;
+        if (key !== lastCamKey) {
+          lastCamKey = key;
+          stableSince = now;
+        } else if (stableSince && now - stableSince > 1000) {
+          stableSince = 0;
+          try { pushHistory(capture()); }
+          catch (err) { console.error('[46] capture failed:', err); }
+        }
+      }
+
+      // ── 书签（localStorage 持久化）─────────────────────────────────
+      const BM_KEY = 'cg-cam-bookmarks';
+      function loadBookmarks() {
+        try {
+          const raw = localStorage.getItem(BM_KEY);
+          const arr = raw ? JSON.parse(raw) : [];
+          return Array.isArray(arr) ? arr : [];
+        } catch (err) {
+          console.error('[46] bookmark load failed:', err);
+          return [];
+        }
+      }
+      function saveBookmarks(list) {
+        try { localStorage.setItem(BM_KEY, JSON.stringify(list)); }
+        catch (err) { DemoUtils.showError('书签保存失败（localStorage 不可用）', err); }
+      }
+
+      let bookmarks = loadBookmarks();
+
+      function renderBookmarks() {
+        const ul = $('bmList');
+        ul.textContent = '';
+        if (!bookmarks.length) {
+          const li = document.createElement('li');
+          li.textContent = '（暂无书签，输入名字后点「保存当前视角」）';
+          li.style.color = '#6f88a8';
+          ul.appendChild(li);
+          return;
+        }
+        bookmarks.forEach((bm, i) => {
+          const li = document.createElement('li');
+          const name = document.createElement('span');
+          name.className = 'bm-name';
+          name.textContent = `${bm.name} — ${describe(bm)}`;
+          name.title = '点击跳转（flyTo）';
+          name.addEventListener('click', () => applyView(bm, true));
+          const del = document.createElement('button');
+          del.className = 'bm-del';
+          del.textContent = '删';
+          del.addEventListener('click', () => {
+            bookmarks.splice(i, 1);
+            saveBookmarks(bookmarks);
+            renderBookmarks();
+          });
+          li.appendChild(name);
+          li.appendChild(del);
+          ul.appendChild(li);
+        });
+      }
+
+      $('btnSave').addEventListener('click', () => {
+        const name = $('bmName').value.trim() || '书签 ' + (bookmarks.length + 1);
+        bookmarks.push({ name, ...capture() });
+        saveBookmarks(bookmarks);
+        $('bmName').value = '';
+        renderBookmarks();
+        DemoUtils.toast('书签已保存：' + name);
+      });
+      $('bmName').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') $('btnSave').click();
+      });
+
+      // ── 初始视角入栈 + 读数循环 ────────────────────────────────────
+      pushHistory(capture());
+      renderBookmarks();
+
+      function tick(now) {
+        try {
+          detectIdle(now);
+          const v = capture();
+          result.textContent =
+            `当前视角: ${describe(v)}\n` +
+            `heading ${MATH.toDegrees(v.heading).toFixed(0)}°  ` +
+            `pitch ${MATH.toDegrees(v.pitch).toFixed(0)}°\n` +
+            `历史: ${history.length} 条（指针 ${histIdx + 1}/${history.length}）  ` +
+            `书签: ${bookmarks.length} 个`;
+        } catch (err) {
+          DemoUtils.showError('读数循环异常，已停止', err);
+          return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [114.3, 30.6, 1_500_000],
+          imagery: 'gaode-sat',
+          title: '46 · 视角历史与书签',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '46 视角历史与书签 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

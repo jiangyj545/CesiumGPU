@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>48 海洋效果 Ocean · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:250px;max-width:340px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>48 海洋效果 Ocean</h1>
+    <p class="desc">DynamicWater 大面积海域应用：南海矩形水域（凸四边形扇形三角化），深海配色 + 大波高。切换"平静/涌浪/风暴"三种海况，观察波光与菲涅尔变化。</p>
+    <div id="controls">
+      <button id="btnShow" class="active">海面 显/隐</button>
+      <button data-sea="calm">平静</button>
+      <button data-sea="swell" class="active">涌浪</button>
+      <button data-sea="storm">风暴</button>
+      <label>波速 <input id="speed" type="range" min="0" max="4" step="0.1" value="1.6" style="width:130px"> <span id="speedVal">1.6x</span></label>
+    </div>
+    <div id="info">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    // 经纬度（度）→ 归一化 ECEF 地表点
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = n * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, n * (1 - E2) * s / A);
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 南海大范围矩形水域（凸四边形，扇形三角化）────────────────────
+      const seaRect = [lonLat(3, 106), lonLat(3, 121), lonLat(24, 121), lonLat(24, 106)];
+      const ocean = new engine.DynamicWater(viewer.context, {
+        positions: seaRect,
+        color: [0.015, 0.10, 0.24, 0.88],      // 深海蓝
+        speed: 1.6, waveScale: 0.5, glint: 1.2,
+        sunDirection: [0.55, 0.35, 0.76],
+        camera: viewer.camera,
+      });
+      viewer.scene.effects.add(ocean);
+
+      // ── 海况预设 ─────────────────────────────────────────────────────
+      const SEA_STATES = {
+        calm:  { label: '平静', speed: 0.5, waveScale: 0.18, glint: 0.7, color: [0.02, 0.16, 0.30, 0.85] },
+        swell: { label: '涌浪', speed: 1.6, waveScale: 0.50, glint: 1.2, color: [0.015, 0.10, 0.24, 0.88] },
+        storm: { label: '风暴', speed: 3.4, waveScale: 1.0,  glint: 1.6, color: [0.05, 0.09, 0.14, 0.94] },
+      };
+      let state = 'swell';
+
+      const btnShow = document.getElementById('btnShow');
+      btnShow.addEventListener('click', () => {
+        ocean.show = !ocean.show;
+        btnShow.classList.toggle('active', ocean.show);
+        refresh();
+      });
+      document.querySelectorAll('button[data-sea]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state = btn.dataset.sea;
+          const s = SEA_STATES[state];
+          ocean.speed = s.speed;
+          ocean.waveScale = s.waveScale;
+          ocean.glint = s.glint;
+          speedEl.value = s.speed;
+          document.getElementById('speedVal').textContent = s.speed.toFixed(1) + 'x';
+          document.querySelectorAll('button[data-sea]').forEach(b => b.classList.toggle('active', b === btn));
+          refresh();
+        });
+      });
+      const speedEl = document.getElementById('speed');
+      speedEl.addEventListener('input', () => {
+        ocean.speed = Number(speedEl.value);
+        document.getElementById('speedVal').textContent = ocean.speed.toFixed(1) + 'x';
+        refresh();
+      });
+
+      function refresh() {
+        const s = SEA_STATES[state];
+        info.textContent =
+          `海域: 南海矩形（106-121°E, 3-24°N）\n` +
+          `海况: ${s.label}   海面: ${ocean.show ? '显示' : '隐藏'}\n` +
+          `波速: ${ocean.speed.toFixed(1)}x   波高: ${ocean.waveScale.toFixed(2)}   高光: ${ocean.glint.toFixed(1)}`;
+      }
+      refresh();
+    }
+
+    DemoUtils.startup({ engine, title: '48 · 海洋效果 Ocean', view: [113.5, 14, 5_200_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

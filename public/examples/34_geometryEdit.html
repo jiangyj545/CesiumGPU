@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 34：几何顶点编辑 GeometryEdit - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:290px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:200px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>34 几何顶点编辑</h1>
+    <p class="desc">EV_GeometryEdit 近似：绘制完成的形状显示黄色顶点 handle；
+      编辑模式下「点击 handle 选中 → 移动鼠标拖拽 → 再点击释放」，顶点经
+      camera.pickGlobe 落到球面后实时改写 entity positions / hierarchy。
+      绘制新形状由 DrawHandler 接管，完成后自动回到编辑模式。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 编辑会话状态 ──────────────────────────────────────────────
+      const session = { shape: null, type: null, handles: [], dragIdx: -1 };
+      const HANDLE_SIZE = 12;
+
+      // 归一化 ECEF → 经纬（度）
+      function toLonLat(p) {
+        return {
+          lon: (Math.atan2(p.y, p.x) * 180) / Math.PI,
+          lat: (Math.atan2(p.z, Math.hypot(p.x, p.y)) * 180) / Math.PI,
+        };
+      }
+      // 世界坐标 → canvas CSS 像素（viewProjection 手工投影）
+      function projectToCssPixel(world) {
+        const vp = scene.camera.viewProjectionMatrix.values;
+        const cw = viewer.canvas.clientWidth || 1;
+        const ch = viewer.canvas.clientHeight || 1;
+        const clipW = vp[3] * world.x + vp[7] * world.y + vp[11] * world.z + vp[15];
+        if (clipW <= 0) return null;
+        const clipX = vp[0] * world.x + vp[4] * world.y + vp[8] * world.z + vp[12];
+        const clipY = vp[1] * world.x + vp[5] * world.y + vp[9] * world.z + vp[13];
+        return [((clipX / clipW) * 0.5 + 0.5) * cw, (0.5 - (clipY / clipW) * 0.5) * ch];
+      }
+      // 屏幕 CSS 像素 → 球面点（NDC + camera.pickGlobe）
+      function pickGlobeFromCss(x, y) {
+        const cw = viewer.canvas.clientWidth || 1;
+        const ch = viewer.canvas.clientHeight || 1;
+        const ndcX = (x / cw) * 2 - 1;
+        const ndcY = 1 - (y / ch) * 2;
+        return viewer.camera.pickGlobe(ndcX, ndcY);
+      }
+
+      function getPositions(entity) {
+        if (entity.polygon) return entity.polygon.hierarchy.positions;
+        if (entity.polyline) return entity.polyline.positions;
+        return [];
+      }
+      function setPositions(entity, positions) {
+        if (entity.polygon) {
+          entity.polygon = { hierarchy: { positions, holes: [] }, height: entity.polygon.height, color: entity.polygon.color };
+        } else if (entity.polyline) {
+          entity.polyline = { positions, width: entity.polyline.width, color: entity.polyline.color };
+        }
+      }
+
+      // ── 顶点 handle 重建 ──────────────────────────────────────────
+      function rebuildHandles() {
+        for (const h of session.handles) scene.entities.remove(h);
+        session.handles = [];
+        if (!session.shape) return;
+        const positions = getPositions(session.shape);
+        positions.forEach((p, i) => {
+          session.handles.push(scene.entities.add(new engine.Entity({
+            name: `handle-${i}`,
+            position: engine.Cartesian3.clone(p),
+            point: {
+              pixelSize: session.dragIdx === i ? HANDLE_SIZE + 5 : HANDLE_SIZE,
+              color: session.dragIdx === i ? engine.Color.RED : engine.Color.YELLOW,
+            },
+          })));
+        });
+      }
+
+      // ── 编辑交互（自写鼠标交互）──────────────────────────────────
+      const handler = viewer.screenSpaceEventHandler;
+      let editEnabled = true;
+      function onMouseMove(pos) {
+        if (!editEnabled || session.dragIdx < 0 || !session.shape) return;
+        const world = pickGlobeFromCss(pos.x, pos.y);
+        if (!world) return;
+        const positions = getPositions(session.shape);
+        if (session.dragIdx >= positions.length) return;
+        positions[session.dragIdx] = world;
+        setPositions(session.shape, positions.slice());
+        session.handles[session.dragIdx].position = engine.Cartesian3.clone(world);
+        refresh();
+      }
+      function onClick(pos) {
+        if (!editEnabled) return;
+        if (session.dragIdx >= 0) { // 释放
+          session.dragIdx = -1;
+          rebuildHandles();
+          refresh('拖拽结束');
+          return;
+        }
+        // 选中最近 handle（屏幕 28px 内）
+        let best = -1, bestDist = 28;
+        session.handles.forEach((h, i) => {
+          const px = projectToCssPixel(h.position);
+          if (!px) return;
+          const d = Math.hypot(px[0] - pos.x, px[1] - pos.y);
+          if (d < bestDist) { bestDist = d; best = i; }
+        });
+        if (best >= 0) {
+          session.dragIdx = best;
+          rebuildHandles();
+          refresh(`已选中顶点 #${best}，移动鼠标拖拽，点击释放`);
+        }
+      }
+      handler.setInputAction(onMouseMove, 'MOUSE_MOVE');
+      handler.setInputAction(onClick, 'LEFT_CLICK');
+
+      function setEditEnabled(v) {
+        editEnabled = v;
+        if (!v && session.dragIdx >= 0) { session.dragIdx = -1; rebuildHandles(); }
+      }
+
+      // ── DrawHandler：绘制新形状后接管为可编辑形状 ─────────────────
+      const draw = new engine.DrawHandler(viewer);
+      draw.drawEnd.addListener(({ positions, entity }) => {
+        session.shape = entity;
+        session.type = entity.polygon ? 'polygon' : 'polyline';
+        session.dragIdx = -1;
+        rebuildHandles();
+        setEditEnabled(true);
+        refresh(`绘制完成：${session.type}，${positions.length} 个顶点（可拖拽编辑）`);
+      });
+
+      function startDraw(type) {
+        setEditEnabled(false); // 释放编辑交互，交给 DrawHandler
+        draw.start(type);
+        refresh(`绘制模式：${type}（左键加点，右键/双击结束）`);
+      }
+
+      // ── 预置五边形（可立即编辑）───────────────────────────────────
+      const pentagon = scene.entities.add(new engine.Entity({
+        name: '预置五边形',
+        polygon: {
+          hierarchy: {
+            positions: [
+              [0, 1], [0.951, 0.309], [0.588, -0.809], [-0.588, -0.809], [-0.951, 0.309],
+            ].map(([u, v]) => engine.Cartesian3.fromDegrees(116.4 + u * 0.6, 39.9 + v * 0.5, 0)),
+          },
+          height: 500 / engine.Camera.EARTH_SCALE,
+          color: new engine.Color(0.3, 0.6, 0.95, 0.45),
+        },
+      }));
+      session.shape = pentagon;
+      session.type = 'polygon';
+      rebuildHandles();
+
+      addBtn('绘制多边形', () => startDraw('polygon'));
+      addBtn('绘制折线', () => startDraw('polyline'));
+      addBtn('编辑模式开 / 关', () => {
+        setEditEnabled(!editEnabled);
+        refresh(editEnabled ? '编辑模式已开启' : '编辑模式已关闭（仅查看）');
+      });
+      addBtn('清除全部形状', () => {
+        if (session.shape) scene.entities.remove(session.shape);
+        for (const h of session.handles) scene.entities.remove(h);
+        session.shape = null; session.handles = []; session.dragIdx = -1; session.type = null;
+        refresh('已清除。点击「绘制多边形 / 折线」新建。');
+      });
+      addBtn('复位视角', () => viewer.camera.flyTo({
+        destination: { lon: 116.4, lat: 39.6, height: 900_000 }, duration: 2,
+      }));
+
+      function refresh(extra) {
+        const n = session.shape ? getPositions(session.shape).length : 0;
+        const dragPos = session.dragIdx >= 0 && session.shape
+          ? toLonLat(getPositions(session.shape)[session.dragIdx]) : null;
+        result.textContent =
+          `当前形状：${session.type || '无'} · 顶点 ${n} 个 · handle ${session.handles.length} 个\n` +
+          `编辑模式：${editEnabled ? '开' : '关'} · 拖拽中：${session.dragIdx >= 0 ? '#' + session.dragIdx : '—'}\n` +
+          (dragPos ? `拖拽点经纬：${dragPos.lon.toFixed(4)}°, ${dragPos.lat.toFixed(4)}°\n` : '') +
+          (extra ? `>> ${extra}` : '操作：点击黄色 handle 选中 → 移动鼠标拖拽 → 点击释放');
+      }
+      refresh('预置五边形已就绪，直接拖拽黄色顶点');
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.4, 39.6, 900_000],
+          imagery: 'gaode-sat',
+          title: '34 · 几何顶点编辑',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '34 几何顶点编辑 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

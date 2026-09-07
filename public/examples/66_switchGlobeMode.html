@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 66：球体模式切换 SwitchGlobeMode - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:300px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>66 球体模式切换 SwitchGlobeMode</h1>
+    <p class="desc">三态切换：实体球面（影像）/ 经纬网格线框（球面隐藏 +
+      骨架线）/ 半透明球。对齐 EV 08_switchGlobeMode 的模式切换语义。</p>
+    <div id="controls">
+      <button id="m-solid" class="active">实体球面</button>
+      <button id="m-wire">网格线框</button>
+      <button id="m-alpha">半透明球</button>
+    </div>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 注：引擎暂无平面（2D）投影，EV 的"球/平切换"以三态近似；
+      平面语义可参考 62 鹰眼图的固定俯视缩略图。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    /** 经纬骨架线（线框模式主体）。 */
+    function buildGraticule(viewer, engine) {
+      const EARTH = 6378137;
+      const lift = 1.0008;
+      const toUnit = (lon, lat) => {
+        const m = engine.Cartesian3.fromDegrees(lon, lat, 0);
+        return new engine.Cartesian3(m.x / EARTH * lift, m.y / EARTH * lift, m.z / EARTH * lift);
+      };
+      const entities = viewer.scene.entities;
+      const made = [];
+      for (let lat = -80; lat <= 80; lat += 15) {
+        const positions = [];
+        for (let lon = -180; lon <= 180; lon += 4) positions.push(toUnit(lon, lat));
+        made.push(entities.add(new engine.Entity({
+          name: `wire-lat-${lat}`,
+          polyline: { positions, width: lat === 0 ? 2.5 : 1, color: new engine.Color(0.35, 0.8, 1, 0.55) },
+        })));
+      }
+      for (let lon = -180; lon < 180; lon += 15) {
+        const positions = [];
+        for (let lat = -90; lat <= 90; lat += 4) positions.push(toUnit(lon, lat));
+        made.push(entities.add(new engine.Entity({
+          name: `wire-lon-${lon}`,
+          polyline: { positions, width: lon === 0 ? 2.5 : 1, color: new engine.Color(0.35, 0.8, 1, 0.55) },
+        })));
+      }
+      return made;
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const layers = viewer.globe.layers;
+      const graticule = buildGraticule(viewer, engine);
+      for (const e of graticule) e.show = false;
+
+      const MODES = {
+        solid: {
+          btn: document.getElementById('m-solid'),
+          apply() {
+            viewer.globe.show = true;
+            for (const l of layers) l.show = true;
+            viewer.canvas.style.opacity = '1';
+            for (const e of graticule) e.show = false;
+          },
+          text: '实体球面：影像贴图全显示',
+        },
+        wire: {
+          btn: document.getElementById('m-wire'),
+          apply() {
+            viewer.globe.show = false;                 // 隐藏球面
+            for (const l of layers) l.show = false;
+            viewer.canvas.style.opacity = '1';
+            for (const e of graticule) e.show = true;  // 15° 经纬骨架
+          },
+          text: '网格线框：球面隐藏，15° 经纬骨架线',
+        },
+        alpha: {
+          btn: document.getElementById('m-alpha'),
+          apply() {
+            viewer.globe.show = true;
+            for (const l of layers) l.show = true;
+            viewer.canvas.style.opacity = '0.35';      // 画布透明近似半透明球
+            for (const e of graticule) e.show = false;
+          },
+          text: '半透明球：画布 35% 不透明度（近似）',
+        },
+      };
+
+      let current = 'solid';
+      for (const key of Object.keys(MODES)) {
+        MODES[key].btn.addEventListener('click', () => {
+          current = key;
+          for (const k of Object.keys(MODES)) MODES[k].btn.classList.toggle('active', k === key);
+          MODES[key].apply();
+          refresh();
+        });
+      }
+
+      function refresh() {
+        result.textContent =
+          `当前模式: ${MODES[current].text}\n` +
+          `切换: 实体球面 / 网格线框 / 半透明球（三态）\n` +
+          `引擎边界: 无平面投影，EV 二三维切换以三态近似`;
+      }
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 32, 17_000_000],
+          imagery: 'gaode-sat',
+          title: '66 · 球体模式切换 SwitchGlobeMode',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '66 球体模式切换 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

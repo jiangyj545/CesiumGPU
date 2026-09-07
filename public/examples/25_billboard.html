@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 25：广告牌 Billboard - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+    .cg-pin{position:absolute;z-index:8000;transform:translate(-50%,-100%);pointer-events:none;
+      display:flex;flex-direction:column;align-items:center;filter:drop-shadow(0 2px 4px rgba(0,0,0,.6));}
+    .cg-pin img{width:28px;height:36px;}
+    .cg-pin span{font:12px/1.4 system-ui,sans-serif;color:#fff;background:rgba(10,20,40,.85);
+      border:1px solid rgba(140,200,255,.5);border-radius:4px;padding:1px 6px;margin-top:2px;white-space:nowrap;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>25 广告牌 Billboard</h1>
+    <p class="desc">地点图标标注。诚实注明：引擎 Entity 暂无图片 billboard，
+      本页用「彩色 point + label」近似图标底座，另以「屏幕空间 HTML 图钉
+      （每帧 viewProjection 投影定位）」演示图片广告牌跟随效果；素材 /data/images/marker.png。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 城市 point+label 广告牌 ───────────────────────────────────
+      const CITIES = [
+        { name: '北京', lon: 116.407, lat: 39.904, size: 26, color: new engine.Color(1, 0.55, 0.1, 0.95) },
+        { name: '上海', lon: 121.474, lat: 31.230, size: 24, color: new engine.Color(0.95, 0.2, 0.3, 0.95) },
+        { name: '广州', lon: 113.264, lat: 23.129, size: 22, color: new engine.Color(0.2, 0.85, 0.5, 0.95) },
+        { name: '成都', lon: 104.066, lat: 30.572, size: 20, color: new engine.Color(0.25, 0.6, 0.95, 0.95) },
+        { name: '乌鲁木齐', lon: 87.617, lat: 43.793, size: 18, color: new engine.Color(0.85, 0.2, 0.9, 0.95) },
+      ];
+      for (const c of CITIES) {
+        scene.entities.add(new engine.Entity({
+          name: c.name,
+          position: engine.Cartesian3.fromDegrees(c.lon, c.lat, 0),
+          point: { pixelSize: c.size, color: c.color },
+          label: { text: c.name, font: 'bold 15px sans-serif', fillColor: engine.Color.WHITE, show: true },
+        }));
+      }
+
+      // 告警点：pixelSize 呼吸脉动（广告牌动效近似）
+      const alert = scene.entities.add(new engine.Entity({
+        name: '告警点·长沙',
+        position: engine.Cartesian3.fromDegrees(112.939, 28.228, 0),
+        point: { pixelSize: 24, color: new engine.Color(1, 0.15, 0.1, 0.95) },
+        label: { text: '告警 · 长沙', font: 'bold 14px sans-serif', fillColor: engine.Color.YELLOW, show: true },
+      }));
+      let tAcc = 0, lastT = performance.now();
+      viewer.preRender = () => {
+        const now = performance.now();
+        tAcc += now - lastT;
+        lastT = now;
+        if (tAcc > 120) { // 降频更新
+          tAcc = 0;
+          const k = 0.5 + 0.5 * Math.sin(now / 240);
+          alert.point = { pixelSize: 16 + k * 18, color: new engine.Color(1, 0.15 + k * 0.2, 0.1, 0.95) };
+        }
+        updatePins();
+      };
+
+      // ── 屏幕空间 HTML 图钉（图片广告牌近似）──────────────────────
+      function makePin(name) {
+        const div = document.createElement('div');
+        div.className = 'cg-pin';
+        div.innerHTML = '<img src="/data/images/marker.png" alt="marker"/><span></span>';
+        div.querySelector('span').textContent = name;
+        document.getElementById('cesiumContainer').appendChild(div);
+        return div;
+      }
+      const pins = [
+        { div: makePin('北京 · 图钉'), world: engine.Cartesian3.fromDegrees(116.407, 39.904, 0) },
+        { div: makePin('上海 · 图钉'), world: engine.Cartesian3.fromDegrees(121.474, 31.230, 0) },
+      ];
+      function updatePins() {
+        const vp = scene.camera.viewProjectionMatrix.values; // column-major
+        const cw = viewer.canvas.clientWidth || 1;
+        const ch = viewer.canvas.clientHeight || 1;
+        for (const pin of pins) {
+          const p = pin.world;
+          const clipW = vp[3] * p.x + vp[7] * p.y + vp[11] * p.z + vp[15];
+          if (clipW <= 0) { pin.div.style.display = 'none'; continue; } // 视锥后方隐藏
+          const clipX = vp[0] * p.x + vp[4] * p.y + vp[8] * p.z + vp[12];
+          const clipY = vp[1] * p.x + vp[5] * p.y + vp[9] * p.z + vp[13];
+          pin.div.style.display = '';
+          pin.div.style.left = ((clipX / clipW) * 0.5 + 0.5) * cw + 'px';
+          pin.div.style.top = (0.5 - (clipY / clipW) * 0.5) * ch + 'px';
+        }
+      }
+
+      addBtn('飞到华北', () => viewer.camera.flyTo({ destination: { lon: 116.4, lat: 38, height: 2_500_000 }, duration: 2 }));
+      addBtn('飞到全国', () => viewer.camera.flyTo({ destination: { lon: 105, lat: 34, height: 8_000_000 }, duration: 2 }));
+
+      result.textContent =
+        `城市广告牌 ${CITIES.length} 个（point+label）\n告警脉动 1 个 · HTML 图钉 ${pins.length} 个（每帧投影跟随）\n` +
+        `素材 marker.png 已加载为屏幕空间图钉\n缩放/旋转视角观察图钉贴地跟随与背面剔除`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110, 34, 6_000_000],
+          imagery: 'gaode-sat',
+          title: '25 · 广告牌 Billboard',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '25 广告牌 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

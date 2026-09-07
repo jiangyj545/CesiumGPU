@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 82：弹簧弹跳物理 BallWiggle - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:240px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>82 弹簧弹跳物理</h1>
+    <p class="desc">迁移自 EV-Globe 12_ballWiggle（ammo 约束关节）。
+      降级实现：5 个小球悬挂在 60 km 高度的锚点上，胡克定律
+      a = -k·(h-h₀) - c·v 欧拉积分，刚度/阻尼逐球递增，对比振荡形态。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const RE = C3.EARTH_RADIUS;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      const lonLatH = (lon, lat, h = 0) => {
+        const p = C3.fromDegrees(lon, lat, h);
+        return new C3(p.x / RE, p.y / RE, p.z / RE);
+      };
+
+      const LAT = 38.8;
+      const BALL_R = 12_000;
+      const ANCHOR_H = 60_000;                    // 弹簧锚点离地 60 km
+
+      // ── 5 个弹簧参数：k 刚度(1/s²)、c 阻尼(1/s) 逐球递增 ────────────────
+      const GROUPS = {
+        underdamped: [                            // 欠阻尼：明显来回振荡
+          { k: 3.0, c: 0.10 }, { k: 4.0, c: 0.18 }, { k: 5.0, c: 0.26 },
+          { k: 6.0, c: 0.34 }, { k: 7.5, c: 0.42 },
+        ],
+        overdamped: [                             // 过阻尼：缓慢回归
+          { k: 3.0, c: 1.6 }, { k: 4.0, c: 2.0 }, { k: 5.0, c: 2.4 },
+          { k: 6.0, c: 2.8 }, { k: 7.5, c: 3.2 },
+        ],
+      };
+      let group = 'underdamped';
+
+      // ── 球体 Primitive 工厂（同 81：单位 UV 球 + modelMatrix 放置）──────
+      function makeBall(color) {
+        const geo = new engine.EllipsoidGeometry({
+          radii: new C3(1, 1, 1), stackPartitions: 20, slicePartitions: 14,
+        }).createGeometry();
+        const n = geo.vertexCount;
+        const verts = new Float32Array(n * 9);
+        for (let i = 0; i < n; i++) {
+          verts.set([
+            geo.positions[i * 3], geo.positions[i * 3 + 1], geo.positions[i * 3 + 2],
+            geo.normals[i * 3], geo.normals[i * 3 + 1], geo.normals[i * 3 + 2],
+            geo.uvs[i * 2], geo.uvs[i * 2 + 1],
+          ], i * 9);
+        }
+        return new engine.Primitive(viewer.context, {
+          vertices: verts, indices: geo.indices, color, translucent: false,
+        });
+      }
+
+      const entities = viewer.scene.entities;
+      const balls = [];
+      for (let i = 0; i < 5; i++) {
+        const lon = 114.6 + i * 0.9;
+        const hue = [[1.0, 0.35, 0.25], [1.0, 0.62, 0.15], [0.95, 0.85, 0.2],
+          [0.35, 0.85, 0.45], [0.3, 0.7, 1.0]][i];
+
+        // 静态锚点 + 吊线
+        entities.add(new engine.Entity({
+          position: lonLatH(lon, LAT, ANCHOR_H),
+          point: { color: engine.Color.CYAN, pixelSize: 7 },
+        }));
+        entities.add(new engine.Entity({
+          polyline: {
+            positions: [lonLatH(lon, LAT, ANCHOR_H), lonLatH(lon, LAT, BALL_R)],
+            width: 1.5,
+            color: new engine.Color(0.4, 0.8, 1.0, 0.5),
+          },
+        }));
+
+        const prim = makeBall(new engine.Color(hue[0], hue[1], hue[2], 1.0));
+        viewer.scene.addPrimitive(prim);
+        balls.push({
+          lon,
+          prim,
+          k: 0, c: 0,                            // 由 applyGroup 填充
+          h: ANCHOR_H,                           // 当前球心高度（米）
+          v: 0,
+        });
+      }
+
+      function placeAt(b) {
+        const m = engine.Matrix4.fromTranslation(lonLatH(b.lon, LAT, b.h),
+          new engine.Matrix4());
+        const s = BALL_R / RE;
+        const v = m.values;
+        v[0] *= s; v[1] *= s; v[2] *= s;
+        v[4] *= s; v[5] *= s; v[6] *= s;
+        v[8] *= s; v[9] *= s; v[10] *= s;
+        b.prim.modelMatrix = m;
+      }
+
+      function applyGroup() {
+        balls.forEach((b, i) => {
+          b.k = GROUPS[group][i].k;
+          b.c = GROUPS[group][i].c;
+          b.h = ANCHOR_H - 30_000;               // 统一初始位移 -30 km
+          b.v = 0;
+        });
+      }
+      function excite() {                         // 重新激发：错相初速度
+        balls.forEach((b, i) => { b.h = ANCHOR_H - 30_000; b.v = 8_000 * (i + 1); });
+      }
+
+      applyGroup();
+      balls.forEach(placeAt);
+
+      // ── 时间步与积分 ──────────────────────────────────────────────────
+      const clock = new engine.Clock({ shouldAnimate: true });
+      let prevT = clock.currentTime;
+      let paused = false;
+
+      viewer.preRender = () => {
+        clock.tick();
+        const dt = Math.min(
+          clock.currentTime.secondsDifference(prevT), 0.05);
+        prevT = clock.currentTime;
+        if (paused || dt <= 0) return;
+        for (const b of balls) {
+          const a = -b.k * (b.h - ANCHOR_H) - b.c * b.v;  // 胡克定律 + 阻尼
+          b.v += a * dt;
+          b.h += b.v * dt;
+          if (b.h < BALL_R) { b.h = BALL_R; b.v = Math.abs(b.v) * 0.4; } // 地面约束
+          placeAt(b);
+        }
+      };
+
+      // ── 交互 ──────────────────────────────────────────────────────────
+      const dampBtn = addBtn('切换过阻尼参数组', () => {
+        group = group === 'underdamped' ? 'overdamped' : 'underdamped';
+        dampBtn.textContent = group === 'underdamped'
+          ? '切换过阻尼参数组' : '切回欠阻尼参数组';
+        dampBtn.classList.toggle('active', group === 'overdamped');
+        applyGroup();
+      });
+      addBtn('重新激发', excite);
+      const pauseBtn = addBtn('暂停', () => {
+        paused = !paused;
+        clock.shouldAnimate = !paused;
+        pauseBtn.textContent = paused ? '继续' : '暂停';
+        pauseBtn.classList.toggle('active', paused);
+      });
+
+      function refresh() {
+        result.textContent =
+          `参数组: ${group === 'underdamped' ? '欠阻尼（振荡衰减）' : '过阻尼（缓慢回归）'}\n` +
+          balls.map((b, i) =>
+            `球${i + 1} k=${b.k.toFixed(1)} c=${b.c.toFixed(2)} ` +
+            `位移=${((b.h - ANCHOR_H) / 1000).toFixed(1).padStart(6)} km ` +
+            `速度=${(b.v / 1000).toFixed(2).padStart(6)} km/s`
+          ).join('\n') +
+          '\n积分: a = -k·(h-h₀) - c·v （每帧 Clock 差分 dt）';
+      }
+      setInterval(refresh, 150);
+
+      viewer.camera.setView({
+        destination: C3.fromDegrees(116.8, 35.2, 1_200_000),
+      });
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.8, 35.2, 1_200_000],
+          imagery: 'gaode-sat',
+          title: '82 · 弹簧弹跳物理',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '82 弹簧弹跳物理 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 71：鼠标坐标拾取 CurrentPosition - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:240px;overflow:auto;}
+    /* 底部实时坐标 HUD */
+    #coordHud{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:9000;
+      padding:6px 14px;background:rgba(8,14,26,.8);border:1px solid rgba(120,180,255,.3);
+      border-radius:6px;font:12px/1.6 Consolas,Monaco,monospace;color:#9fe8ff;white-space:pre;
+      pointer-events:none;display:none;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>71 鼠标坐标拾取</h1>
+    <p class="desc">MOUSE_MOVE 中经 <code>camera.pickGlobe</code>（NDC 射线求交，命中点自动
+      贴合地形）取鼠标下的球面点，换算经纬度；高程用
+      <code>terrainLayer.sampleHeight</code>（本地 8888 湖北地形）实时读取。
+      左键把当前坐标钉进历史列表。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <div id="coordHud"></div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const hud = document.getElementById('coordHud');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 1. 地形层（本地 8888 湖北服务；离线自动降级 0 高椭球）────────
+      let terrainOk = false;
+      try {
+        if (typeof engine.TerrainLayer === 'function') {
+          viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+            url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 14,
+          }));
+          terrainOk = true;
+        }
+      } catch (err) {
+        console.warn('[71] terrain init failed:', err.message);
+      }
+      const sampleHeight = terrainOk
+        ? (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat)
+        : () => 0;
+
+      // ── 2. 归一化 ECEF → 经纬度（引擎面约定：y/z 极半径压缩还原）────
+      const RATIO = 6356752.3142 / 6378137;
+      const EARTH = 6378137;
+      function toLonLat(p) {
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const ux = p.x / mag;
+        const uy = (p.y / mag) / RATIO;
+        const uz = (p.z / mag) / RATIO;
+        return {
+          lon: Math.atan2(uy, ux) * 180 / Math.PI,
+          lat: Math.atan2(uz, Math.hypot(ux, uy)) * 180 / Math.PI,
+          h: (mag - 1) * EARTH, // 大地高（椭球面起算，米）
+        };
+      }
+
+      // ── 3. MOUSE_MOVE → pickGlobe → 坐标 HUD ─────────────────────────
+      let hudOn = true;
+      let history = [];      // 左键钉住的坐标
+      let last = null;       // 当前悬停坐标缓存
+
+      function fmt(v, digits = 6) { return v.toFixed(digits); }
+
+      function renderPanel() {
+        result.textContent =
+          `悬停坐标: ${last
+            ? `${fmt(last.lon)}°E, ${fmt(last.lat)}°N  大地高 ${last.h.toFixed(1)} m  地形 ${last.terrain.toFixed(1)} m`
+            : '(移到地球上)'}\n` +
+          `点击记录 ${history.length} 条:\n` +
+          (history.map((r, i) =>
+            `#${i + 1}  ${fmt(r.lon)}°, ${fmt(r.lat)}°  地形 ${r.terrain.toFixed(1)} m`).join('\n') || '(无)');
+      }
+
+      function pickLonLat(pos) {
+        // 画布 CSS 像素 → NDC（与引擎 pickGlobe 的输入约定一致）
+        const ndcX = (pos.x / viewer.canvas.clientWidth) * 2 - 1;
+        const ndcY = 1 - (pos.y / viewer.canvas.clientHeight) * 2;
+        const hit = viewer.camera.pickGlobe(ndcX, ndcY);
+        if (!hit) return null;
+        const ll = toLonLat(hit);
+        ll.terrain = sampleHeight(ll.lon, ll.lat);
+        ll.hit = hit;
+        return ll;
+      }
+
+      const handler = new engine.ScreenSpaceEventHandler(viewer.canvas);
+      handler.setInputAction((pos) => {
+        const ll = pickLonLat(pos);
+        last = ll;
+        if (hudOn && ll) {
+          hud.style.display = 'block';
+          hud.textContent =
+            `经度 ${fmt(ll.lon)}°  纬度 ${fmt(ll.lat)}°  ` +
+            `高程 ${ll.terrain.toFixed(1)} m  屏幕 ${pos.x | 0},${pos.y | 0}`;
+        } else if (!ll) {
+          hud.style.display = 'none';
+        }
+        renderPanel();
+      }, 'MOUSE_MOVE');
+
+      handler.setInputAction((pos) => {
+        const ll = pickLonLat(pos);
+        if (!ll) return;
+        history.unshift(ll);
+        if (history.length > 8) history.pop();
+        // 在钉住点画一个标记点
+        viewer.scene.entities.add({
+          name: `坐标点#${history.length}`,
+          position: ll.hit,
+          point: { pixelSize: 8, color: new engine.Color(0.4, 0.9, 1.0, 1.0) },
+        });
+        renderPanel();
+      }, 'LEFT_CLICK');
+
+      addBtn('关闭/打开 HUD', () => {
+        hudOn = !hudOn;
+        if (!hudOn) hud.style.display = 'none';
+      });
+      addBtn('清空记录', () => {
+        history = [];
+        viewer.scene.entities.removeAll();
+        renderPanel();
+      });
+      addBtn('定位武汉', () => {
+        viewer.camera.flyTo({ destination: { lon: 114.3, lat: 30.6, height: 120_000 } });
+      });
+
+      renderPanel();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.0, 30.9, 900_000],
+          imagery: 'gaode-sat',
+          title: '71 · 鼠标坐标拾取 CurrentPosition',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '71 鼠标坐标拾取 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

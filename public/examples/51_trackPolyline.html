@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>51 航迹线回放 TrackPolyline · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:350px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>51 航迹线回放 TrackPolyline</h1>
+    <p class="desc">读取 /data/trakline.json 历史航迹（含时间/经纬高/姿态），全轨迹淡显 + 已飞段高亮 + 领航点渐隐尾迹（6 级拖尾光点）。进度推进时逐段重建高亮线（definitionChanged 触发重建）。</p>
+    <div id="controls">
+      <button id="btnPlay" class="active">暂停</button>
+      <button id="btnReset">重置</button>
+      <button id="btnFollow">跟随: 关</button>
+      <label>倍速 <input id="speed" type="range" min="0.5" max="8" step="0.5" value="2" style="width:130px"> <span id="speedVal">2.0x</span></label>
+    </div>
+    <div id="info">加载轨迹数据…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_, hM = 0) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + hM) * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + hM) * s / A);
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 加载历史航迹（[{trackline:[{time,lon,lat,alt,…}]}]）────────────
+      const resp = await fetch('/data/trakline.json');
+      if (!resp.ok) throw new Error(`trakline.json 加载失败: HTTP ${resp.status}`);
+      const data = await resp.json();
+      const raw = (data[0]?.trackline ?? []).map(p => ({
+        time: p.time, lon: p.lon, lat: p.lat, alt: p.alt ?? 100,
+      }));
+      if (raw.length < 2) throw new Error('trakline.json 无有效 trackline 点');
+      const pts = raw.map(p => lonLat(p.lat, p.lon, p.alt));
+
+      // 全轨迹淡显
+      viewer.scene.entities.add({
+        name: '历史航迹',
+        polyline: { positions: pts, width: 2, color: new engine.Color(0.3, 0.7, 1.0, 0.35) },
+      });
+
+      // 弧长表
+      const cum = [0];
+      for (let i = 1; i < pts.length; i++) {
+        cum.push(cum[i - 1] + engine.Cartesian3.distance(pts[i - 1], pts[i]));
+      }
+      const total = cum[cum.length - 1];
+      function pointAt(s) {
+        const target = Math.min(1, Math.max(0, s)) * total;
+        let lo = 0, hi = cum.length - 1;
+        while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= target) lo = mid; else hi = mid; }
+        const f = (target - cum[lo]) / (cum[hi] - cum[lo] || 1);
+        const p0 = pts[lo], p1 = pts[hi];
+        return new engine.Cartesian3(p0.x + (p1.x - p0.x) * f, p0.y + (p1.y - p0.y) * f, p0.z + (p1.z - p0.z) * f);
+      }
+
+      // 已飞高亮线（进度推进 4% 时整体重建一次）
+      let flownEntity = null, flownMark = -1;
+      function rebuildFlown(progress) {
+        const step = Math.floor(progress * 25);
+        if (step === flownMark) return;
+        flownMark = step;
+        if (flownEntity) viewer.scene.entities.remove(flownEntity);
+        const n = Math.max(2, Math.round(progress * (pts.length - 1)) + 1);
+        flownEntity = viewer.scene.entities.add({
+          name: '已飞航迹',
+          polyline: { positions: pts.slice(0, n), width: 4, color: new engine.Color(1.0, 0.55, 0.1, 0.95) },
+        });
+      }
+
+      // 领航点 + 6 级渐隐尾迹（point 即时渲染，逐帧更新）
+      const head = viewer.scene.entities.add({
+        name: '领航点', position: pts[0],
+        point: { color: new engine.Color(1.0, 0.3, 0.2, 1.0), pixelSize: 12 },
+      });
+      const TRAIL = 6;
+      const trail = [];
+      for (let i = 0; i < TRAIL; i++) {
+        const fade = 1 - (i + 1) / (TRAIL + 1);
+        trail.push(viewer.scene.entities.add({
+          name: '尾迹' + i, position: pts[0],
+          point: { color: new engine.Color(1.0, 0.6 - fade * 0.3, 0.15, fade * 0.7), pixelSize: 10 * fade + 2 },
+        }));
+      }
+
+      // ── 回放控制 ─────────────────────────────────────────────────────
+      let playing = true, progress = 0, speed = 2.0, follow = false, last = performance.now();
+      rebuildFlown(0);
+
+      viewer.preRender = () => {
+        const now = performance.now();
+        if (playing) {
+          progress += (now - last) / 1000 * speed * 0.02;   // 默认 ~50s 完整回放
+          if (progress >= 1) { progress = 1; playing = false; syncPlayBtn(); }
+        }
+        last = now;
+
+        const headPos = pointAt(progress);
+        head.position = headPos;
+        for (let i = 0; i < TRAIL; i++) {
+          trail[i].position = pointAt(Math.max(0, progress - (i + 1) * 0.008));
+        }
+        rebuildFlown(progress);
+
+        if (follow) {
+          // 由归一化 ECEF 反算经纬度做视角跟随
+          const r = headPos;
+          const lat = Math.atan2(r.z, Math.hypot(r.x, r.y)) / D2R;
+          const lon = Math.atan2(r.y, r.x) / D2R;
+          viewer.camera.setView({ destination: { longitude: lon, latitude: lat, height: 30_000 } });
+        }
+        refresh(progress);
+      };
+
+      const btnPlay = document.getElementById('btnPlay');
+      function syncPlayBtn() {
+        btnPlay.textContent = playing ? '暂停' : '播放';
+        btnPlay.classList.toggle('active', playing);
+      }
+      btnPlay.addEventListener('click', () => {
+        if (!playing && progress >= 1) progress = 0;
+        playing = !playing;
+        syncPlayBtn();
+      });
+      document.getElementById('btnReset').addEventListener('click', () => {
+        progress = 0; flownMark = -1; rebuildFlown(0); playing = true; syncPlayBtn();
+      });
+      const btnFollow = document.getElementById('btnFollow');
+      btnFollow.addEventListener('click', () => {
+        follow = !follow;
+        btnFollow.textContent = '跟随: ' + (follow ? '开' : '关');
+        btnFollow.classList.toggle('active', follow);
+      });
+      document.getElementById('speed').addEventListener('input', (e) => {
+        speed = Number(e.target.value);
+        document.getElementById('speedVal').textContent = speed.toFixed(1) + 'x';
+      });
+
+      function refresh(p) {
+        const idx = Math.min(raw.length - 1, Math.round(p * (raw.length - 1)));
+        const t = new Date(raw[idx].time);
+        info.textContent =
+          `点数: ${raw.length}   进度: ${(p * 100).toFixed(1)}%\n` +
+          `时间: ${t.toISOString().slice(0, 19).replace('T', ' ')}\n` +
+          `位置: ${raw[idx].lon.toFixed(3)}°E, ${raw[idx].lat.toFixed(3)}°N  高度 ${raw[idx].alt.toFixed(0)}m`;
+      }
+      refresh(0);
+    }
+
+    DemoUtils.startup({ engine, title: '51 · 航迹线回放 TrackPolyline', view: [131.4, 31.6, 320_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

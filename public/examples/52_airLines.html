@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>52 航班弧线 AirLines · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:350px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>52 航班弧线 AirLines</h1>
+    <p class="desc">读取 /data/flights.json（OpenFlights 航线库），取国内机场间航线：球面大圆插值（slerp）+ 正弦高度包络生成贝塞尔弧线，光点沿弧飞行模拟航班。</p>
+    <div id="controls">
+      <button id="btnPlay" class="active">暂停</button>
+      <button id="btnArcs" class="active">弧线显/隐</button>
+      <label>流速 <input id="speed" type="range" min="0.2" max="4" step="0.2" value="1" style="width:130px"> <span id="speedVal">1.0x</span></label>
+    </div>
+    <div id="info">加载航线数据…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_, hM = 0) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + hM) * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + hM) * s / A);
+    }
+    // 球面 slerp（归一化 ECEF，忽略椭球扁率的插值误差对弧线视觉无影响）
+    function slerp(p0, p1, t) {
+      let dot = (p0.x * p1.x + p0.y * p1.y + p0.z * p1.z);
+      dot = Math.min(1, Math.max(-1, dot));
+      const w = Math.acos(dot);
+      if (w < 1e-6) return new engine.Cartesian3(p0.x, p0.y, p0.z);
+      const sw = Math.sin(w);
+      const a = Math.sin((1 - t) * w) / sw, b = Math.sin(t * w) / sw;
+      return new engine.Cartesian3(p0.x * a + p1.x * b, p0.y * a + p1.y * b, p0.z * a + p1.z * b);
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 加载 OpenFlights 数据 ────────────────────────────────────────
+      const resp = await fetch('/data/flights.json');
+      if (!resp.ok) throw new Error(`flights.json 加载失败: HTTP ${resp.status}`);
+      const data = await resp.json();
+      // airports[i] = [name, city, country, lon, lat]；routes[j] = [airlineIdx, srcIdx, dstIdx]
+      const airports = data.airports ?? [];
+      const inChina = (i) => {
+        const ap = airports[i];
+        return ap && ap[3] > 73 && ap[3] < 135 && ap[4] > 18 && ap[4] < 54;
+      };
+      const routes = (data.routes ?? []).filter(r => inChina(r[1]) && inChina(r[2])).slice(0, 70);
+      if (routes.length === 0) throw new Error('flights.json 中无国内航线');
+
+      const AIRLINE_COLORS = [
+        [0.25, 0.85, 1.0], [1.0, 0.62, 0.2], [0.45, 1.0, 0.55], [1.0, 0.4, 0.5],
+        [0.75, 0.55, 1.0], [1.0, 0.95, 0.4], [0.4, 0.75, 1.0],
+      ];
+
+      // ── 弧线：大圆 slerp + 正弦高度包络 ──────────────────────────────
+      const arcs = [];               // { samples, line, plane, speed, phase }
+      const SAMPLES = 48;
+      routes.forEach((r, idx) => {
+        const src = airports[r[1]], dst = airports[r[2]];
+        const p0 = lonLat(src[4], src[3]);
+        const p1 = lonLat(dst[4], dst[3]);
+        const ang = Math.acos(Math.min(1, Math.max(-1,
+          (p0.x * p1.x + p0.y * p1.y + p0.z * p1.z))));
+        const hMax = ang * 0.055 + 0.0015;      // 长航线飞更高（归一化单位）
+
+        const samples = [];
+        for (let s = 0; s <= SAMPLES; s++) {
+          const t = s / SAMPLES;
+          const p = slerp(p0, p1, t);
+          const lift = 1 + Math.sin(Math.PI * t) * hMax;
+          samples.push(new engine.Cartesian3(p.x * lift, p.y * lift, p.z * lift));
+        }
+
+        const color = AIRLINE_COLORS[r[0] % AIRLINE_COLORS.length];
+        const line = viewer.scene.entities.add({
+          name: `${src[0]} → ${dst[0]}`,
+          polyline: { positions: samples, width: 1.5, color: new engine.Color(color[0], color[1], color[2], 0.4) },
+        });
+
+        // 航班光点（沿弧推进）
+        const plane = viewer.scene.entities.add({
+          name: `航班 ${idx}`, position: samples[0],
+          point: { color: new engine.Color(color[0], color[1], color[2], 1.0), pixelSize: 7 },
+        });
+        arcs.push({
+          samples, line, plane,
+          speed: 0.05 + 0.05 * ((idx * 2654435761) % 1000 / 1000),   // 伪随机速度
+          phase: (idx * 40503) % 997 / 997,
+        });
+      });
+
+      // 机场节点（去重，取前 36 个）
+      const seen = new Set();
+      let n = 0;
+      for (const r of routes) {
+        for (const i of [r[1], r[2]]) {
+          if (seen.has(i)) continue;
+          seen.add(i);
+          if (n++ > 36) break;
+          const ap = airports[i];
+          viewer.scene.entities.add({
+            name: ap[0], position: lonLat(ap[4], ap[3], 10_000),
+            point: { color: new engine.Color(1.0, 0.95, 0.7, 0.95), pixelSize: 5 },
+          });
+        }
+      }
+
+      // ── 动画 ─────────────────────────────────────────────────────────
+      let playing = true, speed = 1.0, arcsVisible = true, t = 0, last = performance.now();
+      viewer.preRender = () => {
+        const now = performance.now();
+        if (playing) t += (now - last) / 1000 * speed;
+        last = now;
+        for (const arc of arcs) {
+          const s = (t * arc.speed + arc.phase) % 1;
+          const idx = s * (arc.samples.length - 1);
+          const lo = Math.floor(idx), hi = Math.min(arc.samples.length - 1, lo + 1);
+          const f = idx - lo;
+          const p0 = arc.samples[lo], p1 = arc.samples[hi];
+          arc.plane.position = new engine.Cartesian3(
+            p0.x + (p1.x - p0.x) * f, p0.y + (p1.y - p0.y) * f, p0.z + (p1.z - p0.z) * f);
+        }
+        refresh();
+      };
+
+      const btnPlay = document.getElementById('btnPlay');
+      btnPlay.addEventListener('click', () => {
+        playing = !playing;
+        btnPlay.textContent = playing ? '暂停' : '播放';
+        btnPlay.classList.toggle('active', playing);
+      });
+      const btnArcs = document.getElementById('btnArcs');
+      btnArcs.addEventListener('click', () => {
+        arcsVisible = !arcsVisible;
+        for (const arc of arcs) arc.line.show = arcsVisible;
+        btnArcs.classList.toggle('active', arcsVisible);
+      });
+      document.getElementById('speed').addEventListener('input', (e) => {
+        speed = Number(e.target.value);
+        document.getElementById('speedVal').textContent = speed.toFixed(1) + 'x';
+      });
+
+      let frame = 0;
+      function refresh() {
+        if (frame++ % 20 !== 0) return;   // 节流文本刷新
+        info.textContent =
+          `航线: ${arcs.length} 条（大圆弧 + 高度包络）\n` +
+          `航班光点: ${arcs.length}   播放: ${playing ? '是' : '否'}   流速: ${speed.toFixed(1)}x`;
+      }
+      refresh();
+    }
+
+    DemoUtils.startup({ engine, title: '52 · 航班弧线 AirLines', view: [104, 35.5, 9_500_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

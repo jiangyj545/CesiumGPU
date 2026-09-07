@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>49 流动线 FlowPolyline · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:250px;max-width:340px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>49 流动线 FlowPolyline</h1>
+    <p class="desc">长三角城际"虚线位移动画"语义：静态底线（CatmullRom 平滑）+ 沿弧长循环推进的流动光点（point 实体逐帧更新 position，OverlayPass 即时渲染）。时间驱动 dashOffset 的等价实现。</p>
+    <div id="controls">
+      <button id="btnPlay" class="active">暂停</button>
+      <label>流速 <input id="speed" type="range" min="0.1" max="3" step="0.1" value="1" style="width:130px"> <span id="speedVal">1.0x</span></label>
+      <label>光点数/线 <input id="count" type="range" min="1" max="8" step="1" value="4" style="width:130px"> <span id="countVal">4</span></label>
+    </div>
+    <div id="info">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    // 经纬度（度）→ 归一化 ECEF 地表点
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_, hM = 30_000) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + hM) * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + hM) * s / A);
+    }
+
+    /**
+     * 流动线：底线 polyline + n 个沿弧长循环推进的流动光点。
+     * 返回 { setCount(n), update(t), count }，由 preRender 驱动。
+     */
+    function makeFlowLine(viewer, engine, ctrlLonLat, style) {
+      const ctrl = ctrlLonLat.map(([lat, lon]) => lonLat(lat, lon));
+      // CatmullRom 平滑采样为底线
+      const times = ctrl.map((_, i) => i);
+      const spline = new engine.CatmullRomSpline({ times, points: ctrl });
+      const N = 120;
+      const path = [];
+      for (let i = 0; i <= N; i++) path.push(spline.evaluate((i / N) * times[times.length - 1]));
+
+      // 弧长表（归一化 0-1）
+      const cum = [0];
+      for (let i = 1; i < path.length; i++) {
+        cum.push(cum[i - 1] + engine.Cartesian3.distance(path[i - 1], path[i]));
+      }
+      const total = cum[cum.length - 1];
+      function pointAt(s) {
+        const target = (((s % 1) + 1) % 1) * total;
+        let lo = 0, hi = cum.length - 1;
+        while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= target) lo = mid; else hi = mid; }
+        const segLen = cum[hi] - cum[lo] || 1;
+        const f = (target - cum[lo]) / segLen;
+        const p0 = path[lo], p1 = path[hi];
+        return new engine.Cartesian3(
+          p0.x + (p1.x - p0.x) * f, p0.y + (p1.y - p0.y) * f, p0.z + (p1.z - p0.z) * f);
+      }
+
+      viewer.scene.entities.add({
+        name: style.name,
+        polyline: { positions: path, width: style.width ?? 2, color: new engine.Color(...style.baseColor) },
+      });
+
+      const flows = [];
+      function setCount(n) {
+        while (flows.length > n) viewer.scene.entities.remove(flows.pop());
+        while (flows.length < n) {
+          const i = flows.length;
+          flows.push(viewer.scene.entities.add({
+            name: style.name + '-flow' + i,
+            position: pointAt(0),
+            point: { color: new engine.Color(...style.flowColor), pixelSize: 9 },
+          }));
+        }
+      }
+      let count = 4;
+      setCount(count);
+
+      function update(t) {
+        for (let i = 0; i < flows.length; i++) {
+          const s = (t * (style.speed ?? 0.12) + i / flows.length) % 1;
+          flows[i].position = pointAt(s);
+          flows[i].point.pixelSize = 6 + 4 * Math.sin(Math.PI * s); // 两端小、中段大
+        }
+      }
+      return { setCount: (n) => { count = n; setCount(n); }, update, get count() { return count; } };
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 三条长三角城际流线（控制点 [lat, lon]）────────────────────────
+      const lines = [
+        makeFlowLine(viewer, engine,
+          [[31.23, 121.47], [31.30, 120.58], [31.57, 120.31], [32.06, 118.78], [31.86, 117.28]],
+          { name: '沪—合干线', baseColor: [0.25, 0.45, 0.65, 0.5], flowColor: [0.35, 0.9, 1.0, 1.0], width: 3, speed: 0.12 }),
+        makeFlowLine(viewer, engine,
+          [[31.23, 121.47], [30.75, 120.76], [30.27, 120.15], [29.08, 119.65]],
+          { name: '沪—金线', baseColor: [0.55, 0.35, 0.2, 0.5], flowColor: [1.0, 0.65, 0.2, 1.0], width: 3, speed: 0.16 }),
+        makeFlowLine(viewer, engine,
+          [[32.06, 118.78], [31.33, 118.38], [30.53, 117.05]],
+          { name: '宁—安线', baseColor: [0.25, 0.55, 0.35, 0.5], flowColor: [0.3, 1.0, 0.5, 1.0], width: 3, speed: 0.1 }),
+      ];
+
+      // 城市节点标注
+      [[31.23, 121.47, '上海'], [32.06, 118.78, '南京'], [30.27, 120.15, '杭州'], [31.86, 117.28, '合肥'], [29.08, 119.65, '金华'], [30.53, 117.05, '安庆']]
+        .forEach(([lat, lon, name]) => {
+          viewer.scene.entities.add({
+            name, position: lonLat(lat, lon, 50_000),
+            point: { color: new engine.Color(1.0, 0.95, 0.6, 1.0), pixelSize: 6 },
+            label: { text: name, font: '13px sans-serif', fillColor: new engine.Color(0.9, 0.95, 1.0, 1.0) },
+          });
+        });
+
+      // ── 动画驱动（point 实体 position 即时渲染，逐帧生效）──────────────
+      let playing = true, speed = 1.0, t = 0, last = performance.now();
+      viewer.preRender = () => {
+        const now = performance.now();
+        if (playing) t += (now - last) / 1000 * speed;
+        last = now;
+        for (const line of lines) line.update(t);
+      };
+
+      const btnPlay = document.getElementById('btnPlay');
+      btnPlay.addEventListener('click', () => {
+        playing = !playing;
+        btnPlay.textContent = playing ? '暂停' : '播放';
+        btnPlay.classList.toggle('active', playing);
+        refresh();
+      });
+      document.getElementById('speed').addEventListener('input', (e) => {
+        speed = Number(e.target.value);
+        document.getElementById('speedVal').textContent = speed.toFixed(1) + 'x';
+        refresh();
+      });
+      document.getElementById('count').addEventListener('input', (e) => {
+        const n = Number(e.target.value);
+        for (const line of lines) line.setCount(n);
+        document.getElementById('countVal').textContent = String(n);
+        refresh();
+      });
+
+      function refresh() {
+        info.textContent =
+          `流线: ${lines.length} 条   播放: ${playing ? '是' : '否'}   流速: ${speed.toFixed(1)}x\n` +
+          `流动光点: ${lines.reduce((s, l) => s + l.count, 0)} 个（即时渲染动画）`;
+      }
+      refresh();
+    }
+
+    DemoUtils.startup({ engine, title: '49 · 流动线 FlowPolyline', view: [119.8, 30.9, 1_400_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

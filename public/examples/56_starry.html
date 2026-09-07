@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>56 星空 Starry · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:350px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>56 星空 Starry</h1>
+    <p class="desc">程序生成星空（无外部贴图）：半径 0.85R 天球上均匀散布 320 星 + 银河带 260 星（倾斜大圆高斯散布）+ 20 亮星，北斗七星连线和 30 颗闪烁星。point 实体即时渲染驱动闪烁。</p>
+    <div id="controls">
+      <button id="btnGround">地表仰望</button>
+      <button id="btnSpace" class="active">太空环视</button>
+      <button id="btnTwinkle" class="active">闪烁: 开</button>
+    </div>
+    <div id="info">初始化…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    // 天球方向点（归一化 ECEF，半径 r < 1）
+    function skyDir(azDeg, altDeg, r = 0.85) {
+      const az = azDeg * D2R, alt = altDeg * D2R;
+      const v = new engine.Cartesian3(
+        Math.cos(alt) * Math.sin(az),
+        Math.cos(alt) * Math.cos(az),
+        Math.sin(alt));
+      return new engine.Cartesian3(v.x * r, v.y * r, v.z * r);
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // 确定性伪随机
+      let seed = 20260907;
+      const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+
+      const SKY_R = 0.85;
+      const twinkleStars = [];      // 参与闪烁的星
+
+      // ── 均匀星空 320 颗（全向球面均匀）────────────────────────────────
+      for (let i = 0; i < 320; i++) {
+        const az = rand() * 360;
+        const alt = Math.asin(rand() * 2 - 1) / D2R;    // 均匀球面
+        const mag = rand();
+        const e = viewer.scene.entities.add({
+          name: 'star' + i, position: skyDir(az, alt, SKY_R),
+          point: {
+            color: new engine.Color(0.85 + mag * 0.15, 0.85 + mag * 0.1, 0.9, 0.5 + mag * 0.5),
+            pixelSize: 1 + Math.round(mag * 1.6),
+          },
+        });
+        if (i % 10 === 0) twinkleStars.push({ e, base: e.point.pixelSize, ph: rand() * 6.28 });
+      }
+
+      // ── 银河带 260 颗（倾斜 62° 大圆，高斯带宽 ±7°）──────────────────
+      const BAND_AZ = 130, BAND_TILT = 62;
+      for (let i = 0; i < 260; i++) {
+        const along = rand() * 360;
+        const gauss = (rand() + rand() + rand() - 1.5) / 1.5;      // 近似高斯 [-1,1]
+        const alt = Math.max(-88, Math.min(88,
+          BAND_TILT * Math.sin((along + BAND_AZ) * D2R) + gauss * 7));
+        const az = along + BAND_AZ * Math.cos(along * D2R) * 0.3;
+        const mag = rand() * 0.8;
+        viewer.scene.entities.add({
+          name: 'mw' + i, position: skyDir(az, alt, SKY_R),
+          point: {
+            color: new engine.Color(0.75 + mag * 0.2, 0.78 + mag * 0.15, 0.9, 0.28 + mag * 0.4),
+            pixelSize: 1 + Math.round(mag * 1.2),
+          },
+        });
+      }
+
+      // ── 亮星 20 颗 ───────────────────────────────────────────────────
+      const brightColors = [
+        [1.0, 0.95, 0.85], [0.85, 0.9, 1.0], [1.0, 0.85, 0.7], [0.9, 1.0, 0.95],
+      ];
+      for (let i = 0; i < 20; i++) {
+        const az = rand() * 360;
+        const alt = rand() * 160 - 80;
+        const c = brightColors[i % brightColors.length];
+        const e = viewer.scene.entities.add({
+          name: 'bright' + i, position: skyDir(az, alt, SKY_R),
+          point: { color: new engine.Color(c[0], c[1], c[2], 1.0), pixelSize: 3 + Math.round(rand() * 2) },
+        });
+        twinkleStars.push({ e, base: e.point.pixelSize, ph: rand() * 6.28 });
+      }
+
+      // ── 北斗七星（天球固定方位，放在北天高仰角便于查看）──────────────
+      const dipper = [
+        [10, 48], [28, 52], [46, 54], [63, 53], [81, 49], [92, 55], [104, 60],
+      ];
+      const dStarIdx = [];
+      dipper.forEach(([az, alt], i) => {
+        viewer.scene.entities.add({
+          name: '北斗' + (i + 1), position: skyDir(az, alt, SKY_R),
+          point: { color: new engine.Color(1.0, 0.98, 0.85, 1.0), pixelSize: 5 },
+        });
+        dStarIdx.push(skyDir(az, alt, SKY_R));
+      });
+      for (let i = 0; i < dStarIdx.length - 1; i++) {
+        viewer.scene.entities.add({
+          name: '北斗连线' + i,
+          polyline: {
+            positions: [dStarIdx[i], dStarIdx[i + 1]],
+            width: 1.5,
+            color: new engine.Color(0.7, 0.85, 1.0, 0.55),
+          },
+        });
+      }
+
+      // ── 闪烁动画（即时渲染逐帧改 pixelSize）──────────────────────────
+      let twinkle = true, t = 0, last = performance.now();
+      viewer.preRender = () => {
+        const now = performance.now();
+        t += (now - last) / 1000;
+        last = now;
+        if (!twinkle) return;
+        for (const s of twinkleStars) {
+          s.e.point.pixelSize = Math.max(1, s.base * (0.75 + 0.35 * Math.sin(t * 2.4 + s.ph)));
+        }
+      };
+
+      // ── 视角 ─────────────────────────────────────────────────────────
+      const btnGround = document.getElementById('btnGround');
+      const btnSpace = document.getElementById('btnSpace');
+      function setActive(which) {
+        btnGround.classList.toggle('active', which === 'g');
+        btnSpace.classList.toggle('active', which === 's');
+      }
+      btnGround.addEventListener('click', () => {
+        viewer.camera.setView({
+          destination: { longitude: 116.4, latitude: 39.9, height: 400 },
+          orientation: { heading: 0, pitch: 0.6, roll: 0 },   // 仰视 34°
+        });
+        setActive('g');
+      });
+      btnSpace.addEventListener('click', () => {
+        viewer.camera.setView({ destination: { longitude: 110, latitude: 20, height: 26_000_000 } });
+        setActive('s');
+      });
+
+      const btnTwinkle = document.getElementById('btnTwinkle');
+      btnTwinkle.addEventListener('click', () => {
+        twinkle = !twinkle;
+        btnTwinkle.textContent = '闪烁: ' + (twinkle ? '开' : '关');
+        btnTwinkle.classList.toggle('active', twinkle);
+        refresh();
+      });
+
+      function refresh() {
+        info.textContent =
+          `星点: 320 均匀 + 260 银河 + 20 亮星 + 北斗 7 星\n` +
+          `闪烁: ${twinkle ? '开' : '关'}（30 颗参与）   底图: 关（纯星空）`;
+      }
+      refresh();
+    }
+
+    DemoUtils.startup({ engine, title: '56 · 星空 Starry', view: [110, 20, 26_000_000], imagery: 'none' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

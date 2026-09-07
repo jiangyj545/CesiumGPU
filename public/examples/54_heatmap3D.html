@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>54 3D 热力柱 Heatmap3D · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:350px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>54 3D 热力柱 Heatmap3D</h1>
+    <p class="desc">EV_Heatmap3D 语义：热力点按权重拉伸为贴地方柱（polygon height 挤出），颜色蓝→红映射热度。数据 /data/gis_point.json 抽稀采样。</p>
+    <div id="controls">
+      <button id="btnShow" class="active">热力柱 显/隐</button>
+      <button data-h="low">低柱</button>
+      <button data-h="high" class="active">高柱</button>
+    </div>
+    <div id="info">加载点数据…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_, hM = 0) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + hM) * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + hM) * s / A);
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 加载并抽稀 POI 点 ────────────────────────────────────────────
+      const resp = await fetch('/data/gis_point.json');
+      if (!resp.ok) throw new Error(`gis_point.json 加载失败: HTTP ${resp.status}`);
+      const geo = await resp.json();
+      const raw = (geo.geometries ?? [])
+        .filter(g => g.type === 'Point')
+        .map(g => ({ lon: g.coordinates[0], lat: g.coordinates[1] }));
+      if (raw.length === 0) throw new Error('gis_point.json 无 Point 几何');
+      const STEP = Math.max(1, Math.ceil(raw.length / 300));   // 抽稀到 ~300 柱
+      const sampled = raw.filter((_, i) => i % STEP === 0);
+
+      function weight(lon, lat) {
+        const h = Math.abs(Math.sin(lon * 12.9898 + lat * 78.233) * 43758.5453) % 1;
+        const cores = [[121.47, 31.23], [120.15, 30.27], [114.06, 22.55], [113.26, 23.13]];
+        let boost = 0;
+        for (const [clon, clat] of cores) {
+          const d = Math.hypot(lon - clon, (lat - clat) * 0.8);
+          boost = Math.max(boost, Math.max(0, 1 - d / 6));
+        }
+        return Math.min(1, 0.2 + h * 0.4 + boost * 0.6);
+      }
+
+      // 蓝(低) → 青 → 黄 → 红(高) 权重配色
+      function heatColor(w) {
+        const stops = [
+          [0.0, [0.1, 0.2, 0.9]], [0.35, [0.1, 0.8, 0.85]],
+          [0.65, [0.95, 0.85, 0.15]], [1.0, [0.95, 0.15, 0.1]],
+        ];
+        let lo = stops[0], hi = stops[stops.length - 1];
+        for (let i = 0; i < stops.length - 1; i++) {
+          if (w >= stops[i][0] && w <= stops[i + 1][0]) { lo = stops[i]; hi = stops[i + 1]; break; }
+        }
+        const f = (w - lo[0]) / (hi[0] - lo[0] || 1);
+        return new engine.Color(
+          lo[1][0] + (hi[1][0] - lo[1][0]) * f,
+          lo[1][1] + (hi[1][1] - lo[1][1]) * f,
+          lo[1][2] + (hi[1][2] - lo[1][2]) * f,
+          0.72);
+      }
+
+      // ── 方柱：每点一个 4 角 polygon，height 按权重挤出（归一化单位）─────
+      const HEIGHT_MODES = { low: 0.006, high: 0.015 };   // 0.006 ≈ 38 km, 0.015 ≈ 96 km
+      let mode = 'high';
+      let group = [];
+
+      function build() {
+        viewer.scene.entities.removeAll();
+        group = [];
+        const maxH = HEIGHT_MODES[mode];
+        for (const p of sampled) {
+          const w = weight(p.lon, p.lat);
+          const d = (0.15 + 0.5 * w) / 111.32;    // 柱半径 0.15°-0.65°（越热越粗）
+          const ring = [
+            lonLat(p.lat - d, p.lon - d), lonLat(p.lat - d, p.lon + d),
+            lonLat(p.lat + d, p.lon + d), lonLat(p.lat + d, p.lon - d),
+          ];
+          group.push(viewer.scene.entities.add({
+            name: `热力柱 w=${w.toFixed(2)}`,
+            polygon: { hierarchy: { positions: ring }, height: maxH * (0.15 + 0.85 * w), color: heatColor(w) },
+          }));
+        }
+      }
+      build();
+
+      // ── 控件 ─────────────────────────────────────────────────────────
+      const btnShow = document.getElementById('btnShow');
+      btnShow.addEventListener('click', () => {
+        const visible = group[0]?.show ?? true;
+        for (const e of group) e.show = !visible;
+        btnShow.classList.toggle('active', !visible);
+        refresh(!visible);
+      });
+      document.querySelectorAll('button[data-h]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          mode = btn.dataset.h;
+          document.querySelectorAll('button[data-h]').forEach(b => b.classList.toggle('active', b === btn));
+          build();
+          btnShow.classList.add('active');
+          refresh(true);
+        });
+      });
+
+      function refresh(visible = true) {
+        info.textContent =
+          `热力柱: ${group.length} 根   模式: ${mode === 'low' ? '低柱' : '高柱'}\n` +
+          `显示: ${visible ? '是' : '否'}   高度上限: ≈${Math.round(HEIGHT_MODES[mode] * 6378)} km\n` +
+          `数据: gis_point.json 抽稀 ${STEP} 取 1`;
+      }
+      refresh(true);
+    }
+
+    DemoUtils.startup({ engine, title: '54 · 3D 热力柱 Heatmap3D', view: [113.5, 28, 7_500_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

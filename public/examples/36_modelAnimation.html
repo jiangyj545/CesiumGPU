@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>模型动画 · CesiumGPU 示例</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:420px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,150,.5);border:1px solid rgba(90,160,255,.4);border-radius:6px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:flex;align-items:center;gap:8px;margin:4px 0;color:#9db4d0;}
+    .cg-panel input[type=range]{flex:1;accent-color:#4a9eff;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>36 · glTF 模型动画（近似实现）</h1>
+    <div class="desc">
+      对齐 EV-Globe 06_modelAnimation。<b>近似说明</b>：引擎 Model 暂未暴露
+      activeAnimations（glTF 骨骼/关键帧剪辑，原示例用 CesiumMan walk 剪辑演示），
+      本页改用「模型矩阵沿 CatmullRomSpline 航线动画」演示同样的
+      播放 / 暂停 / 剪辑切换 / 循环 / 变速语义；CesiumMan 以静立姿态摆放作参照。
+    </div>
+    <div id="controls"></div>
+    <label>速度 ×<input id="speedRange" type="range" min="0.2" max="3" step="0.1" value="1"></label>
+    <div id="result">加载中…</div>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const ES = engine.Camera.EARTH_SCALE;
+
+    function placeMatrix(lon, lat, hMeters, headingDeg) {
+      const ecef = engine.Cartesian3.fromDegrees(lon, lat, hMeters);
+      const enu  = engine.Transforms.eastNorthUpToFixedFrame(ecef);
+      const rot  = engine.Matrix4.fromRotationZ(engine.CesiumMath.toRadians(headingDeg));
+      const yUp  = engine.Matrix4.fromRotationX(Math.PI / 2);
+      return engine.Matrix4.multiply(enu, engine.Matrix4.multiply(rot, yUp, new engine.Matrix4()),
+                                     new engine.Matrix4());
+    }
+
+    /** 归一化 ECEF → 经纬高（度 / 米），用于反算航向角 */
+    function toLonLatHeight(p) {
+      const mag = engine.Cartesian3.magnitude(p);
+      return {
+        lon: engine.CesiumMath.toDegrees(Math.atan2(p.y, p.x)),
+        lat: engine.CesiumMath.toDegrees(Math.asin(p.z / mag)),
+        h:   (mag - 1) * ES,
+      };
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const speedR = document.getElementById('speedRange');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.addEventListener('click', () => onClick(b));
+        controls.appendChild(b);
+        return b;
+      }
+
+      // ── 场景：北京南郊机场空地 ──────────────────────────────────────
+      const CENTER = { lon: 116.39, lat: 39.86 };
+      const rel = (dxM, dyM) => ({
+        lon: CENTER.lon + dxM / 111_320 / Math.cos(CENTER.lat * Math.PI / 180),
+        lat: CENTER.lat + dyM / 110_540,
+      });
+
+      // 地面参照：静立的 CesiumMan 与奶罐卡车（骨骼动画需 activeAnimations，暂缺）
+      const c0 = rel(0, -700);
+      await engine.Model.fromGltfAsync({
+        url: '/data/model/CesiumMan/Cesium_Man.glb', scene: viewer.scene,
+        modelMatrix: placeMatrix(c0.lon, c0.lat, 0, 0), scale: 12 / ES,
+      });
+      const t0 = rel(-60, -760);
+      await engine.Model.fromGltfAsync({
+        url: '/data/model/CesiumMilkTruck/CesiumMilkTruck.glb', scene: viewer.scene,
+        modelMatrix: placeMatrix(t0.lon, t0.lat, 0, 35), scale: 20 / ES,
+      });
+
+      // ── 两条"动画剪辑"：环形航线 / 8 字航线（CatmullRom 样条）────────
+      function ringPoints(rM, hM) {
+        const pts = [], times = [];
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2;
+          const p = rel(Math.sin(a) * rM, Math.cos(a) * rM);
+          pts.push(engine.Cartesian3.fromDegrees(p.lon, p.lat, hM));
+          times.push(i);
+        }
+        return { points: pts, times };
+      }
+      function figure8Points(rM, hM) {
+        const pts = [], times = [];
+        for (let i = 0; i <= 12; i++) {
+          const u = (i / 12) * Math.PI * 2;
+          const p = rel(Math.sin(u * 2) * rM, (Math.cos(u) - 0.35) * rM);
+          pts.push(engine.Cartesian3.fromDegrees(p.lon, p.lat, hM));
+          times.push(i * 1.5);
+        }
+        return { points: pts, times };
+      }
+      const CLIPS = {
+        '环形航线': new engine.CatmullRomSpline(ringPoints(500, 250)),
+        '8 字航线': new engine.CatmullRomSpline(figure8Points(600, 300)),
+      };
+      // 周期必须与样条时间域一致（环形 times 0..7，8 字 times 0..18），
+      // 否则 evaluate(t) 越界
+      const CLIP_PERIOD = { '环形航线': 7, '8 字航线': 18 };
+      let clipName = '环形航线';
+      let clip = CLIPS[clipName];
+
+      const plane = await engine.Model.fromGltfAsync({
+        url: '/data/model/CesiumAir/Cesium_Air.glb', scene: viewer.scene,
+        modelMatrix: placeMatrix(CENTER.lon, CENTER.lat, 250, 0), scale: 50 / ES,
+      });
+
+      // ── 播放控制（对应 EV 的 activeAnimations add/remove + loop）───
+      let playing = true, loop = true, t = 0, lastNow = performance.now();
+
+      function step(now) {
+        const dt = (now - lastNow) / 1000;
+        lastNow = now;
+        const period = CLIP_PERIOD[clipName];
+        if (playing) {
+          t += dt * Number(speedR.value);
+          if (t >= period) t = loop ? t % period : period;
+        }
+        // 位置 + 朝向：由样条切线方向反算 heading
+        const pos  = clip.evaluate(t);
+        const ahead = clip.evaluate(Math.min(t + 0.05, period));
+        const a = toLonLatHeight(pos), b = toLonLatHeight(ahead);
+        const dLon = (b.lon - a.lon) * Math.cos(a.lat * Math.PI / 180);
+        const dLat = b.lat - a.lat;
+        const heading = Math.atan2(dLon, dLat) * 180 / Math.PI;
+
+        plane.modelMatrix = placeMatrix(a.lon, a.lat, a.h, heading);
+        plane.applyModelMatrix();
+
+        result.textContent =
+          `剪辑: ${clipName}   状态: ${playing ? '播放中' : '已暂停'}   循环: ${loop ? 'REPEAT' : 'ONCE'}\n` +
+          `进度: ${(t / period * 100).toFixed(1)}%   速度: ×${Number(speedR.value).toFixed(1)}\n` +
+          `飞机位置: ${a.lon.toFixed(5)}°E, ${a.lat.toFixed(5)}°N, ${a.h.toFixed(0)} m   航向: ${((heading % 360) + 360) % 360 | 0}°`;
+        requestAnimationFrame(step);
+      }
+
+      const playBtn = addBtn('暂停', () => {
+        playing = !playing;
+        playBtn.textContent = playing ? '暂停' : '播放';
+        playBtn.classList.toggle('active', playing);
+      });
+      playBtn.classList.add('active');
+
+      for (const name of Object.keys(CLIPS)) {
+        const btn = addBtn(name, () => {
+          clipName = name; clip = CLIPS[name]; t = 0;   // 切换剪辑并回到起点
+          controls.querySelectorAll('[data-clip]').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+        });
+        btn.setAttribute('data-clip', '');
+        if (name === clipName) btn.classList.add('active');
+      }
+
+      const loopBtn = addBtn('循环: 开', () => {
+        loop = !loop;
+        loopBtn.textContent = `循环: ${loop ? '开' : '关'}`;
+        loopBtn.classList.toggle('active', loop);
+      });
+      loopBtn.classList.add('active');
+
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.008, 2800),
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-30) },
+      });
+      requestAnimationFrame(step);
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.39, 39.852, 2800],
+          imagery: 'gaode-sat',
+          title: '36 · 模型动画（近似）',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '36 模型动画 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

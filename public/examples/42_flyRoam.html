@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 42：路径漫游（进度控制） - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);font:13px/1.6 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9fd0ff;}
+    .cg-panel .desc{font-size:12px;color:#8fa8c8;margin:0 0 10px;}
+    .cg-panel button{margin:4px 6px 4px 0;padding:5px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#dbeaff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel button.active{background:rgba(80,160,90,.7);border-color:rgba(140,255,160,.5);}
+    .cg-panel input[type=range]{width:100%;accent-color:#5aa2e8;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>42 路径漫游（进度控制）</h1>
+    <p class="desc">CatmullRomSpline 平滑航线 + engine.Clock 推进相机沿湖北低空航线巡航。
+      相比 07_flyRoute 增加暂停 / 倍速 / 进度条拖动定位。</p>
+
+    <div>
+      <button id="btnPlay" class="active">暂停</button>
+      <button class="spd" data-s="0.5">0.5x</button>
+      <button class="spd active" data-s="1">1x</button>
+      <button class="spd" data-s="2">2x</button>
+      <button class="spd" data-s="4">4x</button>
+    </div>
+
+    <label style="display:block;font-size:12px;margin:8px 0 2px;color:#b8d0ee;">
+      进度 <span id="vProg">0.0</span> / 60 s</label>
+    <input type="range" id="progress" min="0" max="60" step="0.1" value="0" />
+
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const result = document.getElementById('result');
+
+      // ── 地形层（湖北 quantized-mesh）────────────────────────────────
+      try {
+        viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          maximumLevel: 14,
+        }));
+      } catch (err) {
+        console.error('[42] terrain init failed:', err);
+        result.textContent = '地形服务不可用，0 高椭球模式：' + err.message;
+      }
+
+      // 米制 ECEF ↔ 归一化（引擎内部地球半径 = 1）
+      const S = 1 / 6378137;
+      const toUnit = (m) => new C3(m.x * S, m.y * S, m.z * S);
+
+      // ── 湖北低空闭合航线（4 个航点，首尾重复实现闭合环）─────────────
+      const WAYPOINTS = [
+        { name: '宜昌',   lon: 111.286, lat: 30.692, alt: 4500 },
+        { name: '荆门',   lon: 112.199, lat: 31.035, alt: 5500 },
+        { name: '孝感',   lon: 113.917, lat: 31.924, alt: 4000 },
+        { name: '咸宁',   lon: 114.322, lat: 30.882, alt: 5000 },
+      ];
+      const SEG_SEC = 15;                          // 每段 15 秒
+      const closed = [...WAYPOINTS, WAYPOINTS[0]]; // 闭合环：末点回到起点
+      const times = closed.map((_, i) => i * SEG_SEC);
+      const points = closed.map((c) => toUnit(C3.fromDegrees(c.lon, c.lat, c.alt)));
+      const TOTAL = times[times.length - 1];       // 60 s
+
+      const spline = new engine.CatmullRomSpline({ times, points });
+
+      // ── 航线可视化：折线 + 航点 ─────────────────────────────────────
+      const pathPts = [];
+      for (let i = 0; i <= 240; i++) pathPts.push(spline.evaluate((i / 240) * TOTAL));
+      viewer.scene.entities.add({
+        name: 'roam-path',
+        polyline: { positions: pathPts, width: 2, color: new engine.Color(0.3, 0.8, 1.0, 0.9) },
+      });
+      WAYPOINTS.forEach((c) => {
+        viewer.scene.entities.add({
+          name: 'wp-' + c.name,
+          position: toUnit(C3.fromDegrees(c.lon, c.lat, c.alt)),
+          point: { color: new engine.Color(1.0, 0.8, 0.2, 1.0), pixelSize: 8 },
+          label: { text: c.name, fillColor: new engine.Color(1, 1, 1, 1) },
+        });
+      });
+
+      // ── 航向角：路径切线在局部 ENU 上的方位角（与 07_flyRoute 同款）──
+      function headingAt(t) {
+        const p = spline.evaluate(t);
+        const q = spline.evaluate(Math.min(t + 0.5, TOTAL));
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const ux = p.x / mag, uy = p.y / mag, uz = p.z / mag;
+        let ex = -uy, ey = ux, ez = 0;              // east = normalize(ẑ × up)
+        const em = Math.hypot(ex, ey);
+        if (em > 1e-9) { ex /= em; ey /= em; }
+        const nx = uz * ey - uy * ez;               // north = up × east
+        const ny = ux * ez - uz * ex;
+        const nz = ux * ey - uy * ex;
+        const dx = q.x - p.x, dy = q.y - p.y, dz = q.z - p.z;
+        return Math.atan2(dx * ex + dy * ey + dz * ez, dx * nx + dy * ny + dz * nz);
+      }
+
+      // ── Clock 驱动：tick 推进 currentTime，秒差换算航线时间 ─────────
+      const clock = new engine.Clock({
+        shouldAnimate: true,
+        multiplier: 1,                              // 倍速由 multiplier 控制
+      });
+      const t0 = engine.JulianDate.now();           // 时间原点
+      let tOffset = 0;                              // 进度条 seek 的补偿量
+
+      const state = { playing: true };
+      const $ = (id) => document.getElementById(id);
+
+      $('btnPlay').addEventListener('click', () => {
+        state.playing = !state.playing;
+        clock.shouldAnimate = state.playing;        // 暂停 = 停止推进 currentTime
+        $('btnPlay').textContent = state.playing ? '暂停' : '播放';
+        $('btnPlay').classList.toggle('active', state.playing);
+      });
+      document.querySelectorAll('.spd').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          clock.multiplier = parseFloat(btn.dataset.s);
+          document.querySelectorAll('.spd').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+        });
+      });
+      // 进度条拖动：用补偿量把航线时间跳到目标进度
+      $('progress').addEventListener('input', (e) => {
+        tOffset += parseFloat(e.target.value) - currentT();
+      });
+
+      function currentT() {
+        // currentTime 相对原点的秒差（速率由 multiplier 决定）+ seek 补偿
+        let t = clock.currentTime.secondsDifference(t0) + tOffset;
+        return ((t % TOTAL) + TOTAL) % TOTAL;       // 循环归一化
+      }
+
+      function applyCamera(t) {
+        const p = spline.evaluate(t);
+        viewer.camera.setView({
+          destination: new C3(p.x / S, p.y / S, p.z / S), // 归一化 → 米制 ECEF
+          orientation: { heading: headingAt(t), pitch: engine.CesiumMath.toRadians(-35) },
+        });
+      }
+
+      // ── 主循环：preRender 每帧 tick + 推进 ─────────────────────────
+      const segName = (t) => {
+        const i = Math.min(Math.floor(t / SEG_SEC), WAYPOINTS.length - 1);
+        const j = (i + 1) % WAYPOINTS.length;
+        return WAYPOINTS[i].name + ' → ' + WAYPOINTS[j].name;
+      };
+
+      viewer.preRender = () => {
+        try {
+          clock.tick();                             // Clock 推进仿真时间
+          const t = currentT();
+          applyCamera(t);
+          $('progress').value = t.toFixed(1);
+          $('vProg').textContent = t.toFixed(1);
+          const p = spline.evaluate(t);
+          const altM = (C3.magnitude(p) - 1) * 6378137;
+          result.textContent =
+            `航段: ${segName(t)}\n` +
+            `高度: ${(altM / 1000).toFixed(1)} km   倍速: ${clock.multiplier}x\n` +
+            `状态: ${state.playing ? '巡航中' : '已暂停（进度条可拖动定位）'}`;
+        } catch (err) {
+          state.playing = false;
+          clock.shouldAnimate = false;
+          viewer.preRender = null;
+          DemoUtils.showError('漫游循环异常，已停止', err);
+        }
+      };
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.5, 31.2, 200_000],
+          imagery: 'gaode-sat',
+          title: '42 · 路径漫游（进度控制）',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '42 路径漫游 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

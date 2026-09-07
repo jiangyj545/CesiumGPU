@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>58 城市光柱 WeiboLight · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:350px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>58 城市光柱 WeiboLight</h1>
+    <p class="desc">"微博之光"语义：12 个主要城市的光柱（DynamicWall 小闭环墙段，流光自底向上涌动）+ 顶部呼吸光点。支持逐城点亮序列动画。</p>
+    <div id="controls">
+      <button id="btnAll" class="active">全部 显/隐</button>
+      <button id="btnSequence">逐城点亮</button>
+      <label>流光速度 <input id="speed" type="range" min="0.1" max="2" step="0.1" value="0.5" style="width:130px"> <span id="speedVal">0.5x</span></label>
+    </div>
+    <div id="info">初始化…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_, hM = 0) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + hM) * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + hM) * s / A);
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 12 城市光柱 ──────────────────────────────────────────────────
+      const CITIES = [
+        { name: '北京', lat: 39.90, lon: 116.40, c: [1.0, 0.45, 0.35] },
+        { name: '上海', lat: 31.23, lon: 121.47, c: [0.35, 0.85, 1.0] },
+        { name: '广州', lat: 23.13, lon: 113.26, c: [1.0, 0.75, 0.25] },
+        { name: '深圳', lat: 22.55, lon: 114.06, c: [0.55, 1.0, 0.45] },
+        { name: '成都', lat: 30.57, lon: 104.07, c: [0.95, 0.5, 1.0] },
+        { name: '重庆', lat: 29.56, lon: 106.55, c: [1.0, 0.95, 0.4] },
+        { name: '西安', lat: 34.34, lon: 108.94, c: [0.45, 0.7, 1.0] },
+        { name: '武汉', lat: 30.59, lon: 114.31, c: [0.4, 1.0, 0.85] },
+        { name: '杭州', lat: 30.27, lon: 120.15, c: [0.65, 0.55, 1.0] },
+        { name: '南京', lat: 32.06, lon: 118.78, c: [1.0, 0.55, 0.75] },
+        { name: '哈尔滨', lat: 45.80, lon: 126.53, c: [0.55, 0.9, 1.0] },
+        { name: '拉萨', lat: 29.65, lon: 91.14, c: [1.0, 0.85, 0.5] },
+      ];
+
+      const pillars = [];
+      for (const city of CITIES) {
+        const d = 0.055;   // 光柱半宽（度），≈6 km
+        const ring = [
+          lonLat(city.lat - d, city.lon - d), lonLat(city.lat - d, city.lon + d),
+          lonLat(city.lat + d, city.lon + d), lonLat(city.lat + d, city.lon - d),
+          lonLat(city.lat - d, city.lon - d),   // 闭环
+        ];
+        const wall = new engine.DynamicWall(viewer.context, {
+          positions: ring,
+          height: 0.0035,                       // ≈22 km 光柱高
+          color: [city.c[0], city.c[1], city.c[2], 0.85],
+          speed: 0.5, repeat: 2,
+          camera: viewer.camera,
+        });
+        viewer.scene.effects.add(wall);
+        wall.show = false;
+
+        // 顶部呼吸光点（即时渲染）
+        const top = viewer.scene.entities.add({
+          name: city.name + '光点',
+          position: lonLat(city.lat, city.lon, 23_000),
+          point: { color: new engine.Color(city.c[0], city.c[1], city.c[2], 0.95), pixelSize: 8 },
+          label: { text: city.name, font: '12px sans-serif', fillColor: new engine.Color(0.9, 0.95, 1.0, 0.85) },
+        });
+        pillars.push({ city, wall, top, ph: pillars.length * 0.6 });
+      }
+
+      // ── 呼吸动画 ─────────────────────────────────────────────────────
+      let t = 0, last = performance.now();
+      viewer.preRender = () => {
+        const now = performance.now();
+        t += (now - last) / 1000;
+        last = now;
+        for (const p of pillars) {
+          const breath = 0.7 + 0.3 * Math.sin(t * 2.2 + p.ph);
+          p.top.point.pixelSize = 5 + 5 * breath;
+          p.top.point.color = new engine.Color(p.city.c[0], p.city.c[1], p.city.c[2], 0.5 + 0.45 * breath);
+        }
+      };
+
+      // ── 控件 ─────────────────────────────────────────────────────────
+      let seqTimers = [];
+      const btnAll = document.getElementById('btnAll');
+      btnAll.addEventListener('click', () => {
+        seqTimers.forEach(clearTimeout); seqTimers = [];
+        const anyOn = pillars.some(p => p.wall.show);
+        for (const p of pillars) p.wall.show = !anyOn;
+        btnAll.classList.toggle('active', !anyOn);
+        refresh();
+      });
+      document.getElementById('btnSequence').addEventListener('click', () => {
+        seqTimers.forEach(clearTimeout); seqTimers = [];
+        for (const p of pillars) p.wall.show = false;
+        pillars.forEach((p, i) => {
+          seqTimers.push(setTimeout(() => { p.wall.show = true; refresh(); }, i * 280));
+        });
+        refresh();
+      });
+      const speedEl = document.getElementById('speed');
+      speedEl.addEventListener('input', () => {
+        const v = Number(speedEl.value);
+        for (const p of pillars) p.wall.speed = v;
+        document.getElementById('speedVal').textContent = v.toFixed(1) + 'x';
+        refresh();
+      });
+
+      const litCount = () => pillars.filter(p => p.wall.show).length;
+      function refresh() {
+        info.textContent =
+          `光柱: ${litCount()}/${pillars.length} 座（DynamicWall 闭环墙段）\n` +
+          `流光速度: ${Number(speedEl.value).toFixed(1)}x   顶部呼吸光点: ${pillars.length} 个`;
+      }
+      refresh();
+
+      // 入场：逐城点亮一次
+      pillars.forEach((p, i) => {
+        seqTimers.push(setTimeout(() => { p.wall.show = true; refresh(); }, 400 + i * 200));
+      });
+    }
+
+    DemoUtils.startup({ engine, title: '58 · 城市光柱 WeiboLight', view: [105, 34.5, 10_500_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

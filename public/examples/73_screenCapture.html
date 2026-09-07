@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 73：场景截图 ScreenCapture - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:420px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+    /* 截图预览缩略图条 */
+    #shots{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
+    #shots a{display:block;border:1px solid rgba(120,180,255,.4);border-radius:4px;overflow:hidden;}
+    #shots img{display:block;width:150px;height:auto;}
+    #shots .cap{font:10px/1.5 Consolas,monospace;color:#9db4d0;padding:2px 4px;background:rgba(0,0,0,.5);}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>73 场景截图</h1>
+    <p class="desc">WebGPU canvas 的截图要点：<b>必须在渲染提交后的同一 JS 任务内
+      <code>toDataURL()</code></b>（呈现的帧在该任务结束后由合成器消费，跨帧读取会拿到
+      空缓冲）。本页通过包装 <code>scene.render</code> 实现“渲染后同帧读取”，
+      并回读校验非空后生成 PNG 预览 + 下载链接。若个别环境仍截到空帧，
+      请改用 DevTools 的 “Capture full size screenshot”（CDP 语义）。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+    <div id="shots"></div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const shots = document.getElementById('shots');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 1. 包装 scene.render：渲染完成后同帧回调 ─────────────────────
+      // Viewer 的默认循环每帧调用 scene.render()；我们在其尾部同步插入
+      // toDataURL，保证读取的是“本帧刚呈现”的图像（WebGPU canvas 约束）。
+      let onFrameEnd = null;
+      const scene = viewer.scene;
+      const origRender = scene.render.bind(scene);
+      scene.render = function (...args) {
+        origRender(...args);
+        if (onFrameEnd) {
+          const cb = onFrameEnd;
+          onFrameEnd = null;
+          cb(viewer.canvas);
+        }
+      };
+
+      // ── 2. 截图 + 非空校验（回读到 2D canvas 采样像素）───────────────
+      function captureNextFrame() {
+        return new Promise((resolve, reject) => {
+          onFrameEnd = (canvas) => {
+            try {
+              const url = canvas.toDataURL('image/png');
+              // 校验：抽样像素，全透明/全黑判定为空帧
+              const probe = document.createElement('canvas');
+              const w = probe.width = Math.min(100, canvas.width);
+              const h = probe.height = Math.min(100, canvas.height);
+              const pctx = probe.getContext('2d');
+              pctx.drawImage(canvas, 0, 0, w, h);
+              const data = pctx.getImageData(0, 0, w, h).data;
+              let nonBlank = 0;
+              for (let i = 0; i < data.length; i += 4 * 8) {
+                if (data[i + 3] > 8 && (data[i] + data[i + 1] + data[i + 2]) > 12) nonBlank++;
+              }
+              resolve({ url, nonBlank });
+            } catch (err) {
+              reject(err);
+            }
+          };
+        });
+      }
+
+      let shotCount = 0;
+      function finishShot(url) {
+        shotCount++;
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `cesiumgpu-shot-${ts}.png`; // 文件名时间戳：ISO8601 安全化，如 2026-09-07T10-30-00
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = `截图 ${shotCount}`;
+        a.appendChild(img);
+        const cap = document.createElement('span');
+        cap.className = 'cap';
+        cap.textContent = `#${shotCount} 点击下载`;
+        a.appendChild(cap);
+        shots.prepend(a);
+        while (shots.children.length > 3) shots.removeChild(shots.lastChild);
+        result.textContent = `截图 #${shotCount} 完成（${viewer.canvas.width}×${viewer.canvas.height}px），点击缩略图下载 PNG。`;
+      }
+
+      async function takeShot() {
+        result.textContent = '等待下一帧渲染…';
+        try {
+          let { url, nonBlank } = await captureNextFrame();
+          if (nonBlank === 0) {
+            result.textContent = '截到空帧（WebGPU 呈现时序问题），自动重试一次…';
+            ({ url, nonBlank } = await captureNextFrame());
+          }
+          if (nonBlank === 0) {
+            result.textContent = '截图失败：回读为空。请改用 DevTools 的 ' +
+              '“Capture full size screenshot”（CDP 语义）或浏览器系统截图。';
+            return;
+          }
+          finishShot(url);
+        } catch (err) {
+          result.textContent = '截图失败：' + err.message;
+          DemoUtils.toast?.('截图失败：' + err.message);
+        }
+      }
+
+      addBtn('📸 截图', takeShot);
+      addBtn('清除预览', () => { shots.innerHTML = ''; result.textContent = '预览已清空'; });
+
+      // ── 3. 一个好看的取景：湖北三峡一带斜视角 ────────────────────────
+      viewer.camera.flyTo({
+        destination: { lon: 110.8, lat: 30.8, height: 260_000 },
+        orientation: { heading: 0.6, pitch: -0.55 },
+      });
+      result.textContent = '点「📸 截图」捕获当前画面。';
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.8, 30.8, 400_000],
+          imagery: 'gaode-sat',
+          title: '73 · 场景截图 ScreenCapture',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '73 场景截图 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

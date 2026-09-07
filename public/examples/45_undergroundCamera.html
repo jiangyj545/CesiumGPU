@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 45：地下视角 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:290px;max-width:370px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);font:13px/1.6 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9fd0ff;}
+    .cg-panel .desc{font-size:12px;color:#8fa8c8;margin:0 0 8px;}
+    .cg-panel h2{font-size:12px;margin:8px 0 4px;color:#7fb4e8;}
+    .cg-panel button{margin:4px 6px 4px 0;padding:5px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#dbeaff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel label{display:block;font-size:12px;margin:6px 0 3px;color:#b8d0ee;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;}
+    .cg-panel #result.under{color:#7fb4ff;}
+    .cg-panel .warn{font-size:11px;color:#e8c37f;margin-top:6px;}
+    /* 地下背景覆盖层（EV 原版「地下背景颜色」的近似实现） */
+    #underOverlay{position:absolute;inset:0;z-index:8000;pointer-events:none;
+      background:linear-gradient(180deg, rgba(6,10,40,.92), rgba(2,4,18,.97));
+      opacity:0;transition:opacity .8s ease;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="underOverlay"></div>
+  <div class="cg-panel">
+    <h1>45 地下视角</h1>
+    <p class="desc">相机降到地表以下（对齐 EV 07_undergroundCamera 的地下模式）：
+      通过 setView 负高度把相机放入地下，穿越地表瞬间画面切换为地下背景色。</p>
+
+    <label><input type="checkbox" id="chkUnder" checked /> 地下模式（允许负高度 + 地下背景色）</label>
+
+    <h2>相机动作</h2>
+    <div>
+      <button class="actBtn" data-h="300">回到地表 300m</button>
+      <button class="actBtn" data-h="-20">下探 -20m</button>
+      <button class="actBtn" data-h="-100">下探 -100m</button>
+      <button class="actBtn" data-h="-400">深潜 -400m</button>
+      <button id="btnCross">穿越动画（500m → -300m）</button>
+    </div>
+
+    <div id="result">初始化中…</div>
+    <div class="warn">近似语义：地形网格单面渲染（背面剔除），地下仰视看不到
+      「地形底面」；引擎无地下背景色 API，用 CSS 覆盖层近似 EV 的地下蓝色背景。</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const MATH = engine.CesiumMath;
+      const result = document.getElementById('result');
+      const overlay = document.getElementById('underOverlay');
+
+      // ── 地形层（湖北，有起伏才能感知穿越地表）───────────────────────
+      let sampleHeight = () => 0;
+      try {
+        viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          maximumLevel: 14,
+        }));
+        sampleHeight = (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat);
+      } catch (err) {
+        console.error('[45] terrain init failed:', err);
+        result.textContent = '地形服务不可用，0 高椭球模式：' + err.message;
+      }
+
+      // 观察点：神农架山区（地形高差大，穿越效果明显）
+      const SITE = { lon: 110.675, lat: 31.744 };
+
+      const state = { underMode: true, crossing: false };
+
+      // ── 相机动作：setView 负高度直接入地 ───────────────────────────
+      function goTo(height) {
+        viewer.camera.cancelFlight();
+        viewer.camera.setView({
+          destination: { lon: SITE.lon, lat: SITE.lat, height },
+          orientation: { heading: MATH.toRadians(30), pitch: MATH.toRadians(-15) },
+        });
+      }
+      document.querySelectorAll('.actBtn').forEach((btn) => {
+        btn.addEventListener('click', () => goTo(parseFloat(btn.dataset.h)));
+      });
+
+      // 穿越动画：500m → -300m 缓动推进，穿过地表时画面切入地下背景色
+      document.getElementById('btnCross').addEventListener('click', () => {
+        if (state.crossing) return;
+        state.crossing = true;
+        const t0 = performance.now();
+        const DUR = 4000;
+        function step(now) {
+          const k = Math.min((now - t0) / DUR, 1);
+          const ease = 0.5 - Math.cos(Math.PI * k) / 2;   // ease-in-out
+          goTo(500 + (-300 - 500) * ease);
+          if (k < 1) { requestAnimationFrame(step); }
+          else { state.crossing = false; }
+        }
+        requestAnimationFrame(step);
+      });
+
+      // 地下模式开关（语义对齐 EV_UndergroundCamera open/close）
+      document.getElementById('chkUnder').addEventListener('change', (e) => {
+        state.underMode = e.target.checked;
+        if (!state.underMode) goTo(500);   // 关闭时先把相机拉回地表以上
+      });
+
+      // ── 读数循环：相机高度 < 0 时点亮地下背景 ──────────────────────
+      function tick() {
+        try {
+          const r = engine.Cartesian3.magnitude(viewer.camera.position);
+          const altM = ((r - 1) * 6378137);
+          const under = state.underMode && altM < 0;
+          overlay.style.opacity = under ? '1' : '0';
+          result.classList.toggle('under', under);
+          result.textContent =
+            `相机高度: ${altM.toFixed(0)} m ${under ? '（地下）' : '（地表以上）'}\n` +
+            `地表高程: ${sampleHeight(SITE.lon, SITE.lat).toFixed(0)} m\n` +
+            `地下模式: ${state.underMode ? '开（负高度可用）' : '关'}`;
+        } catch (err) {
+          DemoUtils.showError('读数循环异常，已停止', err);
+          return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.675, 31.744, 6_000],
+          imagery: 'gaode-sat',
+          title: '45 · 地下视角',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '45 地下视角 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

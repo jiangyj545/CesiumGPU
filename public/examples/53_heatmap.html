@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>53 热力图 Heatmap · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:350px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>53 热力图 Heatmap</h1>
+    <p class="desc">HeatmapLayer IPass：CPU 端离屏 canvas 渐变圆（globalCompositeOperation 'lighter' 累积）+ 色带上色，GPU 端贴地网格采样热力纹理、additive 发光叠加。数据 /data/gis_point.json。</p>
+    <div id="controls">
+      <button id="btnShow" class="active">热力 显/隐</button>
+      <label>半径 <input id="radius" type="range" min="20000" max="200000" step="5000" value="70000" style="width:130px"> <span id="radiusVal">70km</span></label>
+      <label>不透明度 <input id="opacity" type="range" min="0.1" max="1" step="0.05" value="0.85" style="width:130px"> <span id="opacityVal">0.85</span></label>
+    </div>
+    <div id="info">加载点数据…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_, hM = 0) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + hM) * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + hM) * s / A);
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 加载 POI 点（GeometryCollection → Point coordinates [lon,lat]）──
+      const resp = await fetch('/data/gis_point.json');
+      if (!resp.ok) throw new Error(`gis_point.json 加载失败: HTTP ${resp.status}`);
+      const geo = await resp.json();
+      const raw = (geo.geometries ?? [])
+        .filter(g => g.type === 'Point')
+        .map(g => ({ lon: g.coordinates[0], lat: g.coordinates[1] }));
+      if (raw.length === 0) throw new Error('gis_point.json 无 Point 几何');
+
+      // 权重：确定性伪随机（经纬度 hash）+ 少量高权核心区，模拟人口集聚
+      function weight(lon, lat) {
+        const h = Math.abs(Math.sin(lon * 12.9898 + lat * 78.233) * 43758.5453) % 1;
+        const cores = [[121.47, 31.23], [120.15, 30.27], [114.06, 22.55], [113.26, 23.13]];
+        let boost = 0;
+        for (const [clon, clat] of cores) {
+          const d = Math.hypot(lon - clon, (lat - clat) * 0.8);
+          boost = Math.max(boost, Math.max(0, 1 - d / 6));
+        }
+        return Math.min(1, 0.25 + h * 0.45 + boost * 0.55);
+      }
+      const points = raw.map(p => ({ lon: p.lon, lat: p.lat, weight: weight(p.lon, p.lat) }));
+
+      // ── 热力图层（IPass）─────────────────────────────────────────────
+      const heat = new engine.HeatmapLayer(viewer.context, {
+        points,
+        radius: 70_000,
+        maxOpacity: 0.85,
+        gridN: 72,
+        camera: viewer.camera,
+      });
+      viewer.scene.effects.add(heat);
+
+      // 核心区标注
+      [[31.23, 121.47, '上海'], [30.27, 120.15, '杭州'], [22.55, 114.06, '深圳'], [23.13, 113.26, '广州']]
+        .forEach(([lat, lon, name]) => {
+          viewer.scene.entities.add({
+            name, position: lonLat(lat, lon, 20_000),
+            point: { color: new engine.Color(1, 1, 1, 0.9), pixelSize: 4 },
+            label: { text: name, font: '12px sans-serif', fillColor: new engine.Color(0.95, 0.95, 1, 0.9) },
+          });
+        });
+
+      // ── 控件 ─────────────────────────────────────────────────────────
+      const btnShow = document.getElementById('btnShow');
+      btnShow.addEventListener('click', () => {
+        heat.show = !heat.show;
+        btnShow.classList.toggle('active', heat.show);
+        refresh();
+      });
+      const radiusEl = document.getElementById('radius');
+      radiusEl.addEventListener('input', () => {
+        const m = Number(radiusEl.value);
+        heat.setRadius(m);
+        document.getElementById('radiusVal').textContent = Math.round(m / 1000) + 'km';
+        refresh();
+      });
+      const opacityEl = document.getElementById('opacity');
+      opacityEl.addEventListener('input', () => {
+        heat.setOpacity(Number(opacityEl.value));
+        document.getElementById('opacityVal').textContent = Number(opacityEl.value).toFixed(2);
+        refresh();
+      });
+
+      function refresh() {
+        info.textContent =
+          `热力点: ${points.length} 个   图层: ${heat.show ? '显示' : '隐藏'}\n` +
+          `半径: ${Math.round(heat.radius / 1000)}km   不透明度: ${heat.opacity.toFixed(2)}\n` +
+          `实现: canvas 'lighter' 合成 + 色带 + 贴地网格纹理`;
+      }
+      refresh();
+    }
+
+    DemoUtils.startup({ engine, title: '53 · 热力图 Heatmap', view: [113.5, 28.5, 6_800_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

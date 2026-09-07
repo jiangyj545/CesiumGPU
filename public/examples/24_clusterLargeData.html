@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 24：大数据聚合 ClusterLargeData - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:200px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>24 大数据聚合 ClusterLargeData</h1>
+    <p class="desc">14MB / 1万+ POI 点性能化聚合：fetch+JSON.parse 计时 →
+      网格聚类（zoom 分级粒度）→ entity 池分帧补齐（每帧 200 个，避免首帧卡顿）→
+      相机缩放自动重聚合。左上角状态面板实时观测，startup 自带 FPS HUD。</p>
+    <div id="controls"></div>
+    <div id="result">加载 14MB 数据中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 1) 加载 + 解析计时 ────────────────────────────────────────
+      const tFetch0 = performance.now();
+      const resp = await fetch('/data/gis_osm_places_free_1.json');
+      if (!resp.ok) throw new Error(`POI 数据加载失败：HTTP ${resp.status}`);
+      const text = await resp.text();
+      const tFetch = performance.now() - tFetch0;
+      const tParse0 = performance.now();
+      const geo = JSON.parse(text);
+      const tParse = performance.now() - tParse0;
+
+      // 兼容 FeatureCollection / GeometryCollection
+      const points = [];
+      const pushGeom = (g) => {
+        if (!g) return;
+        if (g.type === 'Point') points.push({ lon: g.coordinates[0], lat: g.coordinates[1] });
+        else if (g.type === 'FeatureCollection') g.features.forEach((f) => pushGeom(f.geometry));
+        else if (g.type === 'GeometryCollection') g.geometries.forEach(pushGeom);
+        else if (g.type === 'MultiPoint') g.coordinates.forEach((c) => points.push({ lon: c[0], lat: c[1] }));
+      };
+      pushGeom(geo);
+      if (points.length === 0) throw new Error('gis_osm_places_free_1.json 未解析到任何点');
+
+      // ── 2) 网格聚类（zoom 分级粒度）──────────────────────────────
+      function cluster(cellDeg) {
+        const bins = new Map();
+        for (const p of points) {
+          const key = Math.floor(p.lon / cellDeg) + '|' + Math.floor(p.lat / cellDeg);
+          let bin = bins.get(key);
+          if (!bin) {
+            bin = { lon: 0, lat: 0, count: 0 };
+            bins.set(key, bin);
+          }
+          bin.lon += p.lon; bin.lat += p.lat; bin.count++; // 累积后取质心
+        }
+        return [...bins.values()].map((b) => ({ lon: b.lon / b.count, lat: b.lat / b.count, count: b.count }));
+      }
+      function cellByHeight(h) {
+        if (h < 2_000_000) return 0.25;
+        if (h < 5_000_000) return 1;
+        if (h < 9_000_000) return 3;
+        if (h < 14_000_000) return 8;
+        return 15;
+      }
+
+      // ── 3) entity 池 + 分帧补齐（每帧 200 个）────────────────────
+      const COLOR_GREEN = new engine.Color(0.2, 0.9, 0.4, 0.9);
+      const COLOR_YELLOW = new engine.Color(1, 0.85, 0.1, 0.9);
+      const COLOR_RED = new engine.Color(1, 0.25, 0.2, 0.9);
+      const pool = [];
+      function poolGet(i) {
+        if (!pool[i]) {
+          pool[i] = scene.entities.add(new engine.Entity({
+            name: 'cluster',
+            position: new engine.Cartesian3(0, 0, 1),
+            point: { pixelSize: 14, color: COLOR_GREEN },
+            label: { text: '0', font: 'bold 13px sans-serif', fillColor: engine.Color.WHITE, show: true },
+          }));
+        }
+        return pool[i];
+      }
+      function poolTrim(n) {
+        for (let i = n; i < pool.length; i++) scene.entities.remove(pool[i]);
+        pool.length = Math.min(pool.length, n);
+      }
+
+      let queue = [];        // 待上屏的簇（分帧消费）
+      let cellDeg = 8;
+      let tCluster = 0;
+      function recluster(deg) {
+        cellDeg = deg;
+        const t0 = performance.now();
+        queue = cluster(cellDeg);
+        tCluster = performance.now() - t0;
+      }
+
+      viewer.preRender = () => {
+        // 分帧补齐聚合点（每帧最多 200 个 entity 更新）
+        let budget = 200;
+        while (budget-- > 0 && queue.length > 0) {
+          const idx = pool.length;
+          const c = queue.shift();
+          const e = poolGet(idx);
+          const size = Math.min(10 + Math.log2(c.count + 1) * 4, 40);
+          e.position = engine.Cartesian3.fromDegrees(c.lon, c.lat, 0);
+          e.point = { pixelSize: size, color: c.count < 10 ? COLOR_GREEN : (c.count < 50 ? COLOR_YELLOW : COLOR_RED) };
+          e.label = { text: String(c.count), font: 'bold 13px sans-serif', fillColor: engine.Color.WHITE, show: true };
+        }
+        // 缩放分级：相机高度跨档时重聚合
+        if (queue.length === 0) {
+          const h = Math.max((engine.Cartesian3.magnitude(viewer.camera.position) - 1) * engine.Camera.EARTH_SCALE, 0);
+          const want = cellByHeight(h);
+          if (want !== cellDeg) recluster(want);
+        }
+      };
+
+      addBtn('粗粒度 15°（全球）', () => recluster(15));
+      addBtn('中粒度 3°', () => recluster(3));
+      addBtn('细粒度 0.25°（局地）', () => recluster(0.25));
+      addBtn('飞到欧洲（数据密集）', () => viewer.camera.flyTo({
+        destination: { lon: 10, lat: 50, height: 4_000_000 }, duration: 3,
+      }));
+
+      recluster(8);
+      const fmtMs = (ms) => (ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : ms.toFixed(0) + ' ms');
+      setInterval(() => {
+        result.textContent =
+          `文件 14MB：fetch ${fmtMs(tFetch)} · JSON.parse ${fmtMs(tParse)}\n` +
+          `POI 点 ${points.length.toLocaleString()} 个\n` +
+          `聚类粒度 ${cellDeg}° → 簇 ${(pool.length + queue.length).toLocaleString()} 个（聚类耗时 ${fmtMs(tCluster)}）\n` +
+          `已上屏 ${pool.length.toLocaleString()}（每帧 200 分帧补齐）· 缩放自动重分级`;
+      }, 400);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [10, 45, 12_000_000],
+          imagery: 'gaode-sat',
+          title: '24 · 大数据聚合',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '24 大数据聚合 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

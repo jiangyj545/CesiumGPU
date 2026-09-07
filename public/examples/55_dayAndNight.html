@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>55 昼夜交替 DayAndNight · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:350px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>55 昼夜交替 DayAndNight</h1>
+    <p class="desc">SunPosition 计算太阳直射点 → DirectionalLight 方向随时间转动，拖动"时角"滑条观察晨线推移；可开关光照直射（关灯即"夜面"）。引擎默认太阳光位于 scene.lights[0]。</p>
+    <div id="controls">
+      <button id="btnPlay" class="active">暂停自转</button>
+      <button id="btnLight" class="active">光照: 开</button>
+      <label>时角（UTC±h） <input id="hour" type="range" min="-12" max="12" step="0.1" value="0" style="width:130px"> <span id="hourVal">0.0h</span></label>
+    </div>
+    <div id="info">初始化…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function ecefDir(latDeg, lonDeg) {
+      const lat = latDeg * D2R, lon = lonDeg * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = n * Math.cos(lat);
+      const v = new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, n * (1 - E2) * s / A);
+      const m = Math.hypot(v.x, v.y, v.z);
+      return new engine.Cartesian3(v.x / m, v.y / m, v.z / m);
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+
+      // ── 当前太阳直射点（真实时刻）──
+      const now = engine.JulianDate.now();
+      const sub = engine.SunPosition.computeSubSolarPoint(now);   // {longitude, latitude} 度
+      const baseLon = sub.longitude, baseLat = sub.latitude;
+
+      const sunLight = viewer.scene.lights[0];                    // 引擎默认太阳光
+      if (!sunLight) throw new Error('scene.lights[0] 不存在（默认太阳光缺失）');
+
+      // ── 直射点 / 半夜点标记（point 即时渲染）─────────────────────────
+      const sunMark = viewer.scene.entities.add({
+        name: '太阳直射点', position: ecefDir(baseLat, baseLon),
+        point: { color: new engine.Color(1.0, 0.9, 0.3, 1.0), pixelSize: 12 },
+        label: { text: '直射点', font: '12px sans-serif', fillColor: new engine.Color(1.0, 0.95, 0.6, 1.0) },
+      });
+      const nightMark = viewer.scene.entities.add({
+        name: '半夜点', position: ecefDir(-baseLat, baseLon + 180),
+        point: { color: new engine.Color(0.4, 0.5, 0.9, 0.9), pixelSize: 9 },
+        label: { text: '半夜点', font: '12px sans-serif', fillColor: new engine.Color(0.7, 0.8, 1.0, 0.9) },
+      });
+
+      // ── 状态与驱动 ───────────────────────────────────────────────────
+      let offsetH = 0, playing = true, lightOn = true, last = performance.now();
+      const hourEl = document.getElementById('hour');
+      const hourVal = document.getElementById('hourVal');
+      function apply() {
+        // 时角偏移 → 直射点经度（每 15° = 1 小时）
+        let lon = baseLon + offsetH * 15;
+        lon = ((lon + 540) % 360) - 180;
+        // DirectionalLight.direction 语义为"从太阳指向地球"
+        const toSun = ecefDir(baseLat, lon);
+        sunLight.direction = [-toSun.x, -toSun.y, -toSun.z];
+        sunMark.position = toSun;
+        nightMark.position = ecefDir(-baseLat, lon + 180);
+        info.textContent =
+          `基准直射点: ${baseLon.toFixed(1)}°E, ${baseLat.toFixed(1)}°N（实时计算）\n` +
+          `当前时角: ${offsetH >= 0 ? '+' : ''}${offsetH.toFixed(1)}h → 直射经度 ${lon.toFixed(1)}°\n` +
+          `光照: ${lightOn ? '开（昼半球照亮）' : '关（夜面）'}   自转: ${playing ? '中' : '停'}`;
+      }
+      apply();
+
+      viewer.preRender = () => {
+        const now2 = performance.now();
+        if (playing) {
+          offsetH += (now2 - last) / 1000 * 0.4;                 // 模拟地球自转
+          if (offsetH > 12) offsetH -= 24;
+          if (offsetH < -12) offsetH += 24;
+          hourEl.value = offsetH.toFixed(1);
+          hourVal.textContent = offsetH.toFixed(1) + 'h';
+          apply();
+        }
+        last = now2;
+      };
+
+      // ── 控件 ─────────────────────────────────────────────────────────
+      const btnPlay = document.getElementById('btnPlay');
+      btnPlay.addEventListener('click', () => {
+        playing = !playing;
+        btnPlay.textContent = playing ? '暂停自转' : '开始自转';
+        btnPlay.classList.toggle('active', playing);
+      });
+      const btnLight = document.getElementById('btnLight');
+      btnLight.addEventListener('click', () => {
+        lightOn = !lightOn;
+        sunLight.intensity = lightOn ? 1 : 0;   // 关灯 = 全球夜面
+        btnLight.textContent = '光照: ' + (lightOn ? '开' : '关');
+        btnLight.classList.toggle('active', lightOn);
+        apply();
+      });
+      hourEl.addEventListener('input', () => {
+        playing = false;
+        btnPlay.textContent = '开始自转';
+        btnPlay.classList.remove('active');
+        offsetH = Number(hourEl.value);
+        hourVal.textContent = offsetH.toFixed(1) + 'h';
+        apply();
+      });
+    }
+
+    DemoUtils.startup({ engine, title: '55 · 昼夜交替 DayAndNight', view: [105, 25, 22_000_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

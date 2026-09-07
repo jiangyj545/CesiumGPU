@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 74：快捷键 ShortcutKey - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:320px;max-width:430px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;min-height:36px;}
+    /* 键位表 */
+    #keymap{width:100%;border-collapse:collapse;font-size:12px;color:#cfe4ff;}
+    #keymap td{padding:3px 4px;border-bottom:1px solid rgba(120,180,255,.15);}
+    #keymap td.k{text-align:right;font-family:Consolas,Monaco,monospace;color:#9fe8ff;white-space:nowrap;}
+    #keymap button{padding:2px 8px;font-size:11px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:4px;}
+    #keymap button:hover{background:rgba(60,110,180,.75);}
+    #keymap button.listening{background:rgba(220,120,40,.8);border-color:#ffb35c;}
+    #keyBtns{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
+    #keyBtns button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    #keyBtns button:hover{background:rgba(60,110,180,.75);}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>74 快捷键</h1>
+    <p class="desc">window keydown/keyup 驱动的相机快捷键：方向键旋转、W/S 推近拉远、
+      Shift 加速、N 指北、R 复位、F 飞往湖北、H 隐藏面板。点「改键」后按任意键
+      重新绑定，绑定持久化在 localStorage。</p>
+    <table id="keymap"></table>
+    <div id="keyBtns">
+      <button id="resetKeys">恢复默认键位</button>
+    </div>
+    <div id="result">就绪：聚焦页面后按方向键 / W / S 试试（Shift = 加速）。</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const keymapEl = document.getElementById('keymap');
+
+      // ── 1. 动作定义与键位表（可配置）────────────────────────────────
+      const DEFAULT_KEYS = {
+        rotateLeft:  'ArrowLeft',
+        rotateRight: 'ArrowRight',
+        rotateUp:    'ArrowUp',
+        rotateDown:  'ArrowDown',
+        zoomIn:      'KeyW',
+        zoomOut:     'KeyS',
+        northUp:     'KeyN',
+        resetView:   'KeyR',
+        flyHubei:    'KeyF',
+        togglePanel: 'KeyH',
+      };
+      const ACTION_LABELS = {
+        rotateLeft: '视角左旋', rotateRight: '视角右旋',
+        rotateUp: '视角上旋', rotateDown: '视角下旋',
+        zoomIn: '推近', zoomOut: '拉远',
+        northUp: '复位指北', resetView: '回到全球视角',
+        flyHubei: '飞往湖北', togglePanel: '隐藏/显示本面板',
+      };
+      const LS_KEY = 'cg74.keymap';
+      let keymap = { ...DEFAULT_KEYS };
+      try {
+        const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+        if (saved && typeof saved === 'object') {
+          for (const k of Object.keys(DEFAULT_KEYS)) {
+            if (typeof saved[k] === 'string') keymap[k] = saved[k];
+          }
+        }
+      } catch (err) { console.warn('[74] 读取键位配置失败，使用默认:', err.message); }
+      function saveKeys() {
+        try { localStorage.setItem(LS_KEY, JSON.stringify(keymap)); }
+        catch (err) { console.warn('[74] 保存键位配置失败:', err.message); }
+      }
+
+      // ── 2. 键位表面板（含改键）──────────────────────────────────────
+      let listening = null; // 正在改键的动作 {action, btn}
+      function prettyKey(code) {
+        if (!code) return '—';
+        return code
+          .replace(/^ArrowLeft$/, '←').replace(/^ArrowRight$/, '→')
+          .replace(/^ArrowUp$/, '↑').replace(/^ArrowDown$/, '↓')
+          .replace(/^Key/, '').replace(/^Digit/, '');
+      }
+      function renderKeymap() {
+        keymapEl.innerHTML = '';
+        for (const [action, label] of Object.entries(ACTION_LABELS)) {
+          const tr = document.createElement('tr');
+          const tdLabel = document.createElement('td');
+          tdLabel.textContent = label;
+          const tdKey = document.createElement('td');
+          tdKey.className = 'k';
+          tdKey.textContent = prettyKey(keymap[action]);
+          const tdBtn = document.createElement('td');
+          const btn = document.createElement('button');
+          btn.textContent = '改键';
+          btn.addEventListener('click', () => {
+            listening = { action, btn };
+            btn.textContent = '按任意键…';
+            btn.classList.add('listening');
+          });
+          tdBtn.appendChild(btn);
+          tr.append(tdLabel, tdKey, tdBtn);
+          keymapEl.appendChild(tr);
+        }
+      }
+      renderKeymap();
+
+      document.getElementById('resetKeys').addEventListener('click', () => {
+        keymap = { ...DEFAULT_KEYS };
+        saveKeys();
+        renderKeymap();
+        result.textContent = '已恢复默认键位。';
+      });
+
+      // ── 3. 动作实现 ─────────────────────────────────────────────────
+      const held = new Set(); // 持续按住的旋转/缩放键，preRender 按帧施加
+      function lonLatHeight() {
+        const p = viewer.camera.position;
+        const r = engine.Cartesian3.magnitude(p);
+        return {
+          lon: Math.atan2(p.y, p.x) * 180 / Math.PI,
+          lat: Math.asin(engine.CesiumMath.clamp(p.z / r, -1, 1)) * 180 / Math.PI,
+          height: (r - 1) * 6378137,
+        };
+      }
+      const ACTIONS = {
+        rotateLeft:  () => viewer.camera.rotate(-0.02, 0),
+        rotateRight: () => viewer.camera.rotate(0.02, 0),
+        rotateUp:    () => viewer.camera.rotate(0, 0.02),
+        rotateDown:  () => viewer.camera.rotate(0, -0.02),
+        zoomIn:      () => viewer.camera.zoom(-engine.Cartesian3.magnitude(viewer.camera.position) * 0.05),
+        zoomOut:     () => viewer.camera.zoom(engine.Cartesian3.magnitude(viewer.camera.position) * 0.05),
+        northUp: () => {
+          const { lon, lat, height } = lonLatHeight();
+          viewer.camera.setView({
+            destination: { lon, lat, height },
+            orientation: { heading: 0, pitch: -Math.PI / 2 },
+          });
+          result.textContent = '已复位指北。';
+        },
+        resetView: () => {
+          viewer.camera.flyTo({ destination: { lon: 105, lat: 36, height: 12_000_000 } });
+          result.textContent = '回到全球视角。';
+        },
+        flyHubei: () => {
+          viewer.camera.flyTo({ destination: { lon: 111.3, lat: 30.7, height: 500_000 } });
+          result.textContent = '飞往湖北（宜昌—荆门一带）。';
+        },
+        togglePanel: () => {
+          const panel = document.querySelector('.cg-panel');
+          if (panel) panel.style.display = panel.style.display === 'none' ? '' : 'none';
+        },
+      };
+      const HOLD_ACTIONS = new Set(['rotateLeft', 'rotateRight', 'rotateUp', 'rotateDown', 'zoomIn', 'zoomOut']);
+
+      // ── 4. keydown / keyup 路由（改键优先）──────────────────────────
+      window.addEventListener('keydown', (e) => {
+        if (listening) {
+          e.preventDefault();
+          keymap[listening.action] = e.code;
+          saveKeys();
+          renderKeymap();
+          result.textContent = `「${ACTION_LABELS[listening.action]}」已绑定到 ${prettyKey(e.code)}`;
+          listening = null;
+          return;
+        }
+        // 输入框聚焦时不拦截
+        const tag = (e.target && e.target.tagName) || '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+        const action = Object.keys(keymap).find((k) => keymap[k] === e.code);
+        if (!action) return;
+        e.preventDefault(); // 阻止方向键滚动页面
+        if (HOLD_ACTIONS.has(action)) {
+          held.add(action);
+          if (e.shiftKey) held.add('__fast');
+        } else {
+          ACTIONS[action]?.();
+        }
+      });
+      window.addEventListener('keyup', (e) => {
+        const action = Object.keys(keymap).find((k) => keymap[k] === e.code);
+        if (action) held.delete(action);
+        if (!e.shiftKey) held.delete('__fast');
+      });
+      window.addEventListener('blur', () => held.clear());
+
+      // 持续键：preRender 每帧施加（Shift 时 3 倍步长）
+      viewer.preRender = () => {
+        if (held.size === 0) return;
+        const fast = held.has('__fast') ? 3 : 1;
+        if (held.has('rotateLeft'))  viewer.camera.rotate(-0.012 * fast, 0);
+        if (held.has('rotateRight')) viewer.camera.rotate(0.012 * fast, 0);
+        if (held.has('rotateUp'))    viewer.camera.rotate(0, 0.012 * fast);
+        if (held.has('rotateDown'))  viewer.camera.rotate(0, -0.012 * fast);
+        if (held.has('zoomIn'))  viewer.camera.zoom(-engine.Cartesian3.magnitude(viewer.camera.position) * 0.015 * fast);
+        if (held.has('zoomOut')) viewer.camera.zoom(engine.Cartesian3.magnitude(viewer.camera.position) * 0.015 * fast);
+      };
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 12_000_000],
+          imagery: 'gaode-sat',
+          title: '74 · 快捷键 ShortcutKey',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '74 快捷键 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

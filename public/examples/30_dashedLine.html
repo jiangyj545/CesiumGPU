@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 30：虚线与样式线 DashedLine - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>30 虚线与样式线 DashedLine</h1>
+    <p class="desc">EV PolylineDashMaterial 近似：引擎 polyline 无 dash 材质，
+      按「实段/空段」米数沿线切段生成实体化虚线（限制段数防失控）；
+      另演示宽度/透明度等样式组合。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      const deg = (lon, lat, hM = 0) => engine.Cartesian3.fromDegrees(lon, lat, hM);
+
+      // ── 虚线切段：沿路径按 dashM/gapM 交替取段 ────────────────────
+      function dashSegments(positions, dashM, gapM, maxSegments = 160) {
+        const segs = [];
+        let acc = dashM;      // 当前样式剩余长度（米）
+        let inDash = true;    // 是否处于实段
+        let segStart = positions[0];
+        let a = positions[0];
+        for (let i = 1; i < positions.length && segs.length < maxSegments; i++) {
+          const b = positions[i];
+          let remain = engine.Cartesian3.distance(a, b) * S; // 段长（米）
+          while (remain > 1e-6 && segs.length < maxSegments) {
+            const step = Math.min(remain, acc);
+            const cut = engine.Cartesian3.lerp(a, b, step / remain, new engine.Cartesian3());
+            acc -= step;
+            remain -= step;
+            if (acc <= 1e-6) {
+              if (inDash) segs.push([segStart, cut]);
+              inDash = !inDash;
+              segStart = cut;
+              acc = inDash ? dashM : gapM;
+            }
+            a = cut;
+          }
+        }
+        if (inDash && segs.length < maxSegments) segs.push([segStart, positions[positions.length - 1]]);
+        return segs;
+      }
+
+      function addDashedLine(name, positions, dashM, gapM, width, color) {
+        const segs = dashSegments(positions, dashM, gapM);
+        for (const [p0, p1] of segs) {
+          scene.entities.add(new engine.Entity({
+            name,
+            polyline: { positions: [p0, p1], width, color },
+          }));
+        }
+        return segs.length;
+      }
+
+      const routes = [
+        {
+          name: '航线虚线（dash 60km / gap 30km）',
+          path: [deg(112.0, 39.0, 200_000), deg(116.0, 40.2, 260_000), deg(120.5, 39.5, 200_000)],
+          dash: 60_000, gap: 30_000, width: 6, color: new engine.Color(0.3, 0.85, 1.0, 0.95),
+        },
+        {
+          name: '边界点划线（dash 40km / gap 40km）',
+          path: [deg(104.5, 33.5), deg(108.0, 34.2), deg(111.5, 34.8), deg(115.0, 35.2)],
+          dash: 40_000, gap: 40_000, width: 4, color: new engine.Color(1, 0.8, 0.2, 0.9),
+        },
+        {
+          name: '规划细虚线（dash 25km / gap 45km）',
+          path: [deg(110.0, 26.0), deg(114.0, 26.5), deg(118.0, 27.5)],
+          dash: 25_000, gap: 45_000, width: 3, color: new engine.Color(0.4, 1.0, 0.5, 0.9),
+        },
+      ];
+
+      let totalSegs = 0;
+      for (const r of routes) {
+        totalSegs += addDashedLine(r.name, r.path, r.dash, r.gap, r.width, r.color);
+        // 白色细参考线（对照虚线走向）
+        scene.entities.add(new engine.Entity({
+          name: r.name + ' 参考实线',
+          polyline: {
+            positions: r.path.map((p) => engine.Cartesian3.clone(p)),
+            width: 1,
+            color: new engine.Color(1, 1, 1, 0.25),
+          },
+        }));
+      }
+
+      // ── 样式对照：粗/细/半透明实线 ────────────────────────────────
+      const styleRefs = [
+        { width: 10, path: [deg(100.0, 42.0), deg(107.0, 42.8)], color: new engine.Color(0.95, 0.4, 0.3, 0.95), label: '粗线 w10' },
+        { width: 4, path: [deg(100.0, 40.5), deg(107.0, 41.3)], color: new engine.Color(0.5, 0.6, 1.0, 0.5), label: '半透明 w4' },
+        { width: 2, path: [deg(100.0, 39.0), deg(107.0, 39.8)], color: new engine.Color(0.9, 0.9, 0.4, 0.95), label: '细线 w2' },
+      ];
+      for (const s of styleRefs) {
+        scene.entities.add(new engine.Entity({
+          name: s.label,
+          polyline: { positions: s.path, width: s.width, color: s.color },
+        }));
+      }
+
+      let dashedOn = true;
+      addBtn('虚线显示开 / 关', () => {
+        dashedOn = !dashedOn;
+        for (const e of scene.entities.values) {
+          if (!e.polyline || e.name.includes('参考实线')) continue; // 参考线不隐藏
+          e.show = dashedOn;
+        }
+      });
+      addBtn('北方视角', () => viewer.camera.flyTo({ destination: { lon: 108, lat: 36, height: 3_600_000 }, duration: 2 }));
+      addBtn('西北样式区', () => viewer.camera.flyTo({ destination: { lon: 103.5, lat: 41, height: 2_200_000 }, duration: 2 }));
+
+      result.textContent =
+        `实体化虚线 3 条 → 共 ${totalSegs} 段（上限 160 段/条防失控）\n` +
+        `样式对照实线 3 条（粗 10 / 半透明 0.5 / 细 2）· 白色细参考线 3 条\n` +
+        `诚实注明：无 PolylineDashMaterial，虚线 = 沿线切段实体化`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [108, 36, 3_600_000],
+          imagery: 'gaode-sat',
+          title: '30 · 虚线与样式线',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '30 虚线样式线 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

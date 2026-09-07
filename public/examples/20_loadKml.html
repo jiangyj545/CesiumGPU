@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 20：KML 数据加载 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>20 KML 数据加载</h1>
+    <p class="desc">手写轻量 KML 解析器（DOMParser）：Placemark / LineString /
+      gx:Track / Point / Polygon / coordinates → 转 engine.Entity。
+      引擎无 KmlDataSource，此适配器即迁移替代方案。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const S = engine.Camera.EARTH_SCALE;
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+      // 已加载数据源（可清除后重载）
+      let loaded = [];
+
+      // ── KML 颜色：aabbggrr → engine.Color ─────────────────────────
+      function parseKmlColor(hex) {
+        if (!/^[0-9a-fA-F]{8}$/.test(hex)) return engine.Color.CYAN;
+        const a = parseInt(hex.slice(0, 2), 16);
+        const b = parseInt(hex.slice(2, 4), 16);
+        const g = parseInt(hex.slice(4, 6), 16);
+        const r = parseInt(hex.slice(6, 8), 16);
+        return engine.Color.fromBytes(r, g, b, a);
+      }
+
+      // coordinates 文本："lon,lat[,alt] lon,lat[,alt] ..." → 米制 ECEF
+      function parseCoordinates(text) {
+        return String(text).trim().split(/\s+/).map((token) => {
+          const [lon, lat, alt] = token.split(',').map(Number);
+          return engine.Cartesian3.fromDegrees(lon, lat, alt || 0);
+        });
+      }
+
+      // ── 轻量 KML → Entity 适配器 ──────────────────────────────────
+      function loadKmlText(xmlText, docName) {
+        const dom = new DOMParser().parseFromString(xmlText, 'text/xml');
+        // Style 表：id → LineStyle { color, width }
+        const styles = new Map();
+        for (const st of dom.getElementsByTagName('Style')) {
+          const line = st.getElementsByTagName('LineStyle')[0];
+          if (line) {
+            styles.set(st.getAttribute('id'), {
+              color: parseKmlColor((line.getElementsByTagName('color')[0]?.textContent || 'ffffffff').trim()),
+              width: Number(line.getElementsByTagName('width')[0]?.textContent || 3),
+            });
+          }
+        }
+        let nLine = 0, nPoint = 0, nPoly = 0;
+        for (const pm of dom.getElementsByTagName('Placemark')) {
+          const name = pm.getElementsByTagName('name')[0]?.textContent?.trim() || 'KML 要素';
+          const styleUrl = (pm.getElementsByTagName('styleUrl')[0]?.textContent || '').replace(/^#/, '');
+          const styleRef = styles.get(styleUrl);
+
+          // gx:Track（<gx:coord>lon lat alt</gx:coord> 序列）
+          const trackCoords = [...pm.getElementsByTagName('gx:coord')]
+            .map((c) => c.textContent.trim().split(/\s+/).map(Number))
+            .filter((v) => v.length >= 2);
+          const lineNode = pm.getElementsByTagName('LineString')[0];
+          const outerRing = pm.getElementsByTagName('outerBoundaryIs')[0];
+          const pointNode = pm.getElementsByTagName('Point')[0];
+
+          if (trackCoords.length >= 2) {
+            scene.entities.add(new engine.Entity({
+              name,
+              polyline: {
+                positions: trackCoords.map((v) => engine.Cartesian3.fromDegrees(v[0], v[1], v[2] || 0)),
+                width: styleRef?.width || 4,
+                color: styleRef?.color || engine.Color.CYAN,
+              },
+            }));
+            nLine++;
+          } else if (lineNode) {
+            const positions = parseCoordinates(
+              lineNode.getElementsByTagName('coordinates')[0]?.textContent || '');
+            if (positions.length >= 2) {
+              scene.entities.add(new engine.Entity({
+                name,
+                polyline: {
+                  positions,
+                  width: styleRef?.width || 4,
+                  color: styleRef?.color || engine.Color.CYAN,
+                },
+              }));
+              nLine++;
+            }
+          } else if (outerRing) {
+            const positions = parseCoordinates(
+              outerRing.getElementsByTagName('coordinates')[0]?.textContent || '');
+            if (positions.length >= 3) {
+              scene.entities.add(new engine.Entity({
+                name,
+                polygon: { hierarchy: { positions }, height: 200 / S, color: new engine.Color(1, 0.8, 0.2, 0.45) },
+              }));
+              nPoly++;
+            }
+          } else if (pointNode) {
+            const [lon, lat, alt] = (pointNode.getElementsByTagName('coordinates')[0]?.textContent || '')
+              .trim().split(',').map(Number);
+            const isEnd = /end/i.test(styleUrl);
+            scene.entities.add(new engine.Entity({
+              name,
+              position: engine.Cartesian3.fromDegrees(lon, lat, alt || 0),
+              point: {
+                pixelSize: 16,
+                color: isEnd ? engine.Color.RED : engine.Color.GREEN,
+              },
+              label: { text: name, font: '15px sans-serif', fillColor: engine.Color.WHITE, show: true },
+            }));
+            nPoint++;
+          }
+        }
+        return { docName, nLine, nPoint, nPoly };
+      }
+
+      // 依据要素经纬 bbox 飞行
+      function flyToEntities() {
+        let minLon = 1e9, maxLon = -1e9, minLat = 1e9, maxLat = -1e9;
+        const collect = (c) => {
+          const lon = (Math.atan2(c.y, c.x) * 180) / Math.PI;
+          const lat = (Math.atan2(c.z, Math.hypot(c.x, c.y)) * 180) / Math.PI;
+          minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon);
+          minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat);
+        };
+        for (const e of scene.entities.values) {
+          if (e.polyline) e.polyline.positions.forEach(collect);
+          if (e.polygon) e.polygon.hierarchy.positions.forEach(collect);
+          if (e.position) collect(e.position);
+        }
+        if (minLon > maxLon) return; // 未采集到任何坐标
+        viewer.camera.flyTo({
+          destination: {
+            lon: (minLon + maxLon) / 2,
+            lat: (minLat + maxLat) / 2,
+            height: Math.max(maxLon - minLon, maxLat - minLat) * 111_320 * 8,
+          },
+          duration: 2.5,
+        });
+      }
+
+      async function clearAndLoad(url, docName) {
+        for (const e of loaded) scene.entities.remove(e);
+        loaded = [];
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`KML 加载失败：HTTP ${resp.status} ${url}`);
+        const stat = loadKmlText(await resp.text(), docName);
+        loaded = [...scene.entities.values];
+        result.textContent =
+          `已加载 ${stat.docName}\n折线/轨迹 ${stat.nLine} · 点 ${stat.nPoint} · 面 ${stat.nPoly}\n` +
+          `实体总数 ${scene.entities.length}\n说明：KML Icon 引用外网图标，已降级为彩色圆点 + 文字标注`;
+        flyToEntities();
+      }
+
+      addBtn('费城骑行轨迹 bikeRide', () => clearAndLoad('/data/kml/bikeRide.kml', 'Schuylkill River Trail'));
+      addBtn('巴黎埃菲尔铁塔 flyto', async () => {
+        for (const e of loaded) scene.entities.remove(e);
+        loaded = [];
+        const resp = await fetch('/data/kml/eiffel-tower-flyto.kml');
+        if (!resp.ok) throw new Error(`KML 加载失败：HTTP ${resp.status}`);
+        const stat = loadKmlText(await resp.text(), 'Eiffel Tower');
+        loaded = [...scene.entities.values];
+        result.textContent = `已加载 Eiffel Tower\n点 ${stat.nPoint} 个\nKML LookAt 以固定视角近似`;
+        viewer.camera.flyTo({
+          destination: { lon: 2.2945, lat: 48.8583, height: 2500 },
+          duration: 4,
+        });
+      });
+
+      await clearAndLoad('/data/kml/bikeRide.kml', 'Schuylkill River Trail');
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [-75.19, 40.03, 30_000],
+          imagery: 'gaode-sat',
+          title: '20 · KML 数据加载',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '20 KML 加载 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

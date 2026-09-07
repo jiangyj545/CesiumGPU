@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 26：椭圆与圆面 Ellipse - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>26 椭圆与圆面 Ellipse</h1>
+    <p class="desc">引擎无 EllipseGraphics：以参数化多边形近似（96 段经纬圆，
+      经度步长按 cos(纬度) 修正）。演示圆面、同心圆、旋转椭圆与半透明叠色。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // 参数化椭圆/圆：中心经纬 + 半长轴/半短轴（米）+ 旋转角（度）→ 顶点序列
+      function ellipsePositions(centerLon, centerLat, semiMajorM, semiMinorM, rotationDeg = 0, segments = 96) {
+        const mPerDegLat = 111_320;
+        const mPerDegLon = 111_320 * Math.cos((centerLat * Math.PI) / 180);
+        const rot = (rotationDeg * Math.PI) / 180;
+        const positions = [];
+        for (let i = 0; i < segments; i++) {
+          const a = (i / segments) * Math.PI * 2;
+          // 椭圆局部坐标（含旋转）
+          const ex = semiMajorM * Math.cos(a) * Math.cos(rot) - semiMinorM * Math.sin(a) * Math.sin(rot);
+          const ey = semiMajorM * Math.cos(a) * Math.sin(rot) + semiMinorM * Math.sin(a) * Math.cos(rot);
+          positions.push(engine.Cartesian3.fromDegrees(
+            centerLon + ex / mPerDegLon,
+            centerLat + ey / mPerDegLat,
+            0));
+        }
+        return positions;
+      }
+
+      const CENTER = { lon: 116.4, lat: 39.9 };
+      const entities = [];
+
+      // 大圆：京津冀辐射圈（半径 180 km）
+      entities.push(scene.entities.add(new engine.Entity({
+        name: '辐射圈 180km',
+        polygon: {
+          hierarchy: { positions: ellipsePositions(CENTER.lon, CENTER.lat, 180_000, 180_000) },
+          height: 2000 / engine.Camera.EARTH_SCALE,
+          color: new engine.Color(0.2, 0.6, 1.0, 0.22),
+        },
+      })));
+      // 中圆：通勤圈（半径 80 km）
+      entities.push(scene.entities.add(new engine.Entity({
+        name: '通勤圈 80km',
+        polygon: {
+          hierarchy: { positions: ellipsePositions(CENTER.lon, CENTER.lat, 80_000, 80_000) },
+          height: 3000 / engine.Camera.EARTH_SCALE,
+          color: new engine.Color(0.2, 0.9, 0.5, 0.30),
+        },
+      })));
+      // 内圆：核心区（半径 25 km）
+      entities.push(scene.entities.add(new engine.Entity({
+        name: '核心区 25km',
+        polygon: {
+          hierarchy: { positions: ellipsePositions(CENTER.lon, CENTER.lat, 25_000, 25_000) },
+          height: 4000 / engine.Camera.EARTH_SCALE,
+          color: new engine.Color(1, 0.75, 0.1, 0.45),
+        },
+      })));
+      // 旋转椭圆：机场噪声带（300km × 90km，旋转 -35°）
+      entities.push(scene.entities.add(new engine.Entity({
+        name: '噪声带 300×90km',
+        polygon: {
+          hierarchy: { positions: ellipsePositions(117.6, 39.4, 300_000, 90_000, -35) },
+          height: 1500 / engine.Camera.EARTH_SCALE,
+          color: new engine.Color(0.95, 0.25, 0.3, 0.28),
+        },
+      })));
+      // 中心点
+      entities.push(scene.entities.add(new engine.Entity({
+        name: '中心',
+        position: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat, 0),
+        point: { pixelSize: 12, color: engine.Color.WHITE },
+        label: { text: '北京', font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
+      })));
+
+      let ellipsesOn = true;
+      addBtn('椭圆显示开 / 关', () => {
+        ellipsesOn = !ellipsesOn;
+        for (const e of entities) e.show = ellipsesOn;
+      });
+      addBtn('低空视角', () => viewer.camera.flyTo({
+        destination: { lon: 116.4, lat: 39.6, height: 900_000 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-55) },
+        duration: 2.5,
+      }));
+      addBtn('高空视角', () => viewer.camera.flyTo({
+        destination: { lon: 116.4, lat: 38.5, height: 3_200_000 }, duration: 2,
+      }));
+
+      result.textContent =
+        `参数化椭圆面 4 个（叠高 1500~4000 m 避免大圆边缘沉入椭球）\n` +
+        `同心圆 ×3（180/80/25 km）· 旋转椭圆 ×1（300×90 km @ -35°）`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.4, 38.5, 3_200_000],
+          imagery: 'gaode-sat',
+          title: '26 · 椭圆与圆面',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '26 椭圆与圆面 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 63：高程分层设色 Elevation - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:300px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;max-height:150px;overflow:auto;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+    #legend{display:flex;flex-direction:column;gap:2px;margin-top:8px;font-size:11px;color:#cbd5e1;}
+    #legend .bar{height:12px;border-radius:3px;
+      background:linear-gradient(90deg,#1e3a8a,#0e7490,#15803d,#65a30d,#ca8a04,#ea580c,#b91c1c,#f5f5f4);}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>63 高程分层设色 Elevation</h1>
+    <p class="desc">对湖北地形服务做网格 sampleHeight 采样，按 8 级高程分带着色
+      （深谷蓝 → 雪峰白），逐点输出彩色点阵。对齐 EV 08_elevation 的分层设色
+      语义（引擎无等高线裁剪材质，以采样点阵近似）。</p>
+    <div id="controls"></div>
+    <div id="legend"><div class="bar"></div><span id="legendText">— m … — m</span></div>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 需要本地地形服务在线：http://localhost:8888（terrain_hubei）。
+      离线时采样全为 0，点阵呈最低色带。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    // 8 级分层色带（低 → 高）
+    const BAND_COLORS = [
+      [0.12, 0.23, 0.54], // 深蓝（河谷）
+      [0.05, 0.45, 0.56], // 青
+      [0.08, 0.50, 0.24], // 绿
+      [0.40, 0.64, 0.05], // 黄绿
+      [0.79, 0.54, 0.02], // 金黄
+      [0.92, 0.35, 0.05], // 橙
+      [0.73, 0.11, 0.11], // 红（高山）
+      [0.96, 0.96, 0.96], // 白（雪峰）
+    ];
+    const EARTH = 6378137;
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const legendText = document.getElementById('legendText');
+      const addBtn = (label, onClick) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      };
+
+      // ── 1. 挂载湖北地形（8888 quantized-mesh）──────────────────────
+      let sampleHeight = () => 0;
+      try {
+        const provider = new engine.LocalQuantizedMeshProvider({
+          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          maximumLevel: 14,
+        });
+        if (typeof engine.TerrainLayer === 'function') {
+          viewer.globe.setTerrainProvider(provider);
+          sampleHeight = (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat);
+        }
+      } catch (err) {
+        console.error('[63_elevation] terrain init failed:', err);
+      }
+
+      // ── 2. 网格采样 + 分层设色点阵 ─────────────────────────────────
+      const BBOX = { lonMin: 109.5, lonMax: 111.5, latMin: 30.7, latMax: 31.9 };
+      const COLS = 32, ROWS = 24;
+      const entities = viewer.scene.entities;
+      let stat = { min: 0, max: 0, nonzero: 0 };
+
+      function rebuild() {
+        entities.removeAll();
+        // 第一遍：采样求 min/max
+        const samples = [];
+        let min = Infinity, max = -Infinity;
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const lon = BBOX.lonMin + (BBOX.lonMax - BBOX.lonMin) * (c / (COLS - 1));
+            const lat = BBOX.latMin + (BBOX.latMax - BBOX.latMin) * (r / (ROWS - 1));
+            const h = sampleHeight(lon, lat);
+            samples.push([lon, lat, h]);
+            if (h < min) min = h;
+            if (h > max) max = h;
+          }
+        }
+        const range = Math.max(max - min, 1);
+        // 第二遍：按 8 级分带着色，逐点建实体
+        for (const [lon, lat, h] of samples) {
+          const band = Math.min(7, Math.floor((h - min) / range * 8));
+          const [cr, cg, cb] = BAND_COLORS[band];
+          const m = engine.Cartesian3.fromDegrees(lon, lat, h + 1500); // 点阵抬升避免入地
+          entities.add(new engine.Entity({
+            name: 'elev-point',
+            position: new engine.Cartesian3(m.x / EARTH, m.y / EARTH, m.z / EARTH),
+            point: {
+              color: new engine.Color(cr, cg, cb, 0.95),
+              pixelSize: 7,
+              showPointOnTop: true,
+            },
+          }));
+        }
+        legendText.textContent =
+          `${Math.round(min)} m ─────── ${Math.round(max)} m（8 级分带）`;
+        stat = {
+          min, max,
+          nonzero: samples.filter(s => s[2] > 0).length / samples.length,
+        };
+      }
+
+      // 地形瓦片异步就绪 → 周期重采样直到覆盖充分
+      rebuild();
+      let tries = 0;
+      const timer = setInterval(() => {
+        tries += 1;
+        if (!shown) return; // 隐藏期间只刷统计不重建
+        rebuild();
+        if (stat.nonzero > 0.6 || tries >= 12) clearInterval(timer);
+        refresh();
+      }, 1200);
+
+      // ── 3. UI ──────────────────────────────────────────────────────
+      let shown = true;
+      const showBtn = addBtn('点阵: 开', () => {
+        shown = !shown;
+        showBtn.textContent = `点阵: ${shown ? '开' : '关'}`;
+        showBtn.classList.toggle('active', shown);
+        if (shown) rebuild(); else entities.removeAll();
+        refresh();
+      });
+      showBtn.classList.add('active');
+      addBtn('重新采样', () => {
+        clearInterval(timer);
+        tries = 12; // 标记结束自动重采样
+        rebuild();
+        refresh();
+      });
+
+      function refresh() {
+        result.textContent =
+          `采样网格: ${COLS}×${ROWS}（${BBOX.lonMin}°E-${BBOX.lonMax}°E, ${BBOX.latMin}°N-${BBOX.latMax}°N）\n` +
+          `高程范围: ${Math.round(stat.min)} ~ ${Math.round(stat.max)} m（8 级分带）\n` +
+          `地形覆盖: ${(stat.nonzero * 100).toFixed(0)}%（重采样 ${tries} 次）\n` +
+          `点阵: ${entities.length} 个彩色点 · ${shown ? '显示' : '隐藏'}`;
+      }
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.8, 31.3, 380_000],
+          imagery: 'gaode-sat',
+          title: '63 · 高程分层设色 Elevation',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '63 高程分层设色 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

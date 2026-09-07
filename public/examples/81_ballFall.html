@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 81：自由落体物理 BallFall - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>81 自由落体物理</h1>
+    <p class="desc">迁移自 EV-Globe 12_ballFall（three.js+ammo 物理引擎）。
+      降级实现：引擎 Clock 驱动时间步，欧拉积分 v += -g·dt，h += v·dt，
+      落地按恢复系数反弹。球体为 EllipsoidGeometry Primitive，逐帧更新 modelMatrix。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const RE = C3.EARTH_RADIUS;                 // 6378137 m，1 归一化单位
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 坐标辅助：经纬度 + 高度(米) → 归一化 ECEF（模长 = 1 + h/RE）─────
+      const lonLatH = (lon, lat, h = 0) => {
+        const p = C3.fromDegrees(lon, lat, h);
+        return new C3(p.x / RE, p.y / RE, p.z / RE);
+      };
+
+      const LON = 116.4, LAT = 38.8;              // 华北平原（固定平地地面 h=0）
+      const BALL_R = 20_000;                      // 球半径 20 km（演示尺度）
+      const DROP_H = 400_000;                     // 初始离地 400 km
+      const G_MOON = 1.62;
+
+      // ── 球体 Primitive：单位 UV 球 → modelMatrix 缩放+平移放置 ──────────
+      function makeBall(radiusM, color) {
+        const geo = new engine.EllipsoidGeometry({
+          radii: new C3(1, 1, 1),
+          stackPartitions: 24,
+          slicePartitions: 16,
+        }).createGeometry();
+        const n = geo.vertexCount;
+        const verts = new Float32Array(n * 9);    // px py pz nx ny nz u v（交错）
+        for (let i = 0; i < n; i++) {
+          verts.set([
+            geo.positions[i * 3], geo.positions[i * 3 + 1], geo.positions[i * 3 + 2],
+            geo.normals[i * 3], geo.normals[i * 3 + 1], geo.normals[i * 3 + 2],
+            geo.uvs[i * 2], geo.uvs[i * 2 + 1],
+          ], i * 9);
+        }
+        return new engine.Primitive(viewer.context, {
+          vertices: verts,
+          indices: geo.indices,
+          color,
+          translucent: false,
+          scale: radiusM / RE,
+          position: lonLatH(LON, LAT, DROP_H),
+        });
+      }
+
+      /** 逐帧更新球体位置（保持缩放分量） */
+      function placeAt(prim, pos) {
+        const m = engine.Matrix4.fromTranslation(pos, new engine.Matrix4());
+        const s = BALL_R / RE;
+        const v = m.values;
+        v[0] *= s; v[1] *= s; v[2] *= s;
+        v[4] *= s; v[5] *= s; v[6] *= s;
+        v[8] *= s; v[9] *= s; v[10] *= s;
+        prim.modelMatrix = m;
+      }
+
+      const ball = makeBall(BALL_R, new engine.Color(1.0, 0.55, 0.15, 1.0));
+      viewer.scene.addPrimitive(ball);
+
+      // ── 场景标记：落点 + 高度标尺（静态实体）──────────────────────────
+      const entities = viewer.scene.entities;
+      entities.add(new engine.Entity({
+        position: lonLatH(LON, LAT, 0),
+        point: { color: engine.Color.RED, pixelSize: 10 },
+        label: {
+          text: '落点',
+          font: '14px sans-serif',
+          fillColor: engine.Color.WHITE,
+        },
+      }));
+      const rulerPts = [];
+      for (let h = 0; h <= DROP_H; h += 100_000) rulerPts.push(lonLatH(LON, LAT, h));
+      entities.add(new engine.Entity({
+        polyline: { positions: rulerPts, width: 1, color: new engine.Color(0.5, 0.8, 1.0, 0.45) },
+      }));
+      entities.add(new engine.Entity({
+        position: lonLatH(LON, LAT, DROP_H),
+        label: {
+          text: '400 km',
+          font: '13px sans-serif',
+          fillColor: new engine.Color(0.5, 0.8, 1.0, 1),
+        },
+      }));
+
+      // ── 物理状态与时间源（引擎 Clock）─────────────────────────────────
+      const clock = new engine.Clock({ shouldAnimate: true });
+      let prevT = clock.currentTime;
+      let g = 9.8;                                // m/s²
+      const RESTITUTION = 0.62;                   // 反弹恢复系数
+      let h = DROP_H, v = 0, bounces = 0, paused = false;
+
+      function drop() { h = DROP_H; v = 0; bounces = 0; }
+
+      // ── 逐帧积分：挂 viewer.preRender（每帧渲染前调用）────────────────
+      viewer.preRender = () => {
+        clock.tick();                             // Clock 推进 currentTime
+        const dt = Math.min(
+          clock.currentTime.secondsDifference(prevT), 0.05);
+        prevT = clock.currentTime;
+        if (paused || dt <= 0) return;
+
+        v -= g * dt;                              // 欧拉积分：v += a·dt
+        h += v * dt;                              //            h += v·dt
+        if (h <= BALL_R) {                        // 地面接触 → 反弹
+          h = BALL_R;
+          if (Math.abs(v) > 1.5) { v = -v * RESTITUTION; bounces++; }
+          else v = 0;                             // 动能耗尽，静止
+        }
+        placeAt(ball, lonLatH(LON, LAT, h));
+      };
+
+      // ── 交互 ──────────────────────────────────────────────────────────
+      const pauseBtn = addBtn('暂停', () => {
+        paused = !paused;
+        clock.shouldAnimate = !paused;
+        pauseBtn.textContent = paused ? '继续' : '暂停';
+        pauseBtn.classList.toggle('active', paused);
+      });
+      addBtn('重新下落', drop);
+      const moonBtn = addBtn('切换月球重力 (g=1.62)', () => {
+        g = g === 9.8 ? G_MOON : 9.8;
+        moonBtn.textContent = g === 9.8 ? '切换月球重力 (g=1.62)' : '切换地球重力 (g=9.8)';
+        moonBtn.classList.toggle('active', g !== 9.8);
+        drop();
+      });
+      addBtn('飞至视角', () => viewer.camera.flyTo({
+        destination: { lon: LON - 3.5, lat: LAT - 2.5, height: 1_500_000 },
+        duration: 1.6,
+      }));
+
+      function refresh() {
+        result.textContent =
+          `离地高度: ${(h - BALL_R).toFixed(0).padStart(7)} m   ` +
+          `速度: ${v.toFixed(1).padStart(8)} m/s\n` +
+          `反弹次数: ${bounces}   g = ${g.toFixed(2)} m/s²   ` +
+          `恢复系数 e = ${RESTITUTION}\n` +
+          '时间源: engine.Clock.tick() → JulianDate 差分';
+      }
+      setInterval(refresh, 120);
+
+      // 斜俯视角看清"下落—反弹"剖面
+      viewer.camera.setView({
+        destination: C3.fromDegrees(LON - 3.5, LAT - 2.5, 1_500_000),
+      });
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.9, 36.3, 1_500_000],
+          imagery: 'gaode-sat',
+          title: '81 · 自由落体物理',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '81 自由落体物理 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

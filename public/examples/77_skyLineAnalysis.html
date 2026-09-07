@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 77：天际线分析 SkyLineAnalysis - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:320px;max-width:430px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+    .cg-panel #controls button{padding:5px 10px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;max-height:220px;overflow:auto;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+    /* 天际线轮廓 canvas（底部整宽） */
+    #skyline{position:absolute;left:0;right:0;bottom:0;z-index:8000;width:100%;
+      pointer-events:none;display:none;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>77 天际线分析</h1>
+    <p class="desc">服务端天际线分析的前端近似：以观察点为圆心，按方位角逐列
+      “raycast”——沿每个方位向外步进采样 <code>sampleHeight</code>，记录
+      <code>atan2(地形高−眼高, 距离)</code> 的最大仰角，得到 360° 天际线轮廓，
+      用 canvas 2D 画出剪影与方位刻度。</p>
+    <label>观察点眼高（高于地面）<span id="eyeVal">150</span> m</label>
+    <input id="eyeSlider" type="range" min="10" max="800" step="10" value="150" />
+    <div id="controls">
+      <button id="btnRun">📍 分析天际线</button>
+      <button id="btnClickSet">点选观察点：关</button>
+      <button id="btnClear">清除</button>
+    </div>
+    <div id="result">观察点默认在神农架林区（110.68°E, 31.35°N）。</div>
+    <p class="warn">⚠ 需要本地地形服务在线：<code>http://localhost:8888</code>（terrain_hubei）。
+      离线时全平面为 0 高，天际线退化为平线。</p>
+  </div>
+  <canvas id="skyline" height="240"></canvas>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const eyeSlider = document.getElementById('eyeSlider');
+      const eyeVal = document.getElementById('eyeVal');
+      const btnRun = document.getElementById('btnRun');
+      const btnClickSet = document.getElementById('btnClickSet');
+      const canvas = document.getElementById('skyline');
+      const ctx = canvas.getContext('2d');
+
+      // ── 1. 地形层（湖北 8888；离线降级 0 高）────────────────────────
+      let terrainOk = false;
+      try {
+        if (typeof engine.TerrainLayer === 'function') {
+          viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+            url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 14,
+          }));
+          terrainOk = true;
+        }
+      } catch (err) { console.warn('[77] terrain init failed:', err.message); }
+      const sampleHeight = terrainOk
+        ? (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat)
+        : () => 0;
+      if (!terrainOk) result.textContent += '\n（地形离线：当前为 0 高椭球模式）';
+
+      // ── 2. 观察点状态（默认神农架）──────────────────────────────────
+      const RATIO = 6356752.3142 / 6378137;
+      function toLonLat(p) {
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const ux = p.x / mag, uy = (p.y / mag) / RATIO, uz = (p.z / mag) / RATIO;
+        return { lon: Math.atan2(uy, ux) * 180 / Math.PI,
+                 lat: Math.atan2(uz, Math.hypot(ux, uy)) * 180 / Math.PI };
+      }
+      let observer = { lon: 110.68, lat: 31.35 };
+      let observerEntity = null;
+      function drawObserverMarker() {
+        if (observerEntity) viewer.scene.entities.remove(observerEntity);
+        const h = sampleHeight(observer.lon, observer.lat);
+        observerEntity = viewer.scene.entities.add({
+          name: '观察点',
+          position: engine.Cartesian3.fromDegrees(observer.lon, observer.lat, (h + Number(eyeSlider.value)) / 6378137),
+          point: { pixelSize: 10, color: new engine.Color(1.0, 0.55, 0.2, 1.0) },
+        });
+      }
+      drawObserverMarker();
+
+      // 初始视角：观察点上空
+      viewer.camera.flyTo({ destination: { lon: observer.lon, lat: observer.lat - 0.12, height: 30_000 } });
+
+      // 点选观察点（开关式，避免与分析按钮冲突）
+      let clickMode = false;
+      const clickHandler = new engine.ScreenSpaceEventHandler(viewer.canvas);
+      clickHandler.setInputAction((pos) => {
+        if (!clickMode) return;
+        const ndcX = (pos.x / viewer.canvas.clientWidth) * 2 - 1;
+        const ndcY = 1 - (pos.y / viewer.canvas.clientHeight) * 2;
+        const hit = viewer.camera.pickGlobe(ndcX, ndcY);
+        if (!hit) return;
+        observer = toLonLat(hit);
+        drawObserverMarker();
+        result.textContent = `观察点已设为 ${observer.lon.toFixed(5)}°E, ${observer.lat.toFixed(5)}°N`;
+      }, 'LEFT_CLICK');
+      btnClickSet.addEventListener('click', () => {
+        clickMode = !clickMode;
+        btnClickSet.textContent = `点选观察点：${clickMode ? '开（点球面取点）' : '关'}`;
+        btnClickSet.classList.toggle('active', clickMode);
+      });
+      eyeSlider.addEventListener('input', () => {
+        eyeVal.textContent = eyeSlider.value;
+        drawObserverMarker();
+      });
+
+      // ── 3. 天际线计算：360° 逐方位步进采样 ─────────────────────────
+      const AZ_STEP = 2;          // 每 2° 一个方位列 → 180 列
+      const MAX_DIST = 25_000;    // 向外看 25 km
+      const M_STEP = 200;         // 步进 200 m → 125 步
+      let running = false;
+
+      async function runAnalysis() {
+        if (running) return;
+        running = true;
+        btnRun.disabled = true;
+        const eye = Number(eyeSlider.value);
+        const obsH = sampleHeight(observer.lon, observer.lat) + eye;
+        const cols = 360 / AZ_STEP;
+        const profile = new Float32Array(cols);      // 每列最大遮挡仰角(度)
+        const peakInfo = [];                          // 每列 {az, angle, dist, h}
+
+        // 分块让出主线程（每 24 列一块），渐进绘制
+        for (let c0 = 0; c0 < cols; c0 += 24) {
+          for (let c = c0; c < Math.min(cols, c0 + 24); c++) {
+            const az = c * AZ_STEP;
+            const rad = az * Math.PI / 180;
+            const dLonPerM = 1 / (111_320 * Math.max(0.2, Math.cos(observer.lat * Math.PI / 180)));
+            const dLatPerM = 1 / 111_320;
+            let best = -90, bestD = 0, bestH = 0;
+            for (let d = M_STEP; d <= MAX_DIST; d += M_STEP) {
+              const lon = observer.lon + Math.sin(rad) * d * dLonPerM;
+              const lat = observer.lat + Math.cos(rad) * d * dLatPerM;
+              const h = sampleHeight(lon, lat);
+              const ang = Math.atan2(h - obsH, d) * 180 / Math.PI;
+              if (ang > best) { best = ang; bestD = d; bestH = h; }
+            }
+            profile[c] = best;
+            peakInfo[c] = { az, angle: best, dist: bestD, h: bestH };
+          }
+          drawSkyline(profile); // 渐进重绘
+          await new Promise((r) => setTimeout(r, 0));
+        }
+
+        // 统计：最大遮挡角 + 前 3 遮挡方位
+        const sorted = [...peakInfo].sort((a, b) => b.angle - a.angle);
+        const dirName = (az) => ['北','东北','东','东南','南','西南','西','西北'][Math.round(az / 45) % 8];
+        result.textContent =
+          `观察点 ${observer.lon.toFixed(4)}°E, ${observer.lat.toFixed(4)}°N  ` +
+          `地面 ${(obsH - eye).toFixed(0)} m + 眼高 ${eye} m\n` +
+          `最大遮挡角 ${sorted[0].angle.toFixed(1)}° @ 方位 ${sorted[0].az}°(${dirName(sorted[0].az)}) ` +
+          `${(sorted[0].dist / 1000).toFixed(1)} km 处 山高 ${sorted[0].h.toFixed(0)} m\n` +
+          sorted.slice(1, 4).map((p) =>
+            `  次遮挡 ${p.angle.toFixed(1)}° @ ${p.az}°(${dirName(p.az)})`).join('\n') +
+          `\n天际线平均仰角 ${(profile.reduce((s, v) => s + v, 0) / profile.length).toFixed(2)}°`;
+        running = false;
+        btnRun.disabled = false;
+      }
+
+      // ── 4. canvas 2D 轮廓绘制（贴屏底，剪影 + 方位刻度）──────────────
+      function drawSkyline(profile) {
+        const w = canvas.width = Math.round(innerWidth * devicePixelRatio);
+        const h = canvas.height = Math.round(240 * devicePixelRatio);
+        canvas.style.display = 'block';
+        const ANG_SHOW = 30; // 仰角显示范围 0~30°
+        ctx.clearRect(0, 0, w, h);
+
+        // 天空渐变底
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, 'rgba(10,16,30,0)');
+        grad.addColorStop(0.55, 'rgba(10,16,30,.55)');
+        grad.addColorStop(1, 'rgba(6,10,20,.85)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+
+        const cols = profile.length;
+        const yOf = (ang) => h - (Math.max(0, Math.min(ANG_SHOW, ang)) / ANG_SHOW) * (h - 30 * devicePixelRatio);
+        const xOf = (c) => (c / cols) * w;
+
+        // 剪影
+        ctx.beginPath();
+        ctx.moveTo(0, h);
+        for (let c = 0; c < cols; c++) ctx.lineTo(xOf(c), yOf(profile[c]));
+        ctx.lineTo(w, h);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(30,48,80,.9)';
+        ctx.fill();
+        ctx.strokeStyle = '#7fd4ff';
+        ctx.lineWidth = 2 * devicePixelRatio;
+        ctx.stroke();
+
+        // 方位刻度（每 45°）
+        ctx.fillStyle = '#cfe4ff';
+        ctx.font = `${12 * devicePixelRatio}px Consolas, monospace`;
+        ctx.textAlign = 'center';
+        const names = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+        for (let az = 0; az < 360; az += 45) {
+          const c = az / AZ_STEP;
+          ctx.fillText(names[az / 45], Math.min(w - 20, Math.max(20, xOf(c))), h - 8 * devicePixelRatio);
+        }
+      }
+
+      btnRun.addEventListener('click', runAnalysis);
+      document.getElementById('btnClear').addEventListener('click', () => {
+        canvas.style.display = 'none';
+        result.textContent = '已清除天际线轮廓。';
+      });
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.68, 31.2, 60_000],
+          imagery: 'gaode-sat',
+          title: '77 · 天际线分析 SkyLine',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '77 天际线分析 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

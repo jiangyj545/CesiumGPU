@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 78：可视域分析 VisibleRange - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:320px;max-width:430px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+    .cg-panel #controls button{padding:5px 10px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;max-height:220px;overflow:auto;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+    .cg-panel .legend{font-size:12px;margin-top:6px;}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin:0 4px;vertical-align:middle;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>78 可视域分析</h1>
+    <p class="desc">服务端可视域分析的前端近似：从观察点向四周按「方位 × 距离」网格
+      取目标点，对每个目标做通视检测——沿观察点→目标连线取 N 个中间点，比较
+      <b>连线插值高度</b> 与该处 <b>地形高度</b>，任一中间点被地形挡住即不可视。
+      目标点绿 = 通视，红 = 遮挡。</p>
+    <label>分析半径 <span id="rangeVal">8</span> km</label>
+    <input id="rangeSlider" type="range" min="3" max="15" step="1" value="8" />
+    <label>观察点眼高 <span id="eyeVal">120</span> m</label>
+    <input id="eyeSlider" type="range" min="20" max="600" step="10" value="120" />
+    <div id="controls">
+      <button id="btnRun">⛰ 开始分析</button>
+      <button id="btnClickSet">点选观察点：关</button>
+      <button id="btnClear">清除</button>
+    </div>
+    <div class="legend">
+      <span class="dot" style="background:#4ade80"></span>通视
+      <span class="dot" style="background:#f87171"></span>遮挡
+      <span class="dot" style="background:#fb923c"></span>观察点
+    </div>
+    <div id="result">观察点默认在神农架林区山脊（110.68°E, 31.35°N）。</div>
+    <p class="warn">⚠ 需要本地地形服务在线：<code>http://localhost:8888</code>（terrain_hubei）。
+      离线时全部格点通视（平面无遮挡）。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const rangeSlider = document.getElementById('rangeSlider');
+      const rangeVal = document.getElementById('rangeVal');
+      const eyeSlider = document.getElementById('eyeSlider');
+      const eyeVal = document.getElementById('eyeVal');
+      const btnRun = document.getElementById('btnRun');
+      const btnClickSet = document.getElementById('btnClickSet');
+
+      // ── 1. 地形层（湖北 8888；离线降级 0 高）────────────────────────
+      let terrainOk = false;
+      try {
+        if (typeof engine.TerrainLayer === 'function') {
+          viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+            url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 14,
+          }));
+          terrainOk = true;
+        }
+      } catch (err) { console.warn('[78] terrain init failed:', err.message); }
+      const sampleHeight = terrainOk
+        ? (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat)
+        : () => 0;
+      if (!terrainOk) result.textContent += '\n（地形离线：0 高椭球模式）';
+
+      const RATIO = 6356752.3142 / 6378137;
+      function toLonLat(p) {
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const ux = p.x / mag, uy = (p.y / mag) / RATIO, uz = (p.z / mag) / RATIO;
+        return { lon: Math.atan2(uy, ux) * 180 / Math.PI,
+                 lat: Math.atan2(uz, Math.hypot(ux, uy)) * 180 / Math.PI };
+      }
+
+      // ── 2. 观察点 ───────────────────────────────────────────────────
+      let observer = { lon: 110.68, lat: 31.35 };
+      let obsEntity = null;
+      function drawObserverMarker() {
+        if (obsEntity) viewer.scene.entities.remove(obsEntity);
+        const h = sampleHeight(observer.lon, observer.lat);
+        obsEntity = viewer.scene.entities.add({
+          name: '观察点',
+          position: engine.Cartesian3.fromDegrees(observer.lon, observer.lat, (h + Number(eyeSlider.value)) / 6378137),
+          point: { pixelSize: 12, color: new engine.Color(1.0, 0.57, 0.2, 1.0) },
+        });
+      }
+      drawObserverMarker();
+      viewer.camera.flyTo({ destination: { lon: observer.lon, lat: observer.lat - 0.1, height: 26_000 } });
+
+      let clickMode = false;
+      const clickHandler = new engine.ScreenSpaceEventHandler(viewer.canvas);
+      clickHandler.setInputAction((pos) => {
+        if (!clickMode) return;
+        const ndcX = (pos.x / viewer.canvas.clientWidth) * 2 - 1;
+        const ndcY = 1 - (pos.y / viewer.canvas.clientHeight) * 2;
+        const hit = viewer.camera.pickGlobe(ndcX, ndcY);
+        if (!hit) return;
+        observer = toLonLat(hit);
+        drawObserverMarker();
+        result.textContent = `观察点已设为 ${observer.lon.toFixed(5)}°E, ${observer.lat.toFixed(5)}°N`;
+      }, 'LEFT_CLICK');
+      btnClickSet.addEventListener('click', () => {
+        clickMode = !clickMode;
+        btnClickSet.textContent = `点选观察点：${clickMode ? '开（点球面取点）' : '关'}`;
+        btnClickSet.classList.toggle('active', clickMode);
+      });
+      rangeSlider.addEventListener('input', () => { rangeVal.textContent = rangeSlider.value; });
+      eyeSlider.addEventListener('input', () => { eyeVal.textContent = eyeSlider.value; drawObserverMarker(); });
+
+      // ── 3. 通视检测：连线上采样比较「插值高度 vs 地形高度」────────────
+      const LOS_SAMPLES = 24; // 每条视线 24 个中间点
+      function lineOfSight(obsH, tgtLon, tgtLat, tgtH) {
+        for (let i = 1; i < LOS_SAMPLES; i++) {
+          const t = i / LOS_SAMPLES;
+          const lon = observer.lon + (tgtLon - observer.lon) * t;
+          const lat = observer.lat + (tgtLat - observer.lat) * t;
+          const lineH = obsH + (tgtH - obsH) * t;      // 视线插值高度
+          const terrainH = sampleHeight(lon, lat);      // 该处地形
+          if (terrainH > lineH + 2) return false;       // 2 m 容差
+        }
+        return true;
+      }
+
+      // ── 4. 网格分析（异步分块，逐实体着色）──────────────────────────
+      const AZ_COUNT = 48;    // 方位 48 列（每 7.5°）
+      const RING_COUNT = 12;  // 距离 12 环
+      let running = false;
+
+      async function runAnalysis() {
+        if (running) return;
+        running = true;
+        btnRun.disabled = true;
+        viewer.scene.entities.removeAll(); // 清掉旧结果
+
+        const rangeM = rangeSlider.valueAsNumber * 1000;
+        const eye = eyeSlider.valueAsNumber;
+        const obsGroundH = sampleHeight(observer.lon, observer.lat);
+        const obsH = obsGroundH + eye;
+        const dLonPerM = 1 / (111_320 * Math.max(0.2, Math.cos(observer.lat * Math.PI / 180)));
+        const dLatPerM = 1 / 111_320;
+
+        let visible = 0, total = 0;
+        const green = new engine.Color(0.30, 0.90, 0.45, 0.95);
+        const red = new engine.Color(0.95, 0.32, 0.32, 0.85);
+        const perAz = []; // 每方位的通视率（找最佳通视方向）
+
+        for (let a0 = 0; a0 < AZ_COUNT; a0 += 6) { // 每 6 个方位让出主线程
+          for (let a = a0; a < Math.min(AZ_COUNT, a0 + 6); a++) {
+            const az = (a / AZ_COUNT) * Math.PI * 2;
+            let azVis = 0;
+            for (let r = 1; r <= RING_COUNT; r++) {
+              const d = (r / RING_COUNT) * rangeM;
+              const lon = observer.lon + Math.sin(az) * d * dLonPerM;
+              const lat = observer.lat + Math.cos(az) * d * dLatPerM;
+              const tH = sampleHeight(lon, lat);
+              const ok = lineOfSight(obsH, lon, lat, tH);
+              total++; if (ok) { visible++; azVis++; }
+              viewer.scene.entities.add({
+                name: ok ? '通视点' : '遮挡点',
+                position: engine.Cartesian3.fromDegrees(lon, lat, (tH + 5) / 6378137),
+                point: {
+                  pixelSize: 7 + (r / RING_COUNT) * 5,
+                  color: ok ? green : red,
+                },
+              });
+            }
+            perAz.push({ azDeg: (a / AZ_COUNT) * 360, rate: azVis / RING_COUNT });
+          }
+          result.textContent = `分析中… ${Math.round(Math.min(AZ_COUNT, a0 + 6) / AZ_COUNT * 100)}%`;
+          await new Promise((r) => setTimeout(r, 0));
+        }
+
+        drawObserverMarker();
+        const best = perAz.reduce((m, p) => (p.rate > m.rate ? p : m), perAz[0]);
+        result.textContent =
+          `分析完成：格点 ${total} 个，通视 ${visible} 个（${(visible / total * 100).toFixed(1)}%）\n` +
+          `最佳通视方位 ${best.azDeg.toFixed(0)}°（该方向 ${(best.rate * 100).toFixed(0)}% 格点通视）\n` +
+          `观察点地面 ${obsGroundH.toFixed(0)} m + 眼高 ${eye} m，分析半径 ${(rangeM / 1000).toFixed(0)} km`;
+        running = false;
+        btnRun.disabled = false;
+      }
+
+      btnRun.addEventListener('click', runAnalysis);
+      document.getElementById('btnClear').addEventListener('click', () => {
+        viewer.scene.entities.removeAll();
+        result.textContent = '已清除分析结果。';
+      });
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.68, 31.2, 55_000],
+          imagery: 'gaode-sat',
+          title: '78 · 可视域分析 VisibleRange',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '78 可视域分析 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

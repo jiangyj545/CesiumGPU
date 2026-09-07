@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 43：街景式地面漫游 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:290px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);font:13px/1.6 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9fd0ff;}
+    .cg-panel .desc{font-size:12px;color:#8fa8c8;margin:0 0 8px;}
+    .cg-panel h2{font-size:12px;margin:8px 0 4px;color:#7fb4e8;}
+    .cg-panel button{margin:4px 6px 4px 0;padding:5px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#dbeaff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel button.active{background:rgba(80,160,90,.7);border-color:rgba(140,255,160,.5);}
+    .cg-panel label{display:block;font-size:12px;margin:5px 0 2px;color:#b8d0ee;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel kbd{display:inline-block;min-width:18px;text-align:center;padding:1px 5px;
+      background:rgba(255,255,255,.12);border:1px solid rgba(200,220,255,.35);
+      border-radius:4px;font:11px/1.5 Consolas,monospace;color:#fff;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;}
+    .cg-panel .warn{font-size:11px;color:#e8c37f;margin-top:6px;}
+    #focusHint{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:9100;
+      padding:6px 14px;background:rgba(10,18,30,.85);border:1px solid rgba(120,180,255,.3);
+      border-radius:16px;color:#ffd98a;font:12px/1.4 system-ui,sans-serif;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="focusHint">点击画面获得键盘焦点（WASD 行走 / Q·C 升降 / 方向键转向）</div>
+  <div class="cg-panel">
+    <h1>43 街景式地面漫游</h1>
+    <p class="desc">相机贴地沿路径行走（对齐 EV 07_googleRoam 的街景语义）：
+      默认自动巡游，WASD 随时接管手动行走，地形采样保持离地高度。</p>
+
+    <h2>控制</h2>
+    <div>
+      <button id="btnAuto" class="active">自动巡游：开</button>
+      <button id="btnLift">抬升至 40 km 巡航档</button>
+    </div>
+    <label>行走速度 <span id="vSpd">60</span> m/s</label>
+    <input type="range" id="speed" min="10" max="300" step="10" value="60" />
+    <label>离地高度 <span id="vAgl">60</span> m</label>
+    <input type="range" id="agl" min="20" max="2000" step="10" value="60" />
+    <label>俯仰角 <span id="vPitch">-18</span> °</label>
+    <input type="range" id="pitch" min="-70" max="5" step="1" value="-18" />
+
+    <h2>键位</h2>
+    <div style="font-size:12px;color:#b8d0ee;line-height:2;">
+      <kbd>W</kbd><kbd>S</kbd> 前进/后退　<kbd>A</kbd><kbd>D</kbd> 左右平移<br />
+      <kbd>Q</kbd>/<kbd>空格</kbd> 上升　<kbd>C</kbd>/<kbd>Shift</kbd> 下降　<kbd>←</kbd><kbd>→</kbd> 转向
+    </div>
+
+    <div id="result">初始化中…</div>
+    <div class="warn">近似语义：EV 原版贴地 50 m 行走；本引擎近平面 ≈32 km，
+      贴地时近处地表会被裁剪（远处仍可见），可用「抬升」档获得完整画面。</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const MATH = engine.CesiumMath;
+      const result = document.getElementById('result');
+
+      // ── 地形层 + 高度采样（行走贴地依赖 sampleHeight）───────────────
+      let sampleHeight = () => 0;
+      try {
+        viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          maximumLevel: 14,
+        }));
+        sampleHeight = (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat);
+      } catch (err) {
+        console.error('[43] terrain init failed:', err);
+        result.textContent = '地形服务不可用，0 高椭球模式：' + err.message;
+      }
+
+      // ── 行走状态（经纬度 + 航向 + 离地高）───────────────────────────
+      const state = {
+        lon: 111.286,           // 从宜昌出发（地形起伏明显）
+        lat: 30.692,
+        headingDeg: 65,         // 初始朝向东北
+        agl: 60,                // 离地高度（米），EV 原版语义 ≈50 m
+        speed: 60,              // 行走速度 m/s
+        pitchDeg: -18,
+        autoTour: true,
+        tourT: 0,
+        keys: new Set(),
+      };
+
+      // ── 自动巡游路径：CatmullRom 样条（湖北境内闭环）────────────────
+      const WAYPOINTS = [
+        [111.286, 30.692], [111.9, 30.95], [112.6, 30.9], [112.2, 30.55],
+      ];
+      const SEG_SEC = 30;
+      const closed = [...WAYPOINTS, WAYPOINTS[0]];
+      const spline = new engine.CatmullRomSpline({
+        times: closed.map((_, i) => i * SEG_SEC),
+        points: closed.map(([lon, lat]) => {
+          // 归一化 ECEF 平面点（高度留给地形采样）
+          const c = engine.Cartesian3.fromDegrees(lon, lat, 0);
+          return new engine.Cartesian3(c.x / 6378137, c.y / 6378137, c.z / 6378137);
+        }),
+      });
+      // 路径可视化（沿法向抬升避免没入地形）
+      const pathPts = [];
+      for (let i = 0; i <= 160; i++) {
+        const p = spline.evaluate((i / 160) * SEG_SEC * WAYPOINTS.length);
+        pathPts.push(new engine.Cartesian3(p.x * 1.00003, p.y * 1.00003, p.z * 1.00003));
+      }
+      viewer.scene.entities.add({
+        name: 'walk-path',
+        polyline: { positions: pathPts, width: 2, color: new engine.Color(0.4, 1.0, 0.6, 0.8) },
+      });
+
+      // ── 相机应用：经纬度 → 贴地位置 + 航向视角 ─────────────────────
+      function applyCamera() {
+        const groundH = sampleHeight(state.lon, state.lat);
+        viewer.camera.setView({
+          destination: { lon: state.lon, lat: state.lat, height: groundH + state.agl },
+          orientation: {
+            heading: MATH.toRadians(state.headingDeg),
+            pitch: MATH.toRadians(state.pitchDeg),
+          },
+        });
+      }
+
+      // WASD 移动：沿 heading 的东北向步进（dt 秒 · speed 米）
+      function walk(dt) {
+        const k = state.keys;
+        const dist = state.speed * dt;
+        const h = MATH.toRadians(state.headingDeg);
+        let fwd = 0, side = 0, lift = 0;
+        if (k.has('w') || k.has('arrowup')) fwd += 1;
+        if (k.has('s') || k.has('arrowdown')) fwd -= 1;
+        if (k.has('a')) side -= 1;
+        if (k.has('d')) side += 1;
+        if (k.has('q') || k.has(' ')) lift += 1;
+        if (k.has('c') || k.has('shift')) lift -= 1;
+        if (k.has('arrowleft')) state.headingDeg -= 60 * dt;
+        if (k.has('arrowright')) state.headingDeg += 60 * dt;
+
+        if (fwd !== 0 || side !== 0) {
+          // 位移向量（前 = heading 方向，右 = heading+90°）
+          const dEast = Math.sin(h) * fwd + Math.cos(h) * side;
+          const dNorth = Math.cos(h) * fwd - Math.sin(h) * side;
+          const cosLat = Math.cos(MATH.toRadians(state.lat));
+          state.lon += (dEast * dist) / (111320 * cosLat);
+          state.lat += (dNorth * dist) / 110540;
+        }
+        if (lift !== 0) {
+          state.agl = Math.max(15, Math.min(4000, state.agl + lift * dist));
+        }
+      }
+
+      // ── 键盘事件（keydown/keyup 维护按住集合）──────────────────────
+      const hint = document.getElementById('focusHint');
+      window.addEventListener('keydown', (e) => {
+        const key = e.key.toLowerCase();
+        if (['w', 'a', 's', 'd', 'q', 'c', ' ', 'shift',
+             'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+          e.preventDefault();
+          state.keys.add(key);
+          if (state.autoTour) setAutoTour(false); // 手动操作接管
+        }
+      });
+      window.addEventListener('keyup', (e) => state.keys.delete(e.key.toLowerCase()));
+      window.addEventListener('blur', () => state.keys.clear());
+      document.getElementById('cesiumContainer').addEventListener('click', () => {
+        hint.style.display = 'none';
+      });
+
+      // ── UI ─────────────────────────────────────────────────────────
+      const $ = (id) => document.getElementById(id);
+      function setAutoTour(on) {
+        state.autoTour = on;
+        $('btnAuto').textContent = '自动巡游：' + (on ? '开' : '关');
+        $('btnAuto').classList.toggle('active', on);
+      }
+      $('btnAuto').addEventListener('click', () => setAutoTour(!state.autoTour));
+      $('btnLift').addEventListener('click', () => {
+        state.agl = 40000;
+        $('agl').value = 2000;
+        $('vAgl').textContent = '40000(巡航)';
+      });
+      $('speed').addEventListener('input', (e) => { state.speed = parseFloat(e.target.value); $('vSpd').textContent = e.target.value; });
+      $('agl').addEventListener('input', (e) => { state.agl = parseFloat(e.target.value); $('vAgl').textContent = e.target.value; });
+      $('pitch').addEventListener('input', (e) => { state.pitchDeg = parseFloat(e.target.value); $('vPitch').textContent = e.target.value; });
+
+      // ── 主循环 ─────────────────────────────────────────────────────
+      let lastTs = performance.now();
+      function tick(now) {
+        try {
+          const dt = Math.max(0, Math.min((now - lastTs) / 1000, 0.1));
+          lastTs = now;
+          if (state.autoTour) {
+            // 沿样条推进 tourT，采样经纬度作为行走位置
+            state.tourT = (state.tourT + dt) % (SEG_SEC * WAYPOINTS.length);
+            const p = spline.evaluate(state.tourT);
+            const mag = Math.hypot(p.x, p.y, p.z);
+            state.lon = MATH.toDegrees(Math.atan2(p.y, p.x));
+            state.lat = MATH.toDegrees(Math.asin(Math.max(-1, Math.min(1, p.z / mag))));
+          } else {
+            walk(dt);
+          }
+          applyCamera();
+          const groundH = sampleHeight(state.lon, state.lat);
+          const headingShow = (((state.headingDeg % 360) + 360) % 360).toFixed(0);
+          result.textContent =
+            `位置: ${state.lon.toFixed(5)}, ${state.lat.toFixed(5)}\n` +
+            `地面高: ${groundH.toFixed(0)} m   离地: ${state.agl.toFixed(0)} m\n` +
+            `朝向: ${headingShow}°   模式: ${state.autoTour ? '自动巡游' : '手动行走（WASD）'}`;
+        } catch (err) {
+          DemoUtils.showError('行走循环异常，已停止', err);
+          return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [111.3, 30.7, 5000],
+          imagery: 'gaode-sat',
+          title: '43 · 街景式地面漫游',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '43 街景式地面漫游 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

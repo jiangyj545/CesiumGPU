@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 64：彩色地形 ColorTerrain - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:300px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;max-height:130px;overflow:auto;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+    #legend{display:flex;flex-direction:column;gap:2px;margin-top:8px;font-size:11px;color:#cbd5e1;}
+    #legend .bar{height:12px;border-radius:3px;
+      background:linear-gradient(90deg,#1d4ed8,#0891b2,#059669,#eab308,#ea580c,#dc2626);}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>64 彩色地形 ColorTerrain</h1>
+    <p class="desc">密集网格 sampleHeight 采样 + 连续 HSL 渐变色带（深谷蓝 →
+      高山红），自南向北扫描着色，可切换高程夸张倍率。对齐 EV 08_colorTerrain
+      的整片渐变着色语义（与 63 的离散分带互补）。</p>
+    <div id="controls"></div>
+    <div id="legend"><div class="bar"></div><span id="legendText">— m … — m</span></div>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 需要本地地形服务在线：http://localhost:8888（terrain_hubei）。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const EARTH = 6378137;
+
+    /** 高程 t∈[0,1] → 连续渐变 RGB（蓝→青→绿→黄→橙→红）。 */
+    function rampColor(t) {
+      const stops = [
+        [0.11, 0.31, 0.85], [0.03, 0.57, 0.70], [0.02, 0.59, 0.41],
+        [0.92, 0.70, 0.03], [0.92, 0.35, 0.05], [0.86, 0.15, 0.15],
+      ];
+      const x = Math.min(0.9999, Math.max(0, t)) * (stops.length - 1);
+      const i = Math.floor(x), f = x - i;
+      const a = stops[i], b = stops[Math.min(stops.length - 1, i + 1)];
+      return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const legendText = document.getElementById('legendText');
+      const addBtn = (label, onClick) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      };
+
+      // ── 挂载湖北地形 ───────────────────────────────────────────────
+      let sampleHeight = () => 0;
+      try {
+        const provider = new engine.LocalQuantizedMeshProvider({
+          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          maximumLevel: 14,
+        });
+        if (typeof engine.TerrainLayer === 'function') {
+          viewer.globe.setTerrainProvider(provider);
+          sampleHeight = (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat);
+        }
+      } catch (err) {
+        console.error('[64_colorTerrain] terrain init failed:', err);
+      }
+
+      // ── 密集网格预采样（行优先，扫描动画按行取用）───────────────────
+      const BBOX = { lonMin: 109.6, lonMax: 111.4, latMin: 30.8, latMax: 31.8 };
+      const COLS = 48, ROWS = 36;
+      const entities = viewer.scene.entities;
+      const grid = [];   // grid[r] = [{lon,lat,h}, ...]
+      let hMin = Infinity, hMax = -Infinity;
+
+      function resample() {
+        grid.length = 0;
+        hMin = Infinity; hMax = -Infinity;
+        for (let r = 0; r < ROWS; r++) {
+          const lat = BBOX.latMin + (BBOX.latMax - BBOX.latMin) * (r / (ROWS - 1));
+          const row = [];
+          for (let c = 0; c < COLS; c++) {
+            const lon = BBOX.lonMin + (BBOX.lonMax - BBOX.lonMin) * (c / (COLS - 1));
+            const h = sampleHeight(lon, lat);
+            row.push({ lon, lat, h });
+            if (h < hMin) hMin = h;
+            if (h > hMax) hMax = h;
+          }
+          grid.push(row);
+        }
+        legendText.textContent =
+          `${Math.round(hMin)} m ─────── ${Math.round(hMax)} m（连续渐变）`;
+      }
+      resample();
+
+      // ── 扫描着色：自南向北逐行铺设彩色点 ───────────────────────────
+      let exaggeration = 1;
+      let scanRow = 0;
+      let scanTimer = null;
+
+      function addRow(r) {
+        const range = Math.max(hMax - hMin, 1);
+        for (const { lon, lat, h } of grid[r]) {
+          const t = (h - hMin) / range;
+          const [cr, cg, cb] = rampColor(t);
+          const m = engine.Cartesian3.fromDegrees(lon, lat, h * exaggeration + 1200);
+          entities.add(new engine.Entity({
+            name: 'color-terrain-point',
+            position: new engine.Cartesian3(m.x / EARTH, m.y / EARTH, m.z / EARTH),
+            point: {
+              color: new engine.Color(cr, cg, cb, 0.9),
+              pixelSize: 6,
+              showPointOnTop: true,
+            },
+          }));
+        }
+      }
+
+      function startScan() {
+        entities.removeAll();
+        scanRow = 0;
+        if (scanTimer) clearInterval(scanTimer);
+        scanTimer = setInterval(() => {
+          if (scanRow >= ROWS) { clearInterval(scanTimer); scanTimer = null; refresh(); return; }
+          addRow(scanRow);
+          scanRow += 1;
+          refresh();
+        }, 90);
+      }
+
+      // 地形瓦片异步就绪 → 延迟重采样并二次扫描
+      setTimeout(() => { resample(); startScan(); }, 2000);
+      startScan();
+
+      // ── UI ─────────────────────────────────────────────────────────
+      const exagBtns = [1, 2, 4].map((k) => {
+        const btn = addBtn(`夸张×${k}`, () => {
+          exaggeration = k;
+          exagBtns.forEach((b, i) => b.classList.toggle('active', i + 1 === k));
+          startScan(); // 重建全部行（新抬升高度）
+          refresh();
+        });
+        if (k === 1) btn.classList.add('active');
+        return btn;
+      });
+      addBtn('重新扫描', () => startScan());
+
+      function refresh() {
+        const done = scanRow * COLS;
+        result.textContent =
+          `网格: ${COLS}×${ROWS} = ${COLS * ROWS} 点（连续渐变着色）\n` +
+          `高程: ${Math.round(hMin)} ~ ${Math.round(hMax)} m · 夸张×${exaggeration}\n` +
+          `扫描: ${done}/${COLS * ROWS} 点已着色（南→北，90ms/行）\n` +
+          `说明: 63 页为离散 8 级分带，本页为连续渐变整片着色`;
+      }
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.8, 31.3, 320_000],
+          imagery: 'gaode-sat',
+          title: '64 · 彩色地形 ColorTerrain',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '64 彩色地形 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

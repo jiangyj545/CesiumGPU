@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 79：淹没分析 SubmergeAnalysis - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:330px;max-width:440px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+    .cg-panel #controls button{padding:5px 10px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+    /* 水位 HUD（右下角大字） */
+    #waterHud{position:absolute;right:16px;bottom:16px;z-index:9000;padding:10px 16px;
+      background:rgba(8,20,40,.85);border:1px solid rgba(90,180,255,.45);border-radius:8px;
+      text-align:center;pointer-events:none;}
+    #waterLevel{font:26px/1.2 Consolas,Monaco,monospace;color:#6cc8ff;}
+    #waterSub{font:11px/1.6 Consolas,Monaco,monospace;color:#8fa8c8;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>79 淹没分析</h1>
+    <p class="desc">湖北山区（神农架—兴山一带）叠加一个半透明水面 polygon，其
+      <code>PolygonGraphics.height</code>（归一化单位）随水位滑杆抬升；同时按网格
+      采样 <code>sampleHeight</code> 统计水位以下格点，估算淹没面积占比。</p>
+    <label>水位高程 <span id="levelVal">800</span> m</label>
+    <input id="levelSlider" type="range" min="200" max="3000" step="20" value="800" />
+    <div id="controls">
+      <button data-level="500">500 m</button>
+      <button data-level="1000">1000 m</button>
+      <button data-level="1600">1600 m</button>
+      <button data-level="2400">2400 m</button>
+      <button id="btnFloodAll">淹没到 3000 m</button>
+    </div>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 需要本地地形服务在线：<code>http://localhost:8888</code>（terrain_hubei）。
+      离线时地形为 0 高，任意水位即全淹。</p>
+  </div>
+  <div id="waterHud">
+    <div id="waterLevel">800 m</div>
+    <div id="waterSub">淹没 --%</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const levelSlider = document.getElementById('levelSlider');
+      const levelVal = document.getElementById('levelVal');
+      const waterLevel = document.getElementById('waterLevel');
+      const waterSub = document.getElementById('waterSub');
+
+      // ── 1. 地形层（湖北 8888；离线降级 0 高）────────────────────────
+      let terrainOk = false;
+      try {
+        if (typeof engine.TerrainLayer === 'function') {
+          viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+            url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 14,
+          }));
+          terrainOk = true;
+        }
+      } catch (err) { console.warn('[79] terrain init failed:', err.message); }
+      const sampleHeight = terrainOk
+        ? (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat)
+        : () => 0;
+      if (!terrainOk) result.textContent = '（地形离线：0 高椭球模式）';
+
+      // ── 2. 水面 polygon（矩形水域覆盖分析区）────────────────────────
+      // PolygonGraphics.height 用归一化单位（1.0 = 6378137 m）
+      const EARTH = 6378137;
+      const deg = { west: 110.35, east: 111.05, south: 31.05, north: 31.55 };
+      const ringDeg = [
+        [deg.west, deg.south], [deg.east, deg.south],
+        [deg.east, deg.north], [deg.west, deg.north],
+      ];
+      let waterEntity = null;
+      function setWaterLevel(levelM) {
+        if (waterEntity) viewer.scene.entities.remove(waterEntity);
+        waterEntity = viewer.scene.entities.add({
+          name: '水面',
+          polygon: {
+            hierarchy: {
+              positions: ringDeg.map(([lon, lat]) => engine.Cartesian3.fromDegrees(lon, lat, 0)),
+            },
+            height: levelM / EARTH,
+            color: new engine.Color(0.15, 0.45, 0.85, 0.55),
+          },
+        });
+      }
+
+      // ── 3. 淹没统计：网格采样高程 < 水位的格点占比 ──────────────────
+      // 采样 48×32 = 1536 格点；sampleHeight 为纯内存插值，重算廉价
+      const GX = 48, GY = 32;
+      const cellAreaKm2 = ((deg.east - deg.west) * 111.32 * Math.cos(31.3 * Math.PI / 180) / GX) *
+                          ((deg.north - deg.south) * 110.86 / GY);
+      function floodStats(levelM) {
+        let flooded = 0, land = 0;
+        for (let iy = 0; iy < GY; iy++) {
+          for (let ix = 0; ix < GX; ix++) {
+            const lon = deg.west + (deg.east - deg.west) * ((ix + 0.5) / GX);
+            const lat = deg.south + (deg.north - deg.south) * ((iy + 0.5) / GY);
+            const h = sampleHeight(lon, lat);
+            land++;
+            if (h > 0 && h < levelM) flooded++;
+          }
+        }
+        return {
+          pct: (flooded / land) * 100,
+          areaKm2: flooded * cellAreaKm2,
+        };
+      }
+
+      // ── 4. 交互 ─────────────────────────────────────────────────────
+      let lastStats = 0;
+      function apply(levelM, force = false) {
+        levelSlider.value = String(levelM);
+        levelVal.textContent = String(levelM);
+        waterLevel.textContent = `${levelM} m`;
+        setWaterLevel(levelM);
+        const now = performance.now();
+        if (force || now - lastStats > 120) { // 滑杆快速拖动时限频重算
+          lastStats = now;
+          const s = floodStats(levelM);
+          waterSub.textContent = `淹没 ${s.pct.toFixed(1)}%`;
+          result.textContent =
+            `水位 ${levelM} m：分析区内 ${s.pct.toFixed(1)}% 陆地被淹没\n` +
+            `估算淹没面积 ≈ ${Math.round(s.areaKm2).toLocaleString()} km²` +
+            (terrainOk ? '' : '\n（地形离线，统计无效）');
+        }
+      }
+      levelSlider.addEventListener('input', () => apply(levelSlider.valueAsNumber));
+      levelSlider.addEventListener('change', () => apply(levelSlider.valueAsNumber, true));
+      document.querySelectorAll('button[data-level]').forEach((btn) => {
+        btn.addEventListener('click', () => apply(Number(btn.dataset.level), true));
+      });
+      document.getElementById('btnFloodAll').addEventListener('click', () => apply(3000, true));
+
+      // ── 5. 初始：抬升视角俯瞰分析区 ─────────────────────────────────
+      viewer.camera.flyTo({
+        destination: { lon: (deg.west + deg.east) / 2, lat: (deg.south + deg.north) / 2 - 0.15, height: 90_000 },
+        orientation: { heading: 0, pitch: -0.7 },
+      });
+      apply(800, true);
+      result.textContent += '\n拖动滑杆或点预设水位，观察水面抬升淹没山谷的过程。';
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.7, 31.0, 120_000],
+          imagery: 'gaode-sat',
+          title: '79 · 淹没分析 Submerge',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '79 淹没分析 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

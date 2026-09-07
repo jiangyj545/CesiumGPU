@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>模型剖切（近似） · CesiumGPU 示例</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:430px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,150,.5);border:1px solid rgba(90,160,255,.4);border-radius:6px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:flex;align-items:center;gap:8px;margin:4px 0;color:#9db4d0;}
+    .cg-panel input[type=range]{flex:1;accent-color:#4a9eff;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>39 · 模型平面剖切（近似实现）</h1>
+    <div class="desc">
+      对齐 EV-Globe 06_planeClip。<b>近似说明</b>：引擎暂无 ClippingPlane /
+      裁剪着色器，本页以「半透明剖面墙 + 位置滑杆」可视化剖切平面
+      （垂直剖面沿东西扫掠 / 水平剖面沿高度扫掠），面板实时显示剖面
+      地理位置含义；真实裁剪需在 G-Buffer 片元中按平面距离 discard。
+    </div>
+    <div id="controls"></div>
+    <label>剖面位置 <input id="sliceRange" type="range" min="0" max="100" step="1" value="50"></label>
+    <div id="result">加载中…</div>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const ES = engine.Camera.EARTH_SCALE;
+
+    function placeMatrix(lon, lat, hMeters, headingDeg) {
+      const ecef = engine.Cartesian3.fromDegrees(lon, lat, hMeters);
+      const enu  = engine.Transforms.eastNorthUpToFixedFrame(ecef);
+      const rot  = engine.Matrix4.fromRotationZ(engine.CesiumMath.toRadians(headingDeg));
+      const yUp  = engine.Matrix4.fromRotationX(Math.PI / 2);
+      return engine.Matrix4.multiply(enu, engine.Matrix4.multiply(rot, yUp, new engine.Matrix4()),
+                                     new engine.Matrix4());
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const sliceR = document.getElementById('sliceRange');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.addEventListener('click', () => onClick(b));
+        controls.appendChild(b);
+        return b;
+      }
+
+      // ── 场景：城市街区（city.gltf，显示跨度约 900 m）────────────────
+      const CENTER = { lon: 116.50, lat: 39.50 };
+      const rel = (dxM, dyM) => ({
+        lon: CENTER.lon + dxM / 111_320 / Math.cos(CENTER.lat * Math.PI / 180),
+        lat: CENTER.lat + dyM / 110_540,
+      });
+      await engine.Model.fromGltfAsync({
+        url: '/data/gltf/city.gltf', scene: viewer.scene,
+        modelMatrix: placeMatrix(CENTER.lon, CENTER.lat, 0, 0), scale: 900 / ES,
+      });
+
+      // ── 剖面墙：程序化 Primitive（归一化 ECEF 世界顶点，双面半透明）─
+      const HALF = 600, WALL_H = 420;
+      const toUnit = (lon, lat, h) => {
+        const p = engine.Cartesian3.fromDegrees(lon, lat, h);
+        return new engine.Cartesian3(p.x / ES, p.y / ES, p.z / ES);
+      };
+      // ENU 单位轴（east / up），用作剖面法向
+      const enu = engine.Transforms.eastNorthUpToFixedFrame(
+        engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat, 0));
+      const e = enu.values;   // Matrix4 存储字段名为 values（非 elements）
+      const EAST = new engine.Cartesian3(e[0], e[1], e[2]);
+      const UP   = new engine.Cartesian3(e[8], e[9], e[10]);
+
+      function makeWall(p1, p2, p3, p4, normal) {
+        const verts = [];
+        const push = (p, n) => {
+          const mag = Math.hypot(n.x, n.y, n.z);
+          verts.push(p.x, p.y, p.z, n.x / mag, n.y / mag, n.z / mag, 0, 0);
+        };
+        for (const p of [p1, p2, p3, p4]) push(p, normal);            // 正面
+        for (const p of [p1, p2, p3, p4]) push(p, { x: -normal.x, y: -normal.y, z: -normal.z });
+        const idx = [0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6];             // 背面反绕
+        return new engine.Primitive(viewer.context, {
+          vertices: new Float32Array(verts),
+          indices: new Uint32Array(idx),
+          color: new engine.Color(1.0, 0.35, 0.25, 0.42),
+          translucent: true,
+        });
+      }
+
+      // 方向：'v' = 垂直剖面（南北向墙，东西扫掠）；'h' = 水平剖面（随高度扫掠）
+      let mode = 'v';
+      let wallOn = true;
+      const STEPS = 21;                 // 预建 21 档墙，show 切换避免频繁增删
+      let walls = [];
+
+      function buildWalls() {
+        for (const w of walls) viewer.scene.primitives.remove(w);
+        walls = [];
+        for (let i = 0; i < STEPS; i++) {
+          const f = i / (STEPS - 1);
+          let w;
+          if (mode === 'v') {
+            const off = -HALF + f * HALF * 2;              // 东西偏移 m
+            const a = rel(off, -HALF), b = rel(off, HALF);
+            w = makeWall(toUnit(a.lon, a.lat, 0), toUnit(a.lon, a.lat, WALL_H),
+                         toUnit(b.lon, b.lat, WALL_H), toUnit(b.lon, b.lat, 0), EAST);
+          } else {
+            const h = f * WALL_H;                          // 扫掠高度 m
+            const c1 = rel(-HALF, -HALF), c2 = rel(HALF, -HALF);
+            const c3 = rel(HALF, HALF),   c4 = rel(-HALF, HALF);
+            w = makeWall(toUnit(c1.lon, c1.lat, h), toUnit(c2.lon, c2.lat, h),
+                         toUnit(c3.lon, c3.lat, h), toUnit(c4.lon, c4.lat, h), UP);
+          }
+          w.show = false;
+          viewer.scene.addPrimitive(w);
+          walls.push(w);
+        }
+        applySlice();
+      }
+
+      function applySlice() {
+        const f = Number(sliceR.value) / 100;
+        const idx = Math.round(f * (STEPS - 1));
+        walls.forEach((w, i) => { w.show = wallOn && i === idx; });
+        if (mode === 'v') {
+          const off = -HALF + f * HALF * 2;
+          const lonOff = off / 111_320 / Math.cos(CENTER.lat * Math.PI / 180);
+          result.textContent =
+            `剖面模式: 垂直（法向朝东）   位置: 基准经度 ${CENTER.lon.toFixed(4)}° ${(off >= 0 ? '+' : '')}${off.toFixed(0)} m\n` +
+            `剖切语义: 保留剖面以东   剖面经度 = ${(CENTER.lon + lonOff).toFixed(5)}°E\n` +
+            `墙几何: 半跨 ${HALF} m × 高 ${WALL_H} m   预建档位: ${walls.length}\n` +
+            `提示: 滑动剖面扫过街区；切"水平"改按高度扫掠`;
+        } else {
+          const h = f * WALL_H;
+          result.textContent =
+            `剖面模式: 水平（法向朝上）   位置: 高度 ${h.toFixed(0)} m\n` +
+            `剖切语义: 保留剖面上方   高程 = ${h.toFixed(0)} m\n` +
+            `墙几何: ${HALF * 2} m × ${HALF * 2} m 水平面   预建档位: ${walls.length}\n` +
+            `提示: 滑动剖面自地面升至 ${WALL_H} m；切"垂直"改东西向扫掠`;
+        }
+      }
+
+      const vBtn = addBtn('剖面: 垂直', () => {
+        mode = 'v';
+        vBtn.classList.add('active'); hBtn.classList.remove('active');
+        buildWalls();
+      });
+      const hBtn = addBtn('剖面: 水平', () => {
+        mode = 'h';
+        hBtn.classList.add('active'); vBtn.classList.remove('active');
+        buildWalls();
+      });
+      vBtn.classList.add('active');
+
+      const wallBtn = addBtn('剖面显示: 开', () => {
+        wallOn = !wallOn;
+        wallBtn.textContent = `剖面显示: ${wallOn ? '开' : '关'}`;
+        wallBtn.classList.toggle('active', wallOn);
+        applySlice();
+      });
+      wallBtn.classList.add('active');
+
+      sliceR.addEventListener('input', applySlice);
+
+      // 相机：西南侧 40° 斜视街区
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(CENTER.lon - 0.008, CENTER.lat - 0.008, 1600),
+        orientation: { heading: engine.CesiumMath.toRadians(40), pitch: engine.CesiumMath.toRadians(-35) },
+      });
+
+      buildWalls();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [116.492, 39.492, 1600],
+          imagery: 'gaode-sat',
+          title: '39 · 模型剖切（近似）',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '39 模型剖切 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

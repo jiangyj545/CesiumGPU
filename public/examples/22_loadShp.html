@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 22：SHP 矢量加载 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:240px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>22 SHP 矢量加载</h1>
+    <p class="desc">Shapefile 二进制格式演示：fetch .shp 原始字节解析 ESRI 主头
+      （fileCode/版本/几何类型/范围），几何部分经伴生 GeoJSON（服务端转换产物）
+      由 GeoJsonDataSource 完整加载。诚实注明：完整 .shp 几何解析过重，
+      生产环境建议 ogr2ogr / 服务端转换。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      const SHAPE_TYPE_NAMES = {
+        0: 'Null Shape', 1: 'Point', 3: 'PolyLine', 5: 'Polygon',
+        8: 'MultiPoint', 11: 'PointZ', 13: 'PolyLineZ', 15: 'PolygonZ',
+      };
+
+      // ── ESRI .shp 主头解析（100 字节，固定布局）──────────────────
+      async function readShpHeader(fileName) {
+        const url = '/data/shp/' + encodeURIComponent(fileName);
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`SHP 头读取失败：HTTP ${resp.status} ${url}`);
+        const buf = await resp.arrayBuffer();
+        if (buf.byteLength < 100) throw new Error('SHP 文件头不足 100 字节');
+        const view = new DataView(buf);
+        const fileCode = view.getInt32(0, false);          // 大端
+        const fileLengthWords = view.getInt32(24, false);  // 大端
+        const version = view.getInt32(28, true);           // 小端
+        const shapeType = view.getInt32(32, true);         // 小端
+        const bbox = {
+          xmin: view.getFloat64(36, true), ymin: view.getFloat64(44, true),
+          xmax: view.getFloat64(52, true), ymax: view.getFloat64(60, true),
+        };
+        return { fileName, fileCode, fileLengthWords, version, shapeType, bbox, bytes: buf.byteLength };
+      }
+
+      // ── 伴生 GeoJSON 完整加载（省区界）────────────────────────────
+      let loadedEntities = [];
+      async function loadProvinceGeoJson() {
+        for (const e of loadedEntities) scene.entities.remove(e);
+        loadedEntities = [];
+        const url = '/data/shp/' + encodeURIComponent('省区届.json');
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`GeoJSON 加载失败：HTTP ${resp.status} ${url}`);
+        const geojson = await resp.json();
+        const ds = await engine.GeoJsonDataSource.load(geojson, { name: '省区界（SHP 转换）' });
+        for (const entity of [...ds.entities]) {
+          scene.entities.add(entity);
+          loadedEntities.push(entity);
+        }
+        const nPoly = loadedEntities.filter((e) => e.polygon).length;
+        const nLine = loadedEntities.filter((e) => e.polyline).length;
+        result.textContent =
+          `伴生 GeoJSON 加载完成（源 .shp → 服务端转换产物）\n` +
+          `实体 ${loadedEntities.length}：面 ${nPoly} / 线 ${nLine}\n` +
+          `提示：可点击"SHP 主头解析"查看二进制结构`;
+        viewer.camera.flyTo({ destination: { lon: 105, lat: 35, height: 9_000_000 }, duration: 2 });
+      }
+
+      addBtn('加载省区界 GeoJSON', () => loadProvinceGeoJson());
+      addBtn('SHP 主头解析（BOUNT_poly）', async () => {
+        const h = await readShpHeader('BOUNT_poly.shp');
+        result.textContent =
+          `ESRI Shapefile 主头（100 字节）· ${h.fileName}\n` +
+          `fileCode   = ${h.fileCode}（应为 9994）\n` +
+          `fileLength = ${h.fileLengthWords} × 16-bit words = ${h.fileLengthWords * 2} 字节\n` +
+          `version    = ${h.version}（应为 1000）\n` +
+          `shapeType  = ${h.shapeType}（${SHAPE_TYPE_NAMES[h.shapeType] || '未知'}）\n` +
+          `bbox       = [${h.bbox.xmin.toFixed(2)}, ${h.bbox.ymin.toFixed(2)}] → ` +
+          `[${h.bbox.xmax.toFixed(2)}, ${h.bbox.ymax.toFixed(2)}]\n` +
+          `实际字节数 = ${h.bytes}\n\n` +
+          `诚实注明：本引擎未内置 ShpDataSource。完整几何（记录头/多环/Z 值）解析过重，` +
+          `生产建议 ogr2ogr 或服务端转 GeoJSON 后用 GeoJsonDataSource 加载。`;
+      });
+      addBtn('SHP 主头解析（diquJie_polyline）', async () => {
+        const h = await readShpHeader('diquJie_polyline.shp');
+        result.textContent =
+          `ESRI Shapefile 主头 · ${h.fileName}\n` +
+          `fileCode=${h.fileCode}  version=${h.version}\n` +
+          `shapeType=${h.shapeType}（${SHAPE_TYPE_NAMES[h.shapeType] || '未知'}）\n` +
+          `bbox=[${h.bbox.xmin.toFixed(2)}, ${h.bbox.ymin.toFixed(2)}] → ` +
+          `[${h.bbox.xmax.toFixed(2)}, ${h.bbox.ymax.toFixed(2)}]`;
+      });
+      addBtn('飞回中国全境', () => viewer.camera.flyTo({
+        destination: { lon: 105, lat: 35, height: 9_000_000 }, duration: 2,
+      }));
+
+      await loadProvinceGeoJson();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 35, 9_000_000],
+          imagery: 'gaode-sat',
+          title: '22 · SHP 矢量加载',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '22 SHP 加载 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

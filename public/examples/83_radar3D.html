@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 83：3D 雷达锥 Radar3D - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:260px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>83 3D 雷达锥</h1>
+    <p class="desc">迁移自 EV-Globe 13_radar / 13_customSectorScan。
+      组合效果：GLB 倒锥模型绕站心旋转（modelMatrix 逐帧更新）+
+      24 片扇形余辉依次点亮模拟扫掠拖尾 + CircleScan 地面扫描圈。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const RE = C3.EARTH_RADIUS;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      const lonLatH = (lon, lat, h = 0) => {
+        const p = C3.fromDegrees(lon, lat, h);
+        return new C3(p.x / RE, p.y / RE, p.z / RE);
+      };
+
+      const LON = 116.4, LAT = 38.6;
+      const RADIUS = 300_000;                     // 探测半径 300 km
+      const SECTORS = 24;                         // 扇形余辉片数（15°/片）
+      const ROT_PERIOD = 6;                       // 旋转周期 6 s
+      const entities = viewer.scene.entities;
+
+      // ── 站心标记 ───────────────────────────────────────────────────────
+      entities.add(new engine.Entity({
+        position: lonLatH(LON, LAT, 0),
+        point: { color: engine.Color.RED, pixelSize: 12 },
+        label: {
+          text: 'RADAR-01',
+          font: '14px sans-serif',
+          fillColor: engine.Color.WHITE,
+        },
+      }));
+
+      // ── GLB 倒锥（cone4-red）绕站心旋转 ────────────────────────────────
+      /** 绕 Z 轴旋转矩阵（column-major，模型空间 Z 为竖轴） */
+      function rotZ(angle) {
+        const m = engine.Matrix4.identity();
+        const v = m.values;
+        const c = Math.cos(angle), s = Math.sin(angle);
+        v[0] = c; v[1] = s;
+        v[4] = -s; v[5] = c;
+        return m;
+      }
+
+      const enu = engine.Transforms.eastNorthUpToFixedFrame(
+        C3.fromDegrees(LON, LAT, 0));
+      const yUpToZUp = engine.Matrix4.fromRotationX(Math.PI / 2);
+      const baseMat = engine.Matrix4.multiply(enu, yUpToZUp, new engine.Matrix4());
+
+      const cone = await engine.Model.fromGltfAsync({
+        url: '/models/cone4-red.glb',
+        scene: viewer.scene,
+        modelMatrix: baseMat,
+        scale: RADIUS / RE,
+      });
+
+      // ── 扇形余辉：24 片预建，按主瓣落后片数着色，轮流点亮 ──────────────
+      /** 地面扇形片顶点（中心 + 弧带 4 点） */
+      function sectorPositions(a0, a1) {
+        const pts = [lonLatH(LON, LAT, 300)];
+        for (let i = 0; i <= 4; i++) {
+          const a = a0 + (a1 - a0) * (i / 4);
+          const lon2 = LON + (Math.cos(a) * RADIUS) /
+            (111_320 * Math.cos(LAT * Math.PI / 180));
+          const lat2 = LAT + (Math.sin(a) * RADIUS) / 110_540;
+          pts.push(lonLatH(lon2, lat2, 300));
+        }
+        return pts;
+      }
+
+      const ALPHA_STEP = 0.45 / 6;                // 拖尾 6 片渐隐
+      const sectors = [];
+      for (let i = 0; i < SECTORS; i++) {
+        const a0 = (i / SECTORS) * Math.PI * 2;
+        const a1 = a0 + (Math.PI * 2) / SECTORS;
+        const ent = entities.add(new engine.Entity({
+          polygon: {
+            hierarchy: { positions: sectorPositions(a0, a1) },
+            color: new engine.Color(0.15, 1.0, 0.55, 0.5),
+          },
+          show: false,
+        }));
+        sectors.push(ent);
+      }
+
+      // 每片按"落后主瓣的片数"重新着色（polygon 整体重赋值，触发渲染层更新）
+      function setSector(ent, rank) {
+        const alpha = Math.max(0.5 - ALPHA_STEP * rank, 0.06);
+        ent.polygon = {
+          hierarchy: ent.polygon.hierarchy,
+          color: new engine.Color(0.15, 1.0, 0.55, alpha),
+        };
+      }
+
+      // ── 地面扫描圈（引擎自带特效）──────────────────────────────────────
+      const scan = new engine.CircleScan(viewer.context, {
+        center: { lon: LON, lat: LAT },
+        radius: RADIUS,
+        color: [0.2, 0.95, 0.6, 0.8],
+        speed: 2.2,
+        rings: 2,
+      });
+      scan.setCamera(viewer.camera);
+      viewer.scene.effects.add(scan);
+
+      // ── 逐帧动画 ──────────────────────────────────────────────────────
+      const clock = new engine.Clock({ shouldAnimate: true });
+      let prevT = clock.currentTime;
+      let elapsed = 0;
+      let coneOn = true, sweepOn = true, scanOn = true;
+      let lastLead = -1;
+
+      viewer.preRender = () => {
+        clock.tick();
+        const dt = Math.min(
+          clock.currentTime.secondsDifference(prevT), 0.05);
+        prevT = clock.currentTime;
+        if (dt <= 0) return;
+        elapsed += dt;
+        const angle = (elapsed / ROT_PERIOD) * Math.PI * 2;
+
+        if (coneOn) {
+          cone.modelMatrix = engine.Matrix4.multiply(
+            baseMat, rotZ(angle), new engine.Matrix4());
+        }
+
+        if (sweepOn) {
+          const lead = Math.floor((angle / (Math.PI * 2)) * SECTORS) % SECTORS;
+          if (lead !== lastLead) {
+            lastLead = lead;
+            for (let r = 0; r < SECTORS; r++) {
+              const ent = sectors[(lead - r + SECTORS * 2) % SECTORS];
+              const visible = r < 6;            // 主瓣 + 5 片余辉
+              if (ent.show !== visible) ent.show = visible;
+              if (visible) setSector(ent, r);
+            }
+          }
+        }
+      };
+
+      // ── 交互 ──────────────────────────────────────────────────────────
+      const mkToggle = (label, get, set) => {
+        const btn = addBtn(label, () => {
+          set(!get());
+          btn.textContent = get() ? label : label + '（关）';
+          btn.classList.toggle('active', get());
+        });
+        btn.classList.add('active');
+        return btn;
+      };
+      mkToggle('倒锥旋转', () => coneOn, (v) => { coneOn = v; });
+      mkToggle('扇形扫掠', () => sweepOn, (v) => {
+        sweepOn = v;
+        if (!v) for (const s of sectors) s.show = false;
+      });
+      mkToggle('地面扫描圈', () => scanOn, (v) => { scanOn = v; scan.show = v; });
+
+      function refresh() {
+        result.textContent =
+          `方位角: ${(((elapsed / ROT_PERIOD) % 1) * 360).toFixed(1).padStart(6)}°   ` +
+          `周期: ${ROT_PERIOD}s   片数: ${SECTORS}（15°/片）\n` +
+          `探测半径: 300 km   拖尾: 6 片渐隐\n` +
+          '实现: GLB modelMatrix 旋转 + Entity.show 轮询 + CircleScan';
+      }
+      setInterval(refresh, 200);
+
+      // 斜俯视角观察锥体与地面扇面
+      viewer.camera.setView({
+        destination: C3.fromDegrees(LON - 4.2, LAT - 3.2, 1_100_000),
+      });
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.2, 35.4, 1_100_000],
+          imagery: 'gaode-sat',
+          title: '83 · 3D 雷达锥',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '83 3D 雷达锥 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

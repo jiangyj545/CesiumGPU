@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 60：卷帘对比 ContrastRoller - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:300px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+    #splitViewer{position:absolute;inset:0;pointer-events:none;}
+    #splitViewer canvas{position:absolute;inset:0;}
+    #divider{position:absolute;top:0;bottom:0;width:4px;margin-left:-2px;z-index:9400;
+      background:linear-gradient(180deg,#7dd3fc,#38bdf8,#7dd3fc);cursor:ew-resize;box-shadow:0 0 8px rgba(56,189,248,.8);}
+    #divider::after{content:'◀ ▶';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+      background:rgba(10,30,50,.85);color:#7dd3fc;border:1px solid #38bdf8;border-radius:12px;
+      padding:2px 10px;font-size:12px;white-space:nowrap;}
+    .side-tag{position:absolute;bottom:18px;z-index:9300;padding:4px 12px;border-radius:4px;
+      font:12px/1.6 sans-serif;color:#fff;background:rgba(10,20,35,.7);border:1px solid rgba(255,255,255,.2);}
+    #tagL{left:18px;} #tagR{right:18px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="splitViewer"></div>
+  <div id="divider"></div>
+  <div class="side-tag" id="tagL">左：高德卫星影像</div>
+  <div class="side-tag" id="tagR">右：高德矢量地图</div>
+  <div class="cg-panel">
+    <h1>60 卷帘对比 ContrastRoller</h1>
+    <p class="desc">两个 Viewer 叠放、相机逐帧同步，右侧画布以 clip-path 沿可拖动
+      分割线裁剪，实现左右卷帘对比（左影像 / 右矢量）。对齐 EV 08_contrastRoller；
+      引擎 G-Buffer 为单层渲染，卷帘以双画布裁剪近似。</p>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    /** 创建副 Viewer（独立 WebGPU context + 指定底图预设）。 */
+    async function createSideViewer(engine, container, presetKey) {
+      const v = new engine.Viewer(container);
+      await v.initialize();
+      const preset = DemoUtils.IMAGERY_PRESETS[presetKey];
+      if (preset) v.globe.layers.addImageryProvider(new engine.XyzImageryProvider(preset));
+      return v;
+    }
+
+    /** 主 → 副相机同步：从主相机 position/direction 反推 lon/lat/height 与
+     *  heading/pitch（页面级 ENU 三角函数，roll 近似 0），经 setView 写入
+     *  副相机（setView 内部置 viewDirty；直接改字段不会刷新矩阵）。 */
+    function syncCamera(src, dst) {
+      const p = src.position;
+      const r = Math.hypot(p.x, p.y, p.z);
+      const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
+      const lat = Math.asin(Math.max(-1, Math.min(1, p.z / r))) * 180 / Math.PI;
+      const height = (r - 1) * 6378137;
+      // 球面近似的 ENU 基向量（演示级精度足够）
+      const lonR = lon * Math.PI / 180, latR = lat * Math.PI / 180;
+      const cl = Math.cos(latR), sl = Math.sin(latR);
+      const ce = Math.cos(lonR), se = Math.sin(lonR);
+      const east  = { x: -se,        y: ce,        z: 0  };
+      const north = { x: -sl * ce,   y: -sl * se,  z: cl };
+      const up    = { x: cl * ce,    y: cl * se,   z: sl };
+      const d = src.direction;
+      const pitch = Math.asin(Math.max(-1, Math.min(1, d.x * up.x + d.y * up.y + d.z * up.z)));
+      const de = d.x * east.x + d.y * east.y + d.z * east.z;
+      const dn = d.x * north.x + d.y * north.y + d.z * north.z;
+      const heading = Math.atan2(de, dn);
+      dst.setView({
+        destination: { lon, lat, height },
+        orientation: { heading, pitch, roll: 0 },
+      });
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+
+      // ── 副 Viewer：矢量底图，画布不可交互（由主画布统一操控）────────
+      const sideContainer = document.getElementById('splitViewer');
+      const side = await createSideViewer(engine, sideContainer, 'gaode-vec');
+      window.sideViewer = side; // debug hook
+
+      // 初始视角对齐
+      syncCamera(viewer.camera, side.camera);
+
+      // 分割位置（2-98%，右侧画布显示分割线以右区域）
+      let split = 50;
+      const applySplit = () => {
+        side.canvas.style.clipPath = `inset(0 0 0 ${split}%)`;
+        document.getElementById('divider').style.left = split + '%';
+      };
+      applySplit();
+
+      // 分割线拖动
+      const divider = document.getElementById('divider');
+      let dragging = false;
+      divider.addEventListener('pointerdown', (e) => { dragging = true; e.preventDefault(); });
+      window.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        split = Math.min(98, Math.max(2, e.clientX / window.innerWidth * 100));
+        applySplit();
+      });
+      window.addEventListener('pointerup', () => { dragging = false; });
+
+      // ── 相机逐帧同步 ───────────────────────────────────────────────
+      viewer.preRender = () => {
+        syncCamera(viewer.camera, side.camera);
+        side.camera.setAspectRatio(side.canvas.width / side.canvas.height);
+      };
+
+      result.textContent =
+        `左: 高德卫星(gaode-sat)  右: 高德矢量(gaode-vec)\n` +
+        `分割: ${Math.round(split)}%  （拖动中央亮条卷帘）\n` +
+        `同步: 主相机 position/direction → 副相机 setView 每帧\n` +
+        `渲染: 2 × WebGPU Viewer（独立 device/G-Buffer 管线）`;
+    }
+
+    // ── 标准启动模板（主 viewer 在下层，影像底图）────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [112.0, 30.9, 900_000],
+          imagery: 'gaode-sat',
+          title: '60 · 卷帘对比 ContrastRoller',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '60 卷帘对比 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

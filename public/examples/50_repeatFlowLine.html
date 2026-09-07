@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>50 重复流线 RepeatFlowLine · CesiumGPU 示例</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:250px;max-width:340px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.7 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin:0 0 6px;}
+    .cg-panel .desc{font-size:12px;color:#9db8d8;margin:0 0 10px;}
+    .cg-panel button{margin:2px 4px 2px 0;padding:3px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:block;font-size:12px;color:#9db8d8;margin-top:6px;}
+    #info{font:12px/1.6 Consolas,monospace;color:#b5e3a8;white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>50 重复流线 RepeatFlowLine</h1>
+    <p class="desc">以杭州为中心的 5 圈同心环路 + 4 条放射线，每条路径 3 个流动光点循环推进、相位交错——形成持续循环的车流/物流网效果。EV_RepeatFlowLine 的多路径循环语义。</p>
+    <div id="controls">
+      <button id="btnPlay" class="active">暂停</button>
+      <label>流速 <input id="speed" type="range" min="0.1" max="3" step="0.1" value="1" style="width:130px"> <span id="speedVal">1.0x</span></label>
+      <button id="btnReverse">反向流动</button>
+    </div>
+    <div id="info">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const A = 6378137.0, B = 6356752.3142;
+    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    function lonLat(lat_, lon_, hM = 25_000) {
+      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
+      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + hM) * Math.cos(lat);
+      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + hM) * s / A);
+    }
+    // 圆环路径（控制点直接采样，已是平滑圆）
+    function ringPath(lat0, lon0, rKm, n = 72) {
+      const pts = [];
+      for (let i = 0; i <= n; i++) {
+        const t = (i / n) * Math.PI * 2;
+        pts.push(lonLat(lat0 + Math.sin(t) * rKm / 111.32, lon0 + Math.cos(t) * rKm / (111.32 * Math.cos(lat0 * D2R))));
+      }
+      return pts;
+    }
+    // 放射线路径
+    function radialPath(lat0, lon0, rKm, bearingDeg) {
+      const a = bearingDeg * D2R;
+      const dLat = Math.cos(a) * rKm / 111.32;
+      const dLon = Math.sin(a) * rKm / (111.32 * Math.cos(lat0 * D2R));
+      return [lonLat(lat0, lon0), lonLat(lat0 + dLat, lon0 + dLon)];
+    }
+
+    /** 单条路径的循环流动（底线 + n 个流动点），相位偏移 phase0。 */
+    function makeCyclicPath(viewer, engine, path, style) {
+      const cum = [0];
+      for (let i = 1; i < path.length; i++) {
+        cum.push(cum[i - 1] + engine.Cartesian3.distance(path[i - 1], path[i]));
+      }
+      const total = cum[cum.length - 1];
+      function pointAt(s) {
+        const target = (((s % 1) + 1) % 1) * total;
+        let lo = 0, hi = cum.length - 1;
+        while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= target) lo = mid; else hi = mid; }
+        const f = (target - cum[lo]) / (cum[hi] - cum[lo] || 1);
+        const p0 = path[lo], p1 = path[hi];
+        return new engine.Cartesian3(p0.x + (p1.x - p0.x) * f, p0.y + (p1.y - p0.y) * f, p0.z + (p1.z - p0.z) * f);
+      }
+
+      viewer.scene.entities.add({
+        name: style.name,
+        polyline: { positions: path, width: 2, color: new engine.Color(...style.baseColor) },
+      });
+
+      const flows = [];
+      for (let i = 0; i < 3; i++) {
+        flows.push(viewer.scene.entities.add({
+          name: style.name + '-flow' + i,
+          position: path[0],
+          point: { color: new engine.Color(...style.flowColor), pixelSize: 8 },
+        }));
+      }
+      let dir = 1;
+      function update(t) {
+        for (let i = 0; i < flows.length; i++) {
+          const s = dir > 0
+            ? (t * style.speed + i / flows.length + style.phase) % 1
+            : 1 - ((t * style.speed + i / flows.length + style.phase) % 1);
+          flows[i].position = pointAt(s);
+          flows[i].point.pixelSize = 5 + 5 * Math.sin(Math.PI * s);
+        }
+      }
+      return { update, setDir(d) { dir = d; } };
+    }
+
+    async function demo(viewer, engine) {
+      const info = document.getElementById('info');
+      const C = { lat: 30.27, lon: 120.15 };   // 杭州
+
+      // ── 5 圈同心环（颜色由青到紫渐变）+ 4 条放射线 ────────────────────
+      const paths = [];
+      const ringColors = [
+        [0.2, 0.9, 1.0], [0.3, 0.7, 1.0], [0.55, 0.55, 1.0], [0.75, 0.45, 1.0], [0.95, 0.4, 0.85],
+      ];
+      for (let k = 0; k < 5; k++) {
+        paths.push(makeCyclicPath(viewer, engine, ringPath(C.lat, C.lon, 25 + k * 28), {
+          name: '环' + (k + 1),
+          baseColor: [...ringColors[k], 0.4],
+          flowColor: [...ringColors[k], 1.0],
+          speed: 0.10 - k * 0.012,           // 外圈更慢
+          phase: k * 0.19,
+        }));
+      }
+      for (let k = 0; k < 4; k++) {
+        paths.push(makeCyclicPath(viewer, engine, radialPath(C.lat, C.lon, 25 + 4 * 28, 45 + k * 90), {
+          name: '放射' + (k + 1),
+          baseColor: [1.0, 0.75, 0.25, 0.45],
+          flowColor: [1.0, 0.85, 0.35, 1.0],
+          speed: 0.14, phase: k * 0.25,
+        }));
+      }
+
+      // 中心标注
+      viewer.scene.entities.add({
+        name: '杭州枢纽', position: lonLat(C.lat, C.lon, 40_000),
+        point: { color: new engine.Color(1.0, 0.95, 0.6, 1.0), pixelSize: 8 },
+        label: { text: '杭州枢纽', font: '13px sans-serif', fillColor: new engine.Color(0.9, 0.95, 1.0, 1.0) },
+      });
+
+      // ── 动画 ─────────────────────────────────────────────────────────
+      let playing = true, speed = 1.0, t = 0, last = performance.now();
+      viewer.preRender = () => {
+        const now = performance.now();
+        if (playing) t += (now - last) / 1000 * speed;
+        last = now;
+        for (const p of paths) p.update(t);
+      };
+
+      const btnPlay = document.getElementById('btnPlay');
+      btnPlay.addEventListener('click', () => {
+        playing = !playing;
+        btnPlay.textContent = playing ? '暂停' : '播放';
+        btnPlay.classList.toggle('active', playing);
+        refresh();
+      });
+      document.getElementById('speed').addEventListener('input', (e) => {
+        speed = Number(e.target.value);
+        document.getElementById('speedVal').textContent = speed.toFixed(1) + 'x';
+        refresh();
+      });
+      let dir = 1;
+      document.getElementById('btnReverse').addEventListener('click', () => {
+        dir = -dir;
+        for (const p of paths) p.setDir(dir);
+        refresh();
+      });
+
+      function refresh() {
+        info.textContent =
+          `路径: ${paths.length} 条（5 环 + 4 放射）  播放: ${playing ? '是' : '否'}\n` +
+          `流速: ${speed.toFixed(1)}x   方向: ${dir > 0 ? '正向' : '反向'}   流动点: ${paths.length * 3} 个`;
+      }
+      refresh();
+    }
+
+    DemoUtils.startup({ engine, title: '50 · 重复流线 RepeatFlowLine', view: [120.15, 29.9, 1_100_000], imagery: 'gaode-sat' })
+      .then(({ viewer }) => demo(viewer, engine))
+      .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
+      .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));
+  </script>
+</body>
+</html>

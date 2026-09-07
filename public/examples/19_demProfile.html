@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 19：地形高程剖面 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:520px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.on{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #profile{display:block;margin-top:6px;background:rgba(6,12,22,.9);
+      border:1px solid rgba(120,180,255,.2);border-radius:6px;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;margin-top:6px;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>19 地形高程剖面</h1>
+    <p class="desc">沿两点连线按 128 个采样点调用 terrainLayer.sampleHeight，
+      canvas 2D 绘制高程剖面图（面积填充 + 最高/最低点标注），同时把剖
+      面线以贴地折线画到球面。对应 EV-Globe 02_DEM 的分析向用法
+      （服务端剖面分析的前端近似：仅采样已流式加载的地形瓦片）。</p>
+    <div id="controls"></div>
+    <canvas id="profile" width="480" height="220"></canvas>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 剖面精度取决于当前视角下已加载的地形瓦片层级；
+      若剖面平直，请等待瓦片流加载后点「重新采样」。</p>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const globe = viewer.globe;
+      const controls = document.getElementById('controls');
+      const result = document.getElementById('result');
+      const canvas = document.getElementById('profile');
+      const ctx = canvas.getContext('2d');
+
+      // ── 1. 地形层（8888 离线服务）───────────────────────────────────
+      globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+        url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+        maximumLevel: 14,
+      }));
+
+      // ── 2. 预置剖面线（湖北境内）──────────────────────────────────
+      // sampleHeight 只覆盖"已加载瓦片 patch"（渲染集上限内的高分级
+      // 瓦片集中在视锥落点附近）→ 默认线取 patch 尺度的山区短线保证
+      // 剖面有值；长线保留用于观察"仅已加载段有值"的行为。
+      const ROUTES = [
+        { name: '神农架山地短线 8km', from: [110.635, 31.71], to: [110.705, 31.77] },
+        { name: '恩施 → 神农架长线 197km（仅已加载段有值）', from: [109.49, 30.27], to: [110.67, 31.74] },
+      ];
+      const SAMPLES = 128;
+
+      // 度制经纬度 → 归一化 ECEF（引擎内部地球半径 = 1）
+      const toUnit = (lon, lat) => {
+        const p = engine.Cartesian3.fromDegrees(lon, lat);
+        const s = 1 / 6378137;
+        return new engine.Cartesian3(p.x * s, p.y * s, p.z * s);
+      };
+
+      // ── 3. 贴地折线（剖面线可视化）─────────────────────────────────
+      let lineEntity = null;
+      function drawGroundLine(route) {
+        if (lineEntity) viewer.scene.entities.remove(lineEntity);
+        const positions = [];
+        for (let i = 0; i <= 64; i++) {
+          const t = i / 64;
+          positions.push(toUnit(
+            route.from[0] + (route.to[0] - route.from[0]) * t,
+            route.from[1] + (route.to[1] - route.from[1]) * t));
+        }
+        lineEntity = viewer.scene.entities.add({
+          name: 'dem-profile-line',
+          polyline: {
+            positions,
+            width: 3,
+            color: new engine.Color(1, 0.5, 0.15, 1),
+            heightReference: 'clampToGround',
+            sampleHeight: (lon, lat) => globe.terrainLayer?.sampleHeight(lon, lat) ?? 0,
+          },
+        });
+      }
+
+      // ── 4. 剖面采样 + canvas 图表 ───────────────────────────────────
+      function sampleProfile(route) {
+        const t = globe.terrainLayer;
+        const pts = [];
+        for (let i = 0; i < SAMPLES; i++) {
+          const k = i / (SAMPLES - 1);
+          const lon = route.from[0] + (route.to[0] - route.from[0]) * k;
+          const lat = route.from[1] + (route.to[1] - route.from[1]) * k;
+          // 瓦片未加载的采样点会得到非有限值 → 兜底 0（海平面）
+          const h = t ? t.sampleHeight(lon, lat) : 0;
+          pts.push({ k, h: Number.isFinite(h) ? h : 0 });
+        }
+        return pts;
+      }
+
+      function profile(route) {
+        drawChart(route, sampleProfile(route));
+      }
+
+      function drawChart(route, pts) {
+        const W = canvas.width, H = canvas.height;
+        const padL = 52, padR = 14, padT = 18, padB = 26;
+        // h=0 视为"该点无已加载瓦片"（缺口），不参与高程范围与绘图
+        const valid = pts.filter((p) => p.h > 0);
+        const heights = valid.map((p) => p.h);
+        let hMin = heights.length ? Math.min(...heights) : 0;
+        let hMax = heights.length ? Math.max(...heights) : 100;
+        if (hMax - hMin < 10) { hMax = hMin + 10; }   // 避免零跨度
+        const x = (k) => padL + k * (W - padL - padR);
+        const y = (h) => padT + (1 - (h - hMin) / (hMax - hMin)) * (H - padT - padB);
+
+        ctx.clearRect(0, 0, W, H);
+        ctx.strokeStyle = 'rgba(120,180,255,.18)';
+        ctx.fillStyle = '#9db4d0';
+        ctx.font = '11px Consolas,monospace';
+        // 水平网格 + 高程刻度
+        for (let i = 0; i <= 4; i++) {
+          const hv = hMin + (hMax - hMin) * i / 4;
+          const yy = y(hv);
+          ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
+          ctx.fillText(Math.round(hv) + 'm', 6, yy + 4);
+        }
+        // 按"连续有值段"分段绘制（缺口 = 未加载瓦片，断开不连线）
+        const segs = [];
+        let cur = [];
+        for (const p of pts) {
+          if (p.h > 0) cur.push(p);
+          else if (cur.length) { segs.push(cur); cur = []; }
+        }
+        if (cur.length) segs.push(cur);
+        for (const seg of segs) {
+          // 面积填充
+          ctx.beginPath();
+          ctx.moveTo(x(seg[0].k), y(seg[0].h));
+          for (const p of seg) ctx.lineTo(x(p.k), y(p.h));
+          ctx.lineTo(x(seg[seg.length - 1].k), H - padB);
+          ctx.lineTo(x(seg[0].k), H - padB);
+          ctx.closePath();
+          ctx.fillStyle = 'rgba(120,180,255,.22)'; ctx.fill();
+          // 剖面折线
+          ctx.beginPath();
+          ctx.moveTo(x(seg[0].k), y(seg[0].h));
+          for (const p of seg) ctx.lineTo(x(p.k), y(p.h));
+          ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        if (!heights.length) {
+          ctx.fillStyle = '#ffd479';
+          ctx.fillText('剖面线暂无已加载瓦片覆盖：稍候点「重新采样」', padL + 60, H / 2);
+        }
+        // 最高 / 最低点标注
+        const iMax = heights.indexOf(hMax), iMin = heights.indexOf(hMin);
+        for (const [i, label, color] of [[iMax, '最高', '#ffd479'], [iMin, '最低', '#8ecafc']]) {
+          if (i < 0 || !heights.length) continue;
+          ctx.beginPath();
+          ctx.arc(x(valid[i].k), y(valid[i].h), 4, 0, Math.PI * 2);
+          ctx.fillStyle = color; ctx.fill();
+          ctx.fillText(`${label} ${Math.round(valid[i].h)}m`, x(valid[i].k) - 30, y(valid[i].h) - 8);
+        }
+        // 起终点坐标 + 缺口图例
+        ctx.fillStyle = '#9db4d0';
+        ctx.fillText(route.from[0].toFixed(2) + ',' + route.from[1].toFixed(2), padL - 20, H - 8);
+        ctx.fillText(route.to[0].toFixed(2) + ',' + route.to[1].toFixed(2), W - padR - 80, H - 8);
+        ctx.fillText('断开处 = 瓦片未加载', W - padR - 130, padT + 2);
+      }
+
+      // ── 5. 控件：切线 + 重采样 ──────────────────────────────────────
+      let activeRoute = null;
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+      // 在 (cx,cy) 周边扫描 sampleHeight 首个非零锚点（公开 API）
+      function scanAnchor(cx, cy, r = 0.6, n = 13) {
+        const t = globe.terrainLayer;
+        if (!t) return null;
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            const lon = cx - r + (2 * r) * i / (n - 1);
+            const lat = cy - r + (2 * r) * j / (n - 1);
+            if (t.sampleHeight(lon, lat) !== 0) return [lon, lat];
+          }
+        }
+        return null;
+      }
+
+      async function applyRoute(route) {
+        // 飞到剖线中段上空：飞行高度按线长自适应——短线用低空换
+        // 高层级（L12+ 细节），长线用高空换覆盖
+        const midLon = (route.from[0] + route.to[0]) / 2;
+        const midLat = (route.from[1] + route.to[1]) / 2;
+        const spanDeg = Math.hypot(route.to[0] - route.from[0], route.to[1] - route.from[1]);
+        const flyH = spanDeg < 0.5 ? 12_000 : 180_000;
+        await viewer.camera.flyTo({
+          destination: { lon: midLon, lat: midLat, height: flyH },
+          duration: 2.5,
+        });
+        // 瓦片流落点与相机坐标存在朝向偏移 → 扫描已加载区锚点，
+        // 短线自动平移到锚点上（保持原方向与演示长度）；长线保持原线
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        let anchor = null;
+        for (let round = 0; round < 6 && !anchor; round++) {
+          await sleep(1500);
+          anchor = scanAnchor(midLon, midLat);
+        }
+        let effRoute = route;
+        if (anchor && spanDeg < 0.5) {
+          const dx = route.to[0] - route.from[0], dy = route.to[1] - route.from[1];
+          const len = Math.hypot(dx, dy);
+          const half = 0.03;   // 演示长度 0.06°（patch 尺度），锚点居中
+          effRoute = {
+            name: route.name,
+            from: [anchor[0] - (dx / len) * half, anchor[1] - (dy / len) * half],
+            to:   [anchor[0] + (dx / len) * half, anchor[1] + (dy / len) * half],
+          };
+        }
+        activeRoute = effRoute;
+        drawGroundLine(effRoute);
+        profile(effRoute);
+      }
+      ROUTES.forEach((route) => {
+        addBtn(route.name, async () => {
+          await applyRoute(route);
+          refreshButtons();
+        });
+      });
+      addBtn('重新采样', () => { if (activeRoute) profile(activeRoute); });
+
+      function refreshButtons() {
+        for (const btn of controls.querySelectorAll('button')) {
+          btn.classList.toggle('on', !!activeRoute && btn.textContent === activeRoute.name);
+        }
+        if (!activeRoute) return;
+        const from = toUnit(activeRoute.from[0], activeRoute.from[1]);
+        const to = toUnit(activeRoute.to[0], activeRoute.to[1]);
+        const distM = engine.Measure.distance([from, to], false); // 米
+        result.textContent = `剖面线: ${activeRoute.name}\n直线距离: ${(distM / 1000).toFixed(1)} km\n采样点: ${SAMPLES}（sampleHeight）`;
+      }
+
+      // ── 初始：第一条剖面线 ─────────────────────────────────────────
+      await applyRoute(ROUTES[0]);
+      refreshButtons();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.5, 30.9, 250_000],
+          imagery: 'gaode-sat',
+          title: '19 · 地形高程剖面',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '19 地形高程剖面 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

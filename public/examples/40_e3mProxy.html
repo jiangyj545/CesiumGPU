@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>倾斜摄影加载（占位） · CesiumGPU 示例</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:310px;max-width:440px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,150,.5);border:1px solid rgba(90,160,255,.4);border-radius:6px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>40 · 倾斜摄影城市块加载（占位）</h1>
+    <div class="desc">
+      对齐 EV-Globe 06_load3DTiles / 06_e3m*。<b>占位说明</b>：E3M 与 3D Tiles
+      倾斜摄影格式暂不支持，本页用 4 块 city.gltf（多 mesh 多材质）拼成
+      2×2 城市街区，逐块 readyPromise 渐进显示，模拟倾斜摄影「瓦片流式
+      加载 → readyPromise 回调 → 定位包围盒」的加载语义。
+    </div>
+    <div id="controls"></div>
+    <div id="result">加载中…</div>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const ES = engine.Camera.EARTH_SCALE;
+
+    function placeMatrix(lon, lat, hMeters, headingDeg) {
+      const ecef = engine.Cartesian3.fromDegrees(lon, lat, hMeters);
+      const enu  = engine.Transforms.eastNorthUpToFixedFrame(ecef);
+      const rot  = engine.Matrix4.fromRotationZ(engine.CesiumMath.toRadians(headingDeg));
+      const yUp  = engine.Matrix4.fromRotationX(Math.PI / 2);
+      return engine.Matrix4.multiply(enu, engine.Matrix4.multiply(rot, yUp, new engine.Matrix4()),
+                                     new engine.Matrix4());
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.addEventListener('click', () => onClick(b));
+        controls.appendChild(b);
+        return b;
+      }
+
+      // ── 2×2 城市街区（对齐原 06_loadGltf 的上海坐标）────────────────
+      const CENTER = { lon: 121.52317, lat: 31.22536 };
+      const BLOCK = 1100;      // 块间距（米），每块 city.gltf 显示跨度约 900 m
+      const rel = (dxM, dyM) => ({
+        lon: CENTER.lon + dxM / 111_320 / Math.cos(CENTER.lat * Math.PI / 180),
+        lat: CENTER.lat + dyM / 110_540,
+      });
+
+      // 4 个"瓦片块"：西北 / 东北 / 西南 / 东南，相对旋转 90° 交错更像街区块
+      const TILES = [
+        { name: '瓦片 L0_0 (西北)', dx: -BLOCK, dy:  BLOCK, heading:   0 },
+        { name: '瓦片 L0_1 (东北)', dx:  BLOCK, dy:  BLOCK, heading:  90 },
+        { name: '瓦片 L1_0 (西南)', dx: -BLOCK, dy: -BLOCK, heading: 270 },
+        { name: '瓦片 L1_1 (东南)', dx:  BLOCK, dy: -BLOCK, heading: 180 },
+      ];
+
+      const logLines = [];
+      function refreshInfo(extra) {
+        const total = tiles.reduce((s, t) => s + (t.model ? t.model.primitiveCount : 0), 0);
+        const ready = tiles.filter(t => t.model && t.model.isReady).length;
+        result.textContent =
+          `块: ${ready}/${tiles.length} ready   总 primitiveCount: ${total}   ` +
+          `类比 E3M: LOD 块流式加载\n` +
+          (extra ? extra + '\n' : '') + logLines.join('\n');
+      }
+
+      // 初始全部隐藏（show: false），模拟"未加载的瓦片"
+      const tiles = [];
+      for (const t of TILES) {
+        const p = rel(t.dx, t.dy);
+        const model = await engine.Model.fromGltfAsync({
+          url: '/data/gltf/city.gltf',
+          scene: viewer.scene,
+          modelMatrix: placeMatrix(p.lon, p.lat, 0, t.heading),
+          scale: 900 / ES,
+          show: false,
+        });
+        tiles.push({ ...t, model, shown: false });
+      }
+
+      // ── 渐进"加载"：逐块 readyPromise → show（模拟瓦片流式到达）────
+      let loading = false;
+      async function loadNext() {
+        const next = tiles.find(t => !t.shown);
+        if (!next || loading) return null;
+        loading = true;
+        await next.model.readyPromise;              // 对齐 E3M readyPromise 语义
+        next.model.show = true;
+        next.shown = true;
+        logLines.unshift(`✓ ${next.name} ready — ${next.model.primitiveCount} primitives`);
+        if (logLines.length > 4) logLines.pop();
+        refreshInfo(`已显示 ${tiles.filter(t => t.shown).length}/${tiles.length} 块`);
+        loading = false;
+        return next;
+      }
+      async function loadAll() {
+        while (await loadNext()) { /* 依次加载 */ }
+      }
+
+      addBtn('加载下一块', () => { loadNext(); });
+      addBtn('加载全部', () => { loadAll(); });
+      const resetBtn = addBtn('重置场景', () => {
+        for (const t of tiles) { t.model.show = false; t.shown = false; }
+        logLines.length = 0;
+        refreshInfo('场景已重置（全部块隐藏）');
+      });
+
+      // 视角：对齐原示例「加载完成定位到模型包围盒」→ 俯瞰整个街区
+      const overview = () => viewer.camera.flyTo({
+        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.004, 4200),
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-48) },
+        duration: 2,
+      });
+      const street = () => {
+        const p = rel(0, -BLOCK);
+        viewer.camera.flyTo({
+          destination: engine.Cartesian3.fromDegrees(p.lon, p.lat - 0.003, 650),
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-12) },
+          duration: 2,
+        });
+      };
+      addBtn('视角: 俯瞰街区', () => overview());
+      addBtn('视角: 街景', () => street());
+
+      overview();
+      refreshInfo('提示: 点「加载下一块」逐块流入（模拟倾斜摄影瓦片渐进加载）');
+      await loadNext();   // 初始自动流入第一块，避免全空画面
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [121.52317, 31.221, 4200],
+          imagery: 'gaode-sat',
+          title: '40 · 倾斜摄影加载（占位）',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '40 倾斜摄影占位 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

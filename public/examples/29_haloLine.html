@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 29：光晕流动线 HaloLine - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:180px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>29 光晕流动线 HaloLine</h1>
+    <p class="desc">EV PolylineGlow 材质近似：引擎 polyline 无材质系统，
+      用「宽幅低透明底线 + 窄幅高亮芯线」双层叠加成光晕，再叠加短亮段沿航线步进
+      形成流动脉冲（诚实注明近似原理）。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const scene = viewer.scene;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      // ── 航线（经纬插值 + 拱高）────────────────────────────────────
+      function arcPath(from, to, peakM = 600_000, segments = 64) {
+        const pts = [];
+        for (let i = 0; i <= segments; i++) {
+          const k = i / segments;
+          const lon = from[0] + (to[0] - from[0]) * k;
+          const lat = from[1] + (to[1] - from[1]) * k;
+          const arch = Math.sin(k * Math.PI) * peakM;
+          pts.push(engine.Cartesian3.fromDegrees(lon, lat, arch));
+        }
+        return pts;
+      }
+
+      const ROUTES = [
+        { name: '北京 → 上海', from: [116.4, 39.9], to: [121.47, 31.23], color: [0.25, 0.85, 1.0] },
+        { name: '上海 → 广州', from: [121.47, 31.23], to: [113.26, 23.13], color: [1.0, 0.5, 0.15] },
+        { name: '广州 → 成都', from: [113.26, 23.13], to: [104.07, 30.57], color: [0.55, 1.0, 0.4] },
+        { name: '成都 → 北京', from: [104.07, 30.57], to: [116.4, 39.9], color: [0.95, 0.3, 0.85] },
+      ];
+
+      const haloLines = []; // { base, core, color, positions }
+      for (const r of ROUTES) {
+        const positions = arcPath(r.from, r.to);
+        const [cr, cg, cb] = r.color;
+        const base = scene.entities.add(new engine.Entity({
+          name: r.name + ' 光晕底',
+          polyline: {
+            positions,
+            width: 22,
+            color: new engine.Color(cr, cg, cb, 0.16),
+          },
+        }));
+        const core = scene.entities.add(new engine.Entity({
+          name: r.name,
+          polyline: {
+            positions,
+            width: 5,
+            color: new engine.Color(cr, cg, cb, 0.95),
+          },
+        }));
+        haloLines.push({ base, core, color: [cr, cg, cb], positions });
+      }
+
+      // ── 流动脉冲：短亮段沿每条线步进 ─────────────────────────────
+      const PULSES_PER_LINE = 3;
+      const pulses = [];
+      for (const line of haloLines) {
+        const [cr, cg, cb] = line.color;
+        for (let i = 0; i < PULSES_PER_LINE; i++) {
+          pulses.push({
+            line,
+            t: i / PULSES_PER_LINE,
+            entity: scene.entities.add(new engine.Entity({
+              name: '脉冲',
+              polyline: {
+                positions: [line.positions[0], line.positions[1]],
+                width: 9,
+                color: new engine.Color(Math.min(cr + 0.3, 1), Math.min(cg + 0.3, 1), Math.min(cb + 0.3, 1), 0.98),
+              },
+            })),
+          });
+        }
+      }
+
+      let flowOn = true;
+      let lastStep = 0;
+      const STEP_MS = 140;
+      const SPAN = 0.045; // 脉冲段长度（占全线比例）
+      viewer.preRender = () => {
+        if (!flowOn) return;
+        const now = performance.now();
+        if (now - lastStep < STEP_MS) return;
+        lastStep = now;
+        for (const p of pulses) {
+          p.t = (p.t + 0.008) % 1;
+          const pos = p.line.positions;
+          const i0 = Math.floor(p.t * (pos.length - 1));
+          const i1 = Math.min(i0 + Math.max(2, Math.round(SPAN * pos.length)), pos.length - 1);
+          p.entity.polyline = {
+            positions: pos.slice(i0, i1 + 1),
+            width: 9,
+            color: p.entity.polyline.color,
+          };
+        }
+      };
+
+      addBtn('流动开 / 关', () => {
+        flowOn = !flowOn;
+        for (const p of pulses) p.entity.show = flowOn;
+      });
+      addBtn('光晕增强', () => {
+        for (const l of haloLines) {
+          l.base.polyline = { positions: l.positions, width: 34, color: new engine.Color(l.color[0], l.color[1], l.color[2], 0.26) };
+        }
+      });
+      addBtn('光晕恢复', () => {
+        for (const l of haloLines) {
+          l.base.polyline = { positions: l.positions, width: 22, color: new engine.Color(l.color[0], l.color[1], l.color[2], 0.16) };
+        }
+      });
+      addBtn('全国视角', () => viewer.camera.flyTo({ destination: { lon: 110, lat: 32, height: 5_000_000 }, duration: 2 }));
+
+      result.textContent =
+        `光晕航线 ${ROUTES.length} 条（宽 22px 淡底 + 5px 亮芯）\n` +
+        `流动脉冲 ${pulses.length} 个（每 ${STEP_MS}ms 步进，短亮段沿弧线移动）\n` +
+        `诚实注明：无 PolylineGlowMaterial，光晕 = 双层透明度叠加`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110, 32, 5_000_000],
+          imagery: 'gaode-sat',
+          title: '29 · 光晕流动线',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '29 光晕流动线 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

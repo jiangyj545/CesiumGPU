@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 15：多源影像切换 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.on{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel .row{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;}
+    .cg-panel input[type=text]{flex:1;padding:4px 8px;font-size:12px;color:#cfe4ff;
+      background:rgba(20,40,70,.6);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel input[type=range]{flex:1;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:200px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>15 多源影像切换</h1>
+    <p class="desc">在线源（天地图影像/矢量/注记、高德、OSM）与离线源
+      （localhost:8890 Mapnik 瓦片）统一经 XyzImageryProvider 接入；
+      支持图层增删、raiseToTop 叠放、alpha 调整与自定义 XYZ 模板输入。
+      迁移自 EV-Globe 01_TianDiTu / 01_OpenStreetMap / 01_ArcGIS /
+      01_BingMap / 01_Baidu / 01_Mapbox / 01_GoogleMap 的"多源接入"主题。</p>
+    <div id="controls"></div>
+    <div class="row">
+      <input id="tpl" type="text" placeholder="自定义 XYZ 模板，含 {z}/{x}/{y} 占位符" style="flex:1;" />
+      <button id="addTpl">添加</button>
+    </div>
+    <div class="row">透明度<input id="alpha" type="range" min="0" max="1" step="0.05" value="1" /><span id="alphaVal">100%</span></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const TDT_TK = '1006be64546f4c8fe11ea687163c54f7';
+      const layers = viewer.globe.layers;
+      const controls = document.getElementById('controls');
+      const result = document.getElementById('result');
+
+      // ── 影像源定义：在线与离线源统一走 XyzImageryProvider ───────────
+      const SOURCES = [
+        { name: '天地图影像', make: () => engine.XyzImageryProvider.tianditu(TDT_TK, 'img') },
+        { name: '天地图矢量', make: () => engine.XyzImageryProvider.tianditu(TDT_TK, 'vec') },
+        { name: '天地图注记', make: () => engine.XyzImageryProvider.tianditu(TDT_TK, 'cva'), overlay: true },
+        { name: '离线Mapnik', make: () => new engine.XyzImageryProvider({
+            url: 'http://localhost:8890/tiles/Mapnik/{z}/{x}/{y}.png',
+            maximumLevel: 16, tileSize: 256 }) },
+        { name: '高德卫星', make: () => new engine.XyzImageryProvider(DemoUtils.IMAGERY_PRESETS['gaode-sat']) },
+        { name: 'OSM', make: () => new engine.XyzImageryProvider(DemoUtils.IMAGERY_PRESETS.osm) },
+      ];
+
+      const nameOf = new Map();    // ImageryLayer -> 显示名
+      const overlays = new Set();  // 注记类图层：切底图时保持叠加
+      let active = null;           // 当前选中层（受 alpha 滑杆控制）
+
+      // ── 控件构建 ────────────────────────────────────────────────────
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      function refresh() {
+        const lines = [...layers].map((l, i) => {
+          const mark = l === active ? '◀' : ' ';
+          const ov = overlays.has(l) ? ' [注记]' : '';
+          return `栈${i}  ${nameOf.get(l) || '?'}${ov}  show=${l.show}  alpha=${l.alpha.toFixed(2)} ${mark}`;
+        });
+        const top = layers.activeLayer;
+        result.textContent = lines.join('\n') +
+          '\n渲染栈顶: ' + (top ? (nameOf.get(top) || '?') : '无（全部隐藏）');
+        for (const btn of controls.querySelectorAll('button[data-src]')) {
+          const layer = [...nameOf.entries()].find(([l, n]) => n === btn.dataset.src);
+          btn.classList.toggle('on', !!layer && layer[0].show);
+          btn.textContent = btn.dataset.src + (layer ? ' ✓' : '');
+        }
+      }
+
+      function ensureLayer(src) {
+        let layer = [...nameOf.entries()].find(([, n]) => n === src.name)?.[0];
+        if (!layer) {
+          layer = layers.addImageryProvider(src.make());
+          nameOf.set(layer, src.name);
+          if (src.overlay) overlays.add(layer);
+        }
+        if (src.overlay) {
+          // 注记类：仅切换自身显隐，不重置底图选择
+          layer.show = !layer.show;
+        } else {
+          layer.show = true;
+          active = layer;
+          for (const [l] of nameOf) if (!overlays.has(l)) l.show = (l === layer);
+        }
+        refresh();
+      }
+
+      for (const src of SOURCES) {
+        addBtn(src.name, () => ensureLayer(src)).dataset.src = src.name;
+      }
+
+      // ── 移除当前层 / 当前层置顶 ─────────────────────────────────────
+      addBtn('移除当前层', () => {
+        if (!active) return;
+        layers.remove(active);   // 引擎同步释放该层 GPU 纹理
+        nameOf.delete(active);
+        overlays.delete(active);
+        active = [...nameOf.keys()].at(-1) || null;
+        refresh();
+      });
+
+      addBtn('当前层置顶', () => {
+        if (active) layers.raiseToTop(active);
+        refresh();
+      });
+
+      // ── 自定义 XYZ 模板输入 ─────────────────────────────────────────
+      document.getElementById('addTpl').addEventListener('click', () => {
+        const url = document.getElementById('tpl').value.trim();
+        if (!url || !url.includes('{z}')) {
+          DemoUtils.toast('请输入含 {z}/{x}/{y} 占位符的 XYZ 模板');
+          return;
+        }
+        const layer = layers.addImageryProvider(
+          new engine.XyzImageryProvider({ url, maximumLevel: 18, tileSize: 256 }));
+        nameOf.set(layer, '自定义');
+        active = layer;
+        refresh();
+      });
+
+      // ── 透明度滑杆（写入 layer.alpha；引擎按层 alpha 参与合成）──────
+      const slider = document.getElementById('alpha');
+      const alphaVal = document.getElementById('alphaVal');
+      slider.addEventListener('input', () => {
+        const v = Number(slider.value);
+        alphaVal.textContent = Math.round(v * 100) + '%';
+        if (active) active.alpha = v;
+      });
+
+      // ── 初始：天地图影像 + 注记叠加 ─────────────────────────────────
+      const imgLayer = layers.addImageryProvider(SOURCES[0].make());
+      nameOf.set(imgLayer, '天地图影像');
+      const ciaLayer = layers.addImageryProvider(SOURCES[2].make());
+      nameOf.set(ciaLayer, '天地图注记');
+      overlays.add(ciaLayer);
+      active = imgLayer;
+      refresh();
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 9_000_000],
+          imagery: 'none', // 底图由示例自行管理（多源切换）
+          title: '15 · 多源影像切换',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '15 多源影像切换 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

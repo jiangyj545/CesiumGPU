@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 86：路径分析 RouteAnalysis - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:270px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:240px;overflow:auto;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>86 路径分析</h1>
+    <p class="desc">迁移自 EV-Globe 13_routeAnalysis。
+      途经点经 CatmullRomSpline 生成平滑航线（巡航高度 20 km），
+      实时统计总长度；开启"添加途经点"后点击地图可追加航点重建航线。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const C3 = engine.Cartesian3;
+      const RE = C3.EARTH_RADIUS;
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      }
+
+      const lonLatH = (lon, lat, h = 0) => {
+        const p = C3.fromDegrees(lon, lat, h);
+        return new C3(p.x / RE, p.y / RE, p.z / RE);
+      };
+      const entities = viewer.scene.entities;
+      const CRUISE = 20_000;                      // 巡航高度 20 km
+      const SAMPLES = 120;
+
+      // ── 预设航线：石家庄 → 烟台（沿途 6 个途经点）──────────────────────
+      const PRESET = [
+        { name: '石家庄', lon: 114.51, lat: 38.04 },
+        { name: '衡水', lon: 115.67, lat: 37.73 },
+        { name: '济南', lon: 117.12, lat: 36.65 },
+        { name: '淄博', lon: 118.05, lat: 36.81 },
+        { name: '潍坊', lon: 119.16, lat: 36.70 },
+        { name: '烟台', lon: 121.39, lat: 37.52 },
+      ];
+      let waypoints = PRESET.map((p) => ({ ...p }));
+      let routeEnts = [];
+
+      function pickLonLat(px, py) {
+        const w = viewer.canvas.clientWidth;
+        const h = viewer.canvas.clientHeight;
+        const hit = viewer.camera.pickGlobe((px / w) * 2 - 1, 1 - (py / h) * 2);
+        if (!hit) return null;
+        return {
+          lon: (Math.atan2(hit.y, hit.x) * 180) / Math.PI,
+          lat: (Math.atan2(hit.z, Math.hypot(hit.x, hit.y)) * 180) / Math.PI,
+        };
+      }
+
+      // ── 重建航线：CatmullRom 样条采样 + 途经点标记 + 长度统计 ──────────
+      function rebuild() {
+        for (const e of routeEnts) entities.remove(e);
+        routeEnts = [];
+        if (waypoints.length < 2) {
+          refresh('至少需要 2 个途经点');
+          return;
+        }
+
+        const ctrl = waypoints.map((p) => lonLatH(p.lon, p.lat, CRUISE));
+        const times = waypoints.map((_, i) => i);
+        const spline = new engine.CatmullRomSpline({ times, points: ctrl });
+
+        // 采样曲线 + 累加弧长（归一化距离 × RE → 米）
+        const pts = [];
+        let totalM = 0;
+        let prev = null;
+        for (let i = 0; i <= SAMPLES; i++) {
+          const t = (i / SAMPLES) * (waypoints.length - 1);
+          const cur = spline.evaluate(t, new C3());
+          if (prev) totalM += C3.distance(prev, cur) * RE;
+          pts.push(cur);
+          prev = cur;
+        }
+
+        routeEnts.push(entities.add(new engine.Entity({
+          polyline: {
+            positions: pts,
+            width: 3,
+            color: new engine.Color(0.25, 0.9, 1.0, 0.9),
+          },
+        })));
+
+        waypoints.forEach((p, i) => {
+          routeEnts.push(entities.add(new engine.Entity({
+            position: lonLatH(p.lon, p.lat, CRUISE),
+            point: {
+              color: i === 0 || i === waypoints.length - 1
+                ? engine.Color.RED : engine.Color.YELLOW,
+              pixelSize: 9,
+            },
+            label: {
+              text: `${i + 1} ${p.name}`,
+              font: '13px sans-serif',
+              fillColor: engine.Color.WHITE,
+            },
+          })));
+          // 途经点到地面的垂线，强化高度感
+          routeEnts.push(entities.add(new engine.Entity({
+            polyline: {
+              positions: [lonLatH(p.lon, p.lat, CRUISE), lonLatH(p.lon, p.lat, 0)],
+              width: 1,
+              color: new engine.Color(0.5, 0.8, 1.0, 0.35),
+            },
+          })));
+        });
+
+        refresh(`总长: ${(totalM / 1000).toFixed(1)} km`);
+      }
+
+      // ── 交互 ──────────────────────────────────────────────────────────
+      let adding = false;
+      const addModeBtn = addBtn('添加途经点（点击地图）', () => {
+        adding = !adding;
+        addModeBtn.classList.toggle('active', adding);
+        refresh(adding ? '添加模式：点击地图追加航点' : null);
+      });
+      addBtn('撤销最后航点', () => {
+        if (waypoints.length > 2) { waypoints.pop(); rebuild(); }
+      });
+      addBtn('重置预设航线', () => {
+        waypoints = PRESET.map((p) => ({ ...p }));
+        rebuild();
+      });
+
+      const handler = new engine.ScreenSpaceEventHandler(viewer.canvas);
+      handler.setInputAction((pos) => {
+        if (!adding) return;
+        const ll = pickLonLat(pos.x, pos.y);
+        if (!ll) return;
+        // 插到距点击处最近的相邻航点对之间
+        let best = waypoints.length - 1;
+        let bestD = Infinity;
+        for (let i = 0; i < waypoints.length - 1; i++) {
+          const mx = (waypoints[i].lon + waypoints[i + 1].lon) / 2;
+          const my = (waypoints[i].lat + waypoints[i + 1].lat) / 2;
+          const d = Math.hypot(mx - ll.lon, my - ll.lat);
+          if (d < bestD) { bestD = d; best = i + 1; }
+        }
+        waypoints.splice(best, 0, {
+          name: `P${waypoints.length + 1}`, lon: ll.lon, lat: ll.lat,
+        });
+        rebuild();
+      }, 'LEFT_CLICK');
+
+      function refresh(note) {
+        result.textContent =
+          `途经点: ${waypoints.length} 个   ` +
+          `航线: ${waypoints.map((p) => p.name).join(' → ')}\n` +
+          `巡航高度: 20 km   样条: CatmullRom（${SAMPLES} 采样）\n` +
+          (note || '');
+      }
+
+      rebuild();
+
+      viewer.camera.setView({
+        destination: C3.fromDegrees(118.0, 34.2, 1_800_000),
+      });
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [118.0, 34.2, 1_800_000],
+          imagery: 'gaode-sat',
+          title: '86 · 路径分析',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '86 路径分析 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

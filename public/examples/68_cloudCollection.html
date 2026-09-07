@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 68：云集合 CloudCollection - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9500;min-width:300px;max-width:390px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel label{display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;}
+    .cg-panel label input[type=range]{flex:1;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>68 云集合 CloudCollection</h1>
+    <p class="desc">多个独立云团（每团 24 个 billboard 聚簇）沿各自航向循环漂移，
+      云团形态随时间轻微呼吸。对齐 EV 08_cloudCollection 的群体云语义。
+      与 67 的差异：67 为整层均匀云盖，本页为离散云团群体运动。</p>
+    <div id="controls"></div>
+    <label>云团数 <input id="clusters" type="range" min="2" max="10" step="1" value="8" /><span id="clustersVal">8</span></label>
+    <label>漂移速度 <input id="speed" type="range" min="0.2" max="3" step="0.1" value="1" /><span id="speedVal">1.0</span></label>
+    <label>透明度 <input id="opacity" type="range" min="0.2" max="1" step="0.01" value="0.9" /><span id="opacityVal">0.90</span></label>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    /* CloudClusterPass —— 离散云团群体（团 = 24 sprite 高斯聚簇）。
+     * 漂移：VS 内 pos = base + dir * (fract(time*speed + phase) - 0.5) * span
+     * 循环（西→东飘出范围后回到起点）。 */
+    const CLUSTER_VS = /* wgsl */`
+      struct UBO {
+        view     : mat4x4<f32>,
+        proj     : mat4x4<f32>,
+        viewProj : mat4x4<f32>,
+        params   : vec4<f32>,   // x=time y=speed z=opacity
+      }
+      @group(0) @binding(0) var<uniform> u : UBO;
+      struct Out {
+        @builtin(position) pos : vec4<f32>,
+        @location(0) uv : vec2<f32>,
+        @location(1) alpha : f32,
+      }
+      @vertex fn main(@location(0) base : vec3<f32>,         // 团中心（归一化 ECEF）
+                      @location(1) memberOffset : vec3<f32>, // 成员高斯偏移
+                      @location(2) dirPhase : vec3<f32>,     // xy=切向漂移方向 z=相位
+                      @location(3) corner : vec2<f32>,
+                      @location(4) rand : vec2<f32>) -> Out {
+        let span = 0.02;  // 归一化漂移跨度（≈127 km）
+        let t = fract(u.params.x * u.params.y * 0.01 + dirPhase.z) - 0.5;
+        let center = normalize(base + memberOffset) * (1.0 + 0.0016 * (0.8 + rand.x * 0.4))
+                   + vec3<f32>(dirPhase.xy * t * span, 0.0);
+        // 团呼吸：轻微径向起伏
+        let breathe = 1.0 + 0.0004 * sin(u.params.x * 0.8 + dirPhase.z * 6.28);
+        var vp = u.view * vec4<f32>(center * breathe, 1.0);
+        vp.xy += corner * (0.008 + rand.x * 0.010);
+        var o : Out;
+        o.pos = u.proj * vp;
+        o.uv = corner * 0.5 + vec2<f32>(0.5, 0.5);
+        o.alpha = u.params.z * (0.45 + rand.y * 0.55);
+        return o;
+      }
+    `;
+    const CLUSTER_FS = /* wgsl */`
+      @group(0) @binding(1) var samp : sampler;
+      @group(0) @binding(2) var tex : texture_2d<f32>;
+      @fragment fn main(@location(0) uv : vec2<f32>,
+                        @location(1) alpha : f32) -> @location(0) vec4<f32> {
+        let c = textureSample(tex, samp, uv);
+        return vec4<f32>(vec3<f32>(1.0) * c.a * alpha, c.a * alpha);
+      }
+    `;
+
+    function makeCloudCanvas(size = 128) {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      for (let i = 0; i < 14; i++) {
+        const a = (i / 14) * Math.PI * 2 + Math.sin(i * 12.9898) * 1.7;
+        const rad = size * (0.10 + 0.10 * Math.abs(Math.sin(i * 78.233)));
+        const cx = size / 2 + Math.cos(a) * size * 0.22;
+        const cy = size / 2 + Math.sin(a) * size * 0.16;
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+        g.addColorStop(0, 'rgba(255,255,255,0.55)');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      return canvas;
+    }
+
+    const MEMBERS_PER_CLUSTER = 24;
+    const MAX_CLUSTERS = 10;
+
+    class CloudClusterPass {
+      label = 'CloudCluster';
+      show = true;
+      constructor(context, options) {
+        this._ctx = context;
+        this._camera = options.camera;
+        this._clusters = options.clusters ?? 8;
+        this._speed = options.speed ?? 1;
+        this._opacity = options.opacity ?? 0.9;
+        this._uboData = new Float32Array(52); // 208 B = view+proj+viewProj+params
+      }
+
+      /** 华南-南海区（lon 105-125 / lat 12-28）云团顶点。
+       *  attr: base(3) + memberOffset(3) + dirPhase(3) + corner(2) + rand(2) = 13 floats */
+      _buildSprites() {
+        const verts = [];
+        const EARTH = 6378137;
+        const rand = (s) => {
+          const t = Math.sin(s * 127.1 + 311.7) * 43758.5453;
+          return t - Math.floor(t);
+        };
+        for (let k = 0; k < MAX_CLUSTERS; k++) {
+          const clon = 105 + rand(k * 7 + 1) * 20;
+          const clat = 12 + rand(k * 7 + 13) * 16;
+          const phase = rand(k * 7 + 29);
+          const mC = engine.Cartesian3.fromDegrees(clon, clat, 0);
+          const nx = mC.x / EARTH, ny = mC.y / EARTH, nz = mC.z / EARTH;
+          // 团级切向漂移方向：east = (-sinLon, cosLon, 0)
+          const lonR = clon * Math.PI / 180;
+          const dx = -Math.sin(lonR), dy = Math.cos(lonR);
+          for (let i = 0; i < MEMBERS_PER_CLUSTER; i++) {
+            const s = k * 1000 + i;
+            const offLon = (rand(s + 1) + rand(s + 2) - 1) * 0.9;  // ≈±0.9° 团径
+            const offLat = (rand(s + 3) + rand(s + 4) - 1) * 0.7;
+            const mM = engine.Cartesian3.fromDegrees(clon + offLon, clat + offLat, 0);
+            const off = [mM.x / EARTH - nx, mM.y / EARTH - ny, mM.z / EARTH - nz];
+            const r1 = rand(s + 5), r2 = rand(s + 6);
+            for (const [cx, cy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+              verts.push(nx, ny, nz, ...off, dx, dy, phase, cx, cy, r1, r2);
+            }
+          }
+        }
+        return new Float32Array(verts);
+      }
+
+      prepare() { /* 延迟到 execute */ }
+
+      _ensureResources() {
+        if (this._pipeline) return;
+        const device = this._ctx.device;
+        const canvas = makeCloudCanvas(128);
+        this._tex = device.createTexture({
+          label: 'CloudCluster.Tex', size: [128, 128], format: 'rgba8unorm',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        device.queue.copyExternalImageToTexture(
+          { source: canvas }, { texture: this._tex }, [128, 128]);
+        this._sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const verts = this._buildSprites();
+        this._vertexBuffer = device.createBuffer({
+          label: 'CloudCluster.Verts', size: verts.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this._ctx.writeBuffer(this._vertexBuffer, 0, verts);
+        this._quadsPerCluster = MEMBERS_PER_CLUSTER;
+        this._quadTotal = MAX_CLUSTERS * MEMBERS_PER_CLUSTER;
+        const indices = new Uint32Array(this._quadTotal * 6);
+        for (let q = 0; q < this._quadTotal; q++) {
+          const b = q * 4, o = q * 6;
+          indices[o] = b; indices[o + 1] = b + 1; indices[o + 2] = b + 2;
+          indices[o + 3] = b + 1; indices[o + 4] = b + 3; indices[o + 5] = b + 2;
+        }
+        this._indexBuffer = device.createBuffer({
+          label: 'CloudCluster.Idx', size: indices.byteLength,
+          usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        this._ctx.writeBuffer(this._indexBuffer, 0, indices);
+        this._ubo = device.createBuffer({
+          label: 'CloudCluster.UBO', size: 208,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        const bgl = device.createBindGroupLayout({
+          entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+          ],
+        });
+        const premult = {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        };
+        this._pipeline = device.createRenderPipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+          vertex: {
+            module: this._ctx.createShaderModule(CLUSTER_VS, 'CloudCluster.VS'), entryPoint: 'main',
+            buffers: [{
+              arrayStride: 52,
+              attributes: [
+                { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                { shaderLocation: 1, offset: 12, format: 'float32x3' },
+                { shaderLocation: 2, offset: 24, format: 'float32x3' },
+                { shaderLocation: 3, offset: 36, format: 'float32x2' },
+                { shaderLocation: 4, offset: 44, format: 'float32x2' },
+              ],
+            }],
+          },
+          fragment: {
+            module: this._ctx.createShaderModule(CLUSTER_FS, 'CloudCluster.FS'), entryPoint: 'main',
+            targets: [{ format: this._ctx.preferredFormat, blend: premult }],
+          },
+          primitive: { topology: 'triangle-list' },
+        });
+        this._bindGroup = device.createBindGroup({
+          layout: bgl,
+          entries: [
+            { binding: 0, resource: { buffer: this._ubo } },
+            { binding: 1, resource: this._sampler },
+            { binding: 2, resource: this._tex.createView() },
+          ],
+        });
+      }
+
+      execute(encoder, target, time) {
+        if (!this.show) return;
+        this._ensureResources();
+        const cam = this._camera;
+        const d = this._uboData;
+        d.set(cam.viewMatrix.values, 0);
+        d.set(cam.projectionMatrix.values, 16);
+        d.set(cam.viewProjectionMatrix.values, 32);
+        d[48] = time;
+        d[49] = this._speed;
+        d[50] = this._opacity;
+        this._ctx.writeBuffer(this._ubo, 0, d);
+
+        const pass = encoder.beginRenderPass({
+          label: this.label,
+          colorAttachments: [{
+            view: target, loadOp: 'load', storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          }],
+        });
+        pass.setPipeline(this._pipeline);
+        pass.setBindGroup(0, this._bindGroup);
+        pass.setVertexBuffer(0, this._vertexBuffer);
+        pass.setIndexBuffer(this._indexBuffer, 'uint32');
+        const quads = Math.round(this._clusters * this._quadsPerCluster);
+        pass.drawIndexed(quads * 6);
+        pass.end();
+      }
+
+      destroy() {
+        this._vertexBuffer?.destroy(); this._indexBuffer?.destroy();
+        this._ubo?.destroy(); this._tex?.destroy();
+        this._pipeline = null;
+      }
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const addBtn = (label, onClick) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      };
+
+      const clouds = new CloudClusterPass(viewer.context, {
+        camera: viewer.camera, clusters: 8, speed: 1, opacity: 0.9,
+      });
+      viewer.scene.effects.add(clouds);
+
+      let on = true;
+      const btn = addBtn('云团: 开', () => {
+        on = !on;
+        clouds.show = on;
+        btn.textContent = `云团: ${on ? '开' : '关'}`;
+        btn.classList.toggle('active', on);
+        refresh();
+      });
+      btn.classList.add('active');
+      addBtn('飞往南海', () => viewer.camera.flyTo({
+        destination: { lon: 115, lat: 20, height: 5_000_000 },
+      }));
+
+      const bind = (id, prop, fmt) => {
+        const el = document.getElementById(id);
+        const val = document.getElementById(id + 'Val');
+        el.addEventListener('input', () => {
+          clouds[prop] = Number(el.value);
+          val.textContent = fmt(Number(el.value));
+          refresh();
+        });
+      };
+      bind('clusters', '_clusters', (v) => String(Math.round(v)));
+      bind('speed', '_speed', (v) => v.toFixed(1));
+      bind('opacity', '_opacity', (v) => v.toFixed(2));
+
+      function refresh() {
+        result.textContent =
+          `云团: ${Math.round(clouds._clusters)} 团 × 24 billboard = ${Math.round(clouds._clusters) * 24} 面片\n` +
+          `漂移: fract 循环（西→东 ≈127 km 跨度）· 速度 ×${clouds._speed.toFixed(1)}\n` +
+          `形态: 团呼吸（径向起伏）+ 高斯聚簇（华南-南海区）\n` +
+          `状态: ${on ? '运行中' : '已关闭'}`;
+      }
+      refresh();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [115, 20, 5_500_000],
+          imagery: 'gaode-sat',
+          title: '68 · 云集合 CloudCollection',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '68 云集合 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

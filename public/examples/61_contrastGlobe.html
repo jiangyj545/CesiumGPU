@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 61：双球对比 ContrastGlobe - CesiumGPU</title>
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;}
+    #layout{position:absolute;inset:0;display:flex;}
+    #paneA,#paneB{position:relative;flex:1 1 50%;overflow:hidden;}
+    #paneB{border-left:2px solid rgba(120,180,255,.35);}
+    .pane-tag{position:absolute;top:12px;left:12px;z-index:9300;padding:4px 12px;border-radius:4px;
+      font:12px/1.6 sans-serif;color:#fff;background:rgba(10,20,35,.7);border:1px solid rgba(255,255,255,.2);}
+    .cg-panel{position:absolute;top:52px;left:12px;z-index:9500;min-width:280px;max-width:360px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 "Microsoft YaHei",sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9ecbff;}
+    .cg-panel .desc{font-size:12px;color:#a8bfe0;margin:0 0 8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+    .cg-panel #controls button{background:rgba(60,110,180,.55);border:1px solid rgba(120,180,255,.35);
+      color:#d8e8ff;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;white-space:pre-wrap;}
+  </style>
+</head>
+<body>
+  <div id="layout">
+    <div id="paneA"><span class="pane-tag">球 A：高德卫星</span></div>
+    <div id="paneB"><span class="pane-tag">球 B：OpenStreetMap</span></div>
+  </div>
+  <div class="cg-panel">
+    <h1>61 双球对比 ContrastGlobe</h1>
+    <p class="desc">并排两个独立 Viewer（各自 WebGPU device + G-Buffer 管线），
+      各挂不同底图；可选视角同步。对齐 EV 08_contrastGlobe 的双球联动对比。</p>
+    <div id="controls"></div>
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const SOURCES = {
+      'osm': 'OpenStreetMap',
+      'gaode-sat': '高德卫星',
+      'gaode-vec': '高德矢量',
+    };
+
+    /** 从主相机同步到副相机（lon/lat/height + heading/pitch 反推）。 */
+    function syncCamera(src, dst) {
+      const p = src.position;
+      const r = Math.hypot(p.x, p.y, p.z);
+      const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
+      const lat = Math.asin(Math.max(-1, Math.min(1, p.z / r))) * 180 / Math.PI;
+      const height = (r - 1) * 6378137;
+      const lonR = lon * Math.PI / 180, latR = lat * Math.PI / 180;
+      const cl = Math.cos(latR), sl = Math.sin(latR);
+      const ce = Math.cos(lonR), se = Math.sin(lonR);
+      const east  = { x: -se,      y: ce,       z: 0  };
+      const north = { x: -sl * ce, y: -sl * se, z: cl };
+      const up    = { x: cl * ce,  y: cl * se,  z: sl };
+      const d = src.direction;
+      const pitch = Math.asin(Math.max(-1, Math.min(1, d.x * up.x + d.y * up.y + d.z * up.z)));
+      const heading = Math.atan2(
+        d.x * east.x + d.y * east.y + d.z * east.z,
+        d.x * north.x + d.y * north.y + d.z * north.z,
+      );
+      dst.setView({
+        destination: { lon, lat, height },
+        orientation: { heading, pitch, roll: 0 },
+      });
+    }
+
+    async function demo(viewerA, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      const addBtn = (label, onClick) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        controls.appendChild(btn);
+        return btn;
+      };
+
+      // ── 球 B：独立 Viewer（B pane，OpenStreetMap 底图）──────────────
+      const paneB = document.getElementById('paneB');
+      const viewerB = new engine.Viewer(paneB);
+      await viewerB.initialize();
+      window.viewerB = viewerB; // debug hook
+      viewerB.globe.layers.addImageryProvider(
+        new engine.XyzImageryProvider(DemoUtils.IMAGERY_PRESETS['osm']));
+      syncCamera(viewerA.camera, viewerB.camera);
+
+      // ── 视角同步开关 ───────────────────────────────────────────────
+      let synced = false;
+      const syncBtn = addBtn('视角同步: 关', () => {
+        synced = !synced;
+        syncBtn.textContent = `视角同步: ${synced ? '开' : '关'}`;
+        syncBtn.classList.toggle('active', synced);
+        if (synced) syncCamera(viewerA.camera, viewerB.camera);
+        refresh();
+      });
+      viewerA.preRender = () => {
+        if (!synced) return;
+        syncCamera(viewerA.camera, viewerB.camera);
+        viewerB.camera.setAspectRatio(viewerB.canvas.width / viewerB.canvas.height);
+      };
+
+      // ── 球 B 底图切换 ─────────────────────────────────────────────
+      let currentKey = 'osm';
+      for (const [key, label] of Object.entries(SOURCES)) {
+        addBtn(`B→${label}`, () => {
+          const layers = viewerB.globe.layers;
+          if (layers.activeLayer) layers.remove(layers.activeLayer);
+          layers.addImageryProvider(new engine.XyzImageryProvider(DemoUtils.IMAGERY_PRESETS[key]));
+          currentKey = key;
+          refresh();
+        });
+      }
+
+      function refresh() {
+        result.textContent =
+          `球A: 高德卫星（startup 挂载）\n` +
+          `球B: ${SOURCES[currentKey]}（独立 device/G-Buffer 管线）\n` +
+          `视角同步: ${synced ? '开（每帧 setView）' : '关（两球独立交互）'}\n` +
+          `注: 双 Viewer 各自 requestAnimationFrame，GPU 开销 ≈ 2×`;
+      }
+      refresh();
+    }
+
+    // ── 标准启动模板（主 viewer 挂 paneA）────────────────────────────
+    (async () => {
+      let viewer;
+      window.viewer = null;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          container: '#paneA',
+          view: [110.0, 32.0, 4_500_000],
+          imagery: 'gaode-sat',
+          title: '61 · 双球对比 ContrastGlobe',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        window.viewer = viewer;
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '61 双球对比 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

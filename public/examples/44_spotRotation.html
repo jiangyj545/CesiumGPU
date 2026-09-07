@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 44：定点旋转 - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:270px;max-width:350px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);font:13px/1.6 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9fd0ff;}
+    .cg-panel .desc{font-size:12px;color:#8fa8c8;margin:0 0 8px;}
+    .cg-panel h2{font-size:12px;margin:8px 0 4px;color:#7fb4e8;}
+    .cg-panel button{margin:4px 6px 4px 0;padding:5px 10px;font-size:12px;cursor:pointer;
+      background:rgba(40,80,140,.55);color:#dbeaff;border:1px solid rgba(120,180,255,.35);
+      border-radius:5px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel button.active{background:rgba(80,160,90,.7);border-color:rgba(140,255,160,.5);}
+    .cg-panel label{display:block;font-size:12px;margin:5px 0 2px;color:#b8d0ee;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>44 定点旋转</h1>
+    <p class="desc">固定视点自转（对齐 EV 07_spotRotation 的「环绕四周」）：
+      每帧 Camera.rotate 持续推进，相机绕地心公转、姿态相对地表保持，画面如原地环视。</p>
+
+    <div>
+      <button id="btnPlay" class="active">暂停</button>
+      <button id="btnDir">方向：向东</button>
+      <button id="btnNorth">南北环绕</button>
+    </div>
+
+    <label>旋转速度 <span id="vSpeed">3.0</span> °/s</label>
+    <input type="range" id="speed" min="0.5" max="15" step="0.5" value="3" />
+
+    <h2>观察视角</h2>
+    <div>
+      <button class="viewBtn" data-v="city">武汉低空 20km 俯视</button>
+      <button class="viewBtn" data-v="mountain">神农架山地视角</button>
+      <button class="viewBtn" data-v="high">中国上空</button>
+    </div>
+
+    <div id="result">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const MATH = engine.CesiumMath;
+      const result = document.getElementById('result');
+      const $ = (id) => document.getElementById(id);
+
+      const state = {
+        playing: true,
+        speedDeg: 3,          // 每秒旋转角
+        dirSign: 1,           // 1 向东（经度推进）/ -1 向西
+        axis: 'lon',          // 'lon' 东西环绕 | 'lat' 南北环绕
+        lastTs: performance.now(),
+      };
+
+      $('btnPlay').addEventListener('click', () => {
+        state.playing = !state.playing;
+        $('btnPlay').textContent = state.playing ? '暂停' : '继续';
+        $('btnPlay').classList.toggle('active', state.playing);
+      });
+      $('btnDir').addEventListener('click', () => {
+        state.dirSign = -state.dirSign;
+        $('btnDir').textContent = state.dirSign > 0 ? '方向：向东' : '方向：向西';
+      });
+      $('btnNorth').addEventListener('click', () => {
+        state.axis = state.axis === 'lon' ? 'lat' : 'lon';
+        $('btnNorth').textContent = state.axis === 'lon' ? '南北环绕' : '东西环绕';
+      });
+      $('speed').addEventListener('input', (e) => {
+        state.speedDeg = parseFloat(e.target.value);
+        $('vSpeed').textContent = state.speedDeg.toFixed(1);
+      });
+
+      // 预设观察视角（先 setView 再自转）
+      document.querySelectorAll('.viewBtn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const v = {
+            city:     { lon: 114.305, lat: 30.593, height: 20_000,  pitch: -35 },
+            mountain: { lon: 110.675, lat: 31.744, height: 9_000,   pitch: -25 },
+            high:     { lon: 105,     lat: 36,     height: 8_000_000, pitch: -90 },
+          }[btn.dataset.v];
+          viewer.camera.cancelFlight();
+          viewer.camera.setView({
+            destination: { lon: v.lon, lat: v.lat, height: v.height },
+            orientation: { heading: 0, pitch: MATH.toRadians(v.pitch) },
+          });
+        });
+      });
+
+      // ── 自转循环：rotate 持续推进（引擎保持姿态相对地表）────────────
+      function tick(now) {
+        try {
+          const dt = Math.max(0, Math.min((now - state.lastTs) / 1000, 0.1));
+          state.lastTs = now;
+          if (state.playing) {
+            const delta = MATH.toRadians(state.speedDeg * state.dirSign * dt);
+            if (state.axis === 'lon') viewer.camera.rotate(delta, 0);
+            else viewer.camera.rotate(0, delta);
+          }
+          const r = engine.Cartesian3.magnitude(viewer.camera.position);
+          const lon = (Math.atan2(viewer.camera.position.y, viewer.camera.position.x) * 180) / Math.PI;
+          const lat = (Math.asin(Math.max(-1, Math.min(1, viewer.camera.position.z / r))) * 180) / Math.PI;
+          const altKm = ((r - 1) * 6378137) / 1000;
+          const altText = altKm < 1000
+            ? altKm.toFixed(1) + ' km'
+            : (altKm / 1000).toFixed(0) + ' 千 km';
+          result.textContent =
+            `视点: ${lon.toFixed(3)}, ${lat.toFixed(3)}\n` +
+            `高度: ${altText}\n` +
+            `状态: ${state.playing ? '自转中 ' + (state.axis === 'lon' ? (state.dirSign > 0 ? '(向东)' : '(向西)') : '(南北)') : '已暂停'}` +
+            `  速度 ${state.speedDeg}°/s`;
+        } catch (err) {
+          state.playing = false;
+          DemoUtils.showError('自转循环异常，已停止', err);
+          return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [114.3, 30.6, 20_000],
+          imagery: 'gaode-sat',
+          title: '44 · 定点旋转',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '44 定点旋转 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

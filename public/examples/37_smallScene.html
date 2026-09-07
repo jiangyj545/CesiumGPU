@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>模型小场景 · CesiumGPU 示例</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:430px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,150,.5);border:1px solid rgba(90,160,255,.4);border-radius:6px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>37 · 模型小场景（航母编队）</h1>
+    <div class="desc">
+      对齐 EV-Globe 06_smallScene：多模型组合摆放一个场景。本页用
+      CVN-76 航母 + J10C 舰载机 ×2 + 鹰击-88 导弹箱 ×2 + 直升机
+      在海面上摆一个编队锚泊阵型；支持逐模型显隐与视角/环绕控制。
+      注：E3M 场景格式不支持，全部以 glTF Model 组合近似。
+    </div>
+    <div id="controls"></div>
+    <div id="result">加载中…</div>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const ES = engine.Camera.EARTH_SCALE;
+
+    function placeMatrix(lon, lat, hMeters, headingDeg) {
+      const ecef = engine.Cartesian3.fromDegrees(lon, lat, hMeters);
+      const enu  = engine.Transforms.eastNorthUpToFixedFrame(ecef);
+      const rot  = engine.Matrix4.fromRotationZ(engine.CesiumMath.toRadians(headingDeg));
+      const yUp  = engine.Matrix4.fromRotationX(Math.PI / 2);
+      return engine.Matrix4.multiply(enu, engine.Matrix4.multiply(rot, yUp, new engine.Matrix4()),
+                                     new engine.Matrix4());
+    }
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const controls = document.getElementById('controls');
+      function addBtn(label, onClick) {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.addEventListener('click', () => onClick(b));
+        controls.appendChild(b);
+        return b;
+      }
+
+      // ── 编队锚地：渤海湾海面 ────────────────────────────────────────
+      // 偏移单位为米，小范围内用经纬度线性近似
+      const CENTER = { lon: 119.30, lat: 38.60 };
+      const rel = (dxM, dyM) => ({
+        lon: CENTER.lon + dxM / 111_320 / Math.cos(CENTER.lat * Math.PI / 180),
+        lat: CENTER.lat + dyM / 110_540,
+      });
+
+      // 模型清单：相对航母中心的摆放位置（米）/ 朝向 / 显示尺寸（米）
+      const DEFS = [
+        { key: 'cvn',  label: 'CVN-76 航母', url: '/data/gltf/CVN-76/ligen.gltf',
+          dx: 0,    dy: 0,    heading: 15,  size: 340 },
+        // 注：J10C/MisYJ88 源模型为 KTX2 压缩纹理（引擎暂不支持），改用 DF26 护卫装备替代
+        { key: 'j10a', label: 'DF26 发射车 1', url: '/data/model/DF26/BN2.gltf',
+          dx: -90,  dy: 40,   heading: 105, size: 30 },
+        { key: 'j10b', label: 'DF26 发射车 2', url: '/data/model/DF26/BN2.gltf',
+          dx: -90,  dy: -50,  heading: 105, size: 30 },
+        { key: 'yj1',  label: '保障车 ×1',  url: '/data/gltf/groundvehicle.gltf',
+          dx: 260,  dy: 160,  heading: 200, size: 40 },
+        { key: 'yj2',  label: '保障车 ×2',  url: '/data/gltf/groundvehicle.gltf',
+          dx: 280,  dy: -170, heading: 340, size: 40 },
+        { key: 'z9',   label: '直-9（悬停）', url: '/data/model/plane/z9.gltf',
+          dx: 20,   dy: 10,   heading: 250, size: 26, alt: 180 },
+      ];
+
+      const models = {};   // key -> Model
+      for (const def of DEFS) {
+        const p = rel(def.dx, def.dy);
+        models[def.key] = await engine.Model.fromGltfAsync({
+          url: def.url,
+          scene: viewer.scene,
+          modelMatrix: placeMatrix(p.lon, p.lat, def.alt ?? 0, def.heading),
+          scale: def.size / ES,
+        });
+      }
+
+      function refreshInfo() {
+        const parts = DEFS.map(d =>
+          `${d.label}: ${models[d.key].show ? '显示' : '隐藏'} (${models[d.key].primitiveCount} prim)`);
+        result.textContent =
+          `场景: 渤海湾编队锚地 (${CENTER.lon}°E, ${CENTER.lat}°N)\n` + parts.join('\n') +
+          `\n提示: 显隐按钮逐模型开关；视角按钮切换全景/甲板；环绕按钮自动盘旋`;
+      }
+
+      // ── 控件：显隐 / 视角 / 环绕 ────────────────────────────────────
+      for (const def of DEFS) {
+        const btn = addBtn(`${def.label}: 开`, () => {
+          const m = models[def.key];
+          m.show = !m.show;
+          btn.textContent = `${def.label}: ${m.show ? '开' : '关'}`;
+          btn.classList.toggle('active', m.show);
+          refreshInfo();
+        });
+        btn.classList.add('active');
+      }
+
+      const panView = () => viewer.camera.flyTo({
+        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.02, 5200),
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-38) },
+        duration: 2,
+      });
+      const deckView = () => {
+        const p = rel(-40, 0);
+        viewer.camera.flyTo({
+          destination: engine.Cartesian3.fromDegrees(p.lon, p.lat - 0.006, 900),
+          orientation: { heading: engine.CesiumMath.toRadians(10), pitch: engine.CesiumMath.toRadians(-22) },
+          duration: 2,
+        });
+      };
+      addBtn('视角: 全景', () => panView());
+      addBtn('视角: 甲板', () => deckView());
+
+      // 环绕：小范围用经纬圆近似绕航母中心盘旋
+      let orbiting = false, orbitHeading = 0, orbitRaf = 0, lastNow = 0;
+      const orbitBtn = addBtn('环绕: 关', () => {
+        orbiting = !orbiting;
+        orbitBtn.textContent = `环绕: ${orbiting ? '开' : '关'}`;
+        orbitBtn.classList.toggle('active', orbiting);
+        lastNow = performance.now();
+        if (orbiting) requestAnimationFrame(orbitStep);
+      });
+      function orbitStep(now) {
+        if (!orbiting) return;
+        const dt = (now - lastNow) / 1000;
+        lastNow = now;
+        orbitHeading = (orbitHeading + dt * 6) % 360;    // 6°/s 盘旋
+        const rM = 4500, hM = 3000;
+        const rad = engine.CesiumMath.toRadians(orbitHeading);
+        const p = rel(Math.sin(rad) * rM, -Math.cos(rad) * rM);
+        viewer.camera.setView({
+          destination: engine.Cartesian3.fromDegrees(p.lon, p.lat, hM),
+          orientation: { heading: rad, pitch: engine.CesiumMath.toRadians(-33) },
+        });
+        orbitRaf = requestAnimationFrame(orbitStep);
+      }
+      window.addEventListener('beforeunload', () => cancelAnimationFrame(orbitRaf));
+
+      panView();
+      refreshInfo();
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [119.30, 38.58, 5200],
+          imagery: 'gaode-sat',
+          title: '37 · 模型小场景',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return;
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '37 模型小场景 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>
