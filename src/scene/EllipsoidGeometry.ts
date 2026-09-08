@@ -33,6 +33,17 @@ export interface CreateRegionOptions {
    */
   radiusScale?: number;
   /**
+   * Forced radial scale at the north/south edge rows, ramping linearly back
+   * to `radiusScale` over `edgeLiftRamp` stacks. Coarse tiles sit on a
+   * larger lift than fine ones (grazing-angle sagitta margin); without this
+   * the shared latitude circle of a coarse/fine pair shows a visible radial
+   * step. Matching the edge row to the neighbour's lift keeps every seam
+   * pair at the same radius (seam continuity rule).
+   */
+  edgeLift?: { north?: number; south?: number };
+  /** Stacks used to ramp from edgeLift to radiusScale. Default: 2. */
+  edgeLiftRamp?: number;
+  /**
    * Map v through the Web-Mercator function instead of linearly. Mercator
    * tile images distribute their pixel rows uniformly in Mercator-y space,
    * which is non-linear in latitude — a linear v makes every row's content
@@ -199,6 +210,7 @@ export class EllipsoidGeometry {
   ): { vertices: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number } {
     const uvRect  = options.uvRect ?? { u0: 0, v0: 0, u1: 1, v1: 1 };
     const scale   = options.radiusScale ?? 1.0;
+    const edgeLift = options.edgeLift;
     const ratio   = WGS84_POLAR_RATIO;
     const ratioSq = ratio * ratio;
 
@@ -211,6 +223,7 @@ export class EllipsoidGeometry {
 
     const stacks = partitions; // rows: north → south
     const slices = partitions; // columns: west → east
+    const ramp = Math.min(options.edgeLiftRamp ?? 2, stacks);
 
     const vertexCount = (stacks + 1) * (slices + 1);
     const vertices    = new Float32Array(vertexCount * 8); // [pos(3), normal(3), uv(2)]
@@ -219,6 +232,19 @@ export class EllipsoidGeometry {
     for (let stack = 0; stack <= stacks; stack++) {
       const t   = stack / stacks;
       const lat = north + (south - north) * t; // row 0 = north edge
+      // Per-row radial scale: edge rows can be pinned to a neighbour tile's
+      // lift (seam continuity), ramping back to the tile's own scale over
+      // `ramp` stacks (max() so a pinned edge never drops below the own lift).
+      let rowScale = scale;
+      if (edgeLift !== undefined && ramp > 0) {
+        if (edgeLift.north !== undefined && stack <= ramp) {
+          const k = 1 - stack / ramp;
+          rowScale = Math.max(scale, scale + (edgeLift.north - scale) * k);
+        } else if (edgeLift.south !== undefined && stack >= stacks - ramp) {
+          const k = 1 - (stacks - stack) / ramp;
+          rowScale = Math.max(scale, scale + (edgeLift.south - scale) * k);
+        }
+      }
       let v: number;
       if (mercatorV) {
         // Normalise this row's Mercator-y into [0, 1] across the region.
@@ -244,9 +270,9 @@ export class EllipsoidGeometry {
 
         // Position (EllipsoidGeometry normalisation: x on unit sphere,
         // y/z squashed by the polar ratio).
-        vertices[vi++] = scale * nx;
-        vertices[vi++] = scale * ny * ratio;
-        vertices[vi++] = scale * nz * ratio;
+        vertices[vi++] = rowScale * nx;
+        vertices[vi++] = rowScale * ny * ratio;
+        vertices[vi++] = rowScale * nz * ratio;
 
         // Ellipsoid surface normal (same math as createGeometry).
         const ny2  = ny / ratioSq;

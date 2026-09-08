@@ -69,9 +69,6 @@ export class Globe {
    * "hole" whenever the poles rotate into view. Each patch re-samples the
    * top/bottom row of the ROOT level grid stretched over the cap.
    */
-  /** Adjacent-row tile level each cap's lift was built for (seam continuity). */
-  private _polarCapLiftLevel: { north: number; south: number } = { north: -1, south: -1 };
-
   private _polarCaps: { north: TilePrimitiveEntry | null; south: TilePrimitiveEntry | null } = {
     north: null,
     south: null,
@@ -514,20 +511,6 @@ export class Globe {
       const resolved = layer.resolveTexture(refTile);
       const current = this._polarCaps[which];
 
-      // Coarsest live tile in the adjacent row decides the seam-side lift.
-      // Near views refine the row past L3 (fine lift) while the L2 roots are
-      // gone from the map, so default to fine unless a coarse tile is present.
-      let adjacentLevel = 4;
-      for (const key of this._tilePrimitives.keys()) {
-        const parts = key.split('/');
-        const lvl = parseInt(parts[0], 10);
-        const row = parseInt(parts[2], 10);
-        const rows = 2 ** lvl;
-        if (which === 'north' ? row === 0 : row === rows - 1) {
-          adjacentLevel = Math.min(adjacentLevel, lvl);
-        }
-      }
-
       if (resolved === null) {
         // Nothing loaded yet for this row — drop any stale cap primitive.
         if (current !== null) {
@@ -536,11 +519,7 @@ export class Globe {
         }
         continue;
       }
-      if (
-        current !== null &&
-        current.texture === resolved.texture &&
-        this._polarCapLiftLevel[which] === adjacentLevel
-      ) continue; // up to date
+      if (current !== null && current.texture === resolved.texture) continue; // up to date
 
       if (current !== null) this._destroyTilePrimitive(current);
 
@@ -554,18 +533,16 @@ export class Globe {
       // TileKey y grows southward; texture v likewise (row 0 = north edge).
       const v0 = which === 'north' ? 0.0 : 1.0 - vRange;
       const uvRect = { u0: 0.0, v0, u1: 1.0, v1: v0 + vRange };
-      // Cap lift follows the coarsest tile actually rendering in the
-      // adjacent row: the row is covered by L2 roots in far views (coarse
-      // lift, matching those tiles) but refines past L3 near the pole — the
-      // cap must switch to the fine lift with them or the 85.05° boundary
-      // shows a (1.02 − 1.008) ≈ 76 km radial step, visible as a seam ring.
+      // The cap always sits at the coarse lift: bordering row tiles pin
+      // their edge rows to the same value via `_edgeLiftFor`, so the 85.05°
+      // seam is continuous no matter which levels render in the row.
       const geometry = EllipsoidGeometry.createRegion(
         -CesiumMath.PI,
         south,
         CesiumMath.PI,
         north,
         POLAR_CAP_PARTITIONS,
-        { uvRect, radiusScale: tileRadiusScale(adjacentLevel) },
+        { uvRect, radiusScale: POLAR_CAP_RADIUS_SCALE },
       );
       const primitive = new Primitive(this._context, {
         vertices:    geometry.vertices,
@@ -576,7 +553,6 @@ export class Globe {
       primitive.setTexture(resolved.texture, this._getTileSampler());
       primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
       this._polarCaps[which] = { primitive, texture: resolved.texture };
-      this._polarCapLiftLevel[which] = adjacentLevel;
     }
   }
 
@@ -586,7 +562,7 @@ export class Globe {
     texture: GPUTexture,
     ancestorLevels: number
   ): TilePrimitiveEntry {
-    const geometry = this._getTileGeometry(tile, ancestorLevels);
+    const geometry = this._getTileGeometry(tile, ancestorLevels, this._edgeLiftFor(tile));
     const primitive = new Primitive(this._context, {
       vertices:    geometry.vertices,
       indices:     geometry.indices,
@@ -600,9 +576,53 @@ export class Globe {
     return { primitive, texture };
   }
 
+  /**
+   * Edge lifts pinning this tile's north/south boundary rows to the lift of
+   * whatever renders across that boundary (seam continuity rule: both sides
+   * of a shared latitude circle must sit at the same radius, or the step
+   * reads as a seam ring at grazing angles). Sources:
+   *  - a live neighbour tile in the adjacent quadtree row (may be a coarser
+   *    level with a larger lift), or
+   *  - the polar cap (constant 1.02) when the row borders ±85.05°.
+   */
+  private _edgeLiftFor(tile: TileKey): { north?: number; south?: number } | undefined {
+    const own = tileRadiusScale(tile.level);
+    if (own >= POLAR_CAP_RADIUS_SCALE) return undefined; // already coarse — nothing to pin
+    const rows = 2 ** tile.level;
+    const edge: { north?: number; south?: number } = {};
+    // The cap renders at POLAR_CAP_RADIUS_SCALE across ±85.05° regardless of
+    // the row's level, so bordering tiles always ramp to it.
+    if (tile.y === 0) edge.north = POLAR_CAP_RADIUS_SCALE;
+    if (tile.y === rows - 1) edge.south = POLAR_CAP_RADIUS_SCALE;
+    // Neighbour rows: a live coarser tile whose row band covers the latitude
+    // circle just north/south of us forces its (larger) lift onto the shared
+    // edge. Bands are compared in this tile's row units: a neighbour at level
+    // L spans rows [y·rows/2^L, (y+1)·rows/2^L) in our units.
+    for (const key of this._tilePrimitives.keys()) {
+      const parts = key.split('/');
+      const lvl = parseInt(parts[0], 10);
+      const y = parseInt(parts[2], 10);
+      const lift = tileRadiusScale(lvl);
+      if (lift <= own) continue;
+      const vStart = y * rows / 2 ** lvl;
+      const vEnd = (y + 1) * rows / 2 ** lvl;
+      if (tile.y > 0 && vEnd >= tile.y && vStart < tile.y) {
+        edge.north = Math.max(edge.north ?? 0, lift);
+      }
+      if (tile.y < rows - 1 && vEnd >= tile.y + 1 && vStart < tile.y + 1) {
+        edge.south = Math.max(edge.south ?? 0, lift);
+      }
+    }
+    return edge.north !== undefined || edge.south !== undefined ? edge : undefined;
+  }
+
   /** Cached (or newly generated) interleaved geometry for a tile. */
-  private _getTileGeometry(tile: TileKey, ancestorLevels: number): CachedTileGeometry {
-    const cacheKey = `${tile.key}#${ancestorLevels}`;
+  private _getTileGeometry(
+    tile: TileKey,
+    ancestorLevels: number,
+    edgeLift?: { north?: number; south?: number }
+  ): CachedTileGeometry {
+    const cacheKey = `${tile.key}#${ancestorLevels}#${edgeLift?.north ?? '-'}#${edgeLift?.south ?? '-'}`;
     const cached = this._geometryCache.get(cacheKey);
     if (cached) return cached;
 
@@ -627,7 +647,7 @@ export class Globe {
       // Mercator tiles distribute pixel rows in Mercator-y; a linear v
       // offsets every row's content northward (≈7.7° mid-latitude) —
       // the "map squeezed into the Arctic" defect.
-      { uvRect, radiusScale: tileRadiusScale(tile.level), mercatorV: true }
+      { uvRect, radiusScale: tileRadiusScale(tile.level), edgeLift, mercatorV: true }
     );
 
     if (this._geometryCache.size >= TILE_GEOMETRY_CACHE_CAPACITY) {
@@ -984,6 +1004,13 @@ const TILE_PARTITIONS = 8;
 function tileRadiusScale(level: number): number {
   return level <= 3 ? 1.02 : 1.008;
 }
+
+/**
+ * Polar cap patches render at the coarse lift unconditionally; row tiles
+ * bordering ±85.05° pin their edge rows here (`Globe._edgeLiftFor`), so the
+ * cap/tile seam stays continuous for every mix of levels in the row.
+ */
+const POLAR_CAP_RADIUS_SCALE = 1.02;
 
 /** Longitude × latitude partitions of a polar cap patch (small — it only
  *  stretches one ROOT-row of imagery over the 4.95° cap). */
