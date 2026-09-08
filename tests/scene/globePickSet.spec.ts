@@ -53,10 +53,10 @@ function inject(
     g._terrainPrimitives.set(label, { primitive: mockPrimitive(label), texture: {} });
   }
   if (parts.caps?.north) {
-    g._polarCaps.north = { primitive: mockPrimitive(parts.caps.north), texture: {} };
+    g._polarCaps.north = [{ primitive: mockPrimitive(parts.caps.north), texture: {} }];
   }
   if (parts.caps?.south) {
-    g._polarCaps.south = { primitive: mockPrimitive(parts.caps.south), texture: {} };
+    g._polarCaps.south = [{ primitive: mockPrimitive(parts.caps.south), texture: {} }];
   }
 }
 

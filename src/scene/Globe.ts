@@ -70,7 +70,7 @@ export class Globe {
    * "hole" whenever the poles rotate into view. Each patch re-samples the
    * top/bottom row of the ROOT level grid stretched over the cap.
    */
-  private _polarCaps: { north: TilePrimitiveEntry | null; south: TilePrimitiveEntry | null } = {
+  private _polarCaps: { north: TilePrimitiveEntry[] | null; south: TilePrimitiveEntry[] | null } = {
     north: null,
     south: null,
   };
@@ -420,8 +420,14 @@ export class Globe {
     }
     // Polar caps ride along with the flat imagery path (terrain replaces the
     // whole flat tile set including caps — see the early return above).
+    // Each cap is `n` independent segment primitives so every segment can bind
+    // its own ROOT-column texture (a single Primitive can only hold one
+    // texture; sharing one across segments would replicate column-0 across all
+    // longitudes — the 270°-misplacement / "uniform ring" defect).
     for (const which of ['north', 'south'] as const) {
-      this._polarCaps[which]?.primitive.drawOpaque(pass, cameraBindGroup);
+      const entries = this._polarCaps[which];
+      if (entries === null) continue;
+      for (const entry of entries) entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
   }
 
@@ -451,8 +457,9 @@ export class Globe {
     const out: Primitive[] = [];
     for (const entry of this._tilePrimitives.values()) out.push(entry.primitive);
     for (const which of ['north', 'south'] as const) {
-      const cap = this._polarCaps[which];
-      if (cap !== null) out.push(cap.primitive);
+      const entries = this._polarCaps[which];
+      if (entries === null) continue;
+      for (const entry of entries) out.push(entry.primitive);
     }
     return out;
   }
@@ -540,19 +547,11 @@ export class Globe {
       if (!anyResolved) {
         // Nothing loaded yet for this row — drop any stale cap primitive.
         if (current !== null) {
-          this._destroyTilePrimitive(current);
+          for (const entry of current) this._destroyTilePrimitive(entry);
           this._polarCaps[which] = null;
         }
         continue;
       }
-      // Up to date when every column still resolves the same texture.
-      const sameTextures =
-        current?.textures !== undefined &&
-        current.textures.length === n &&
-        current.textures.every((tex, x) => tex === (resolvedPerColumn[x]?.texture ?? null));
-      if (sameTextures) continue;
-
-      if (current !== null) this._destroyTilePrimitive(current);
 
       // Column textures with fallback: an unloaded column reuses the most
       // recent earlier column's texture (its u-sub-rect then shows
@@ -563,6 +562,18 @@ export class Globe {
         const tex: GPUTexture | null = resolvedPerColumn[x]?.texture ?? fallback;
         textures.push(tex);
         if (tex !== null) fallback = tex;
+      }
+
+      // Up to date when every segment's bound texture still matches.
+      if (
+        current !== null &&
+        current.length === n &&
+        current.every((entry, x) => entry.texture === (textures[x] ?? null))
+      ) continue;
+
+      if (current !== null) {
+        for (const entry of current) this._destroyTilePrimitive(entry);
+        this._polarCaps[which] = null;
       }
 
       const south = which === 'north' ? mercatorEdge : -CesiumMath.PI_OVER_TWO;
@@ -578,12 +589,11 @@ export class Globe {
   }
 
   /**
-   * Build the cap as one merged primitive with `n` longitude segments, each
-   * segment's UVs remapped into its own column's u-sub-rect. A single bound
-   * texture suffices even with mixed column textures: fallback columns
-   * reuse an earlier column's texture object (resolved in the caller), so
-   * every segment's sub-rect samples the same bound texture. All segments
-   * share the cap lift (`POLAR_CAP_RADIUS_SCALE`), so segment borders are
+   * Build the cap as `n` independent segment primitives — one per ROOT
+   * column — each binding its own GPUTexture. A single Primitive can hold
+   * only one bound texture, so per-segment texture binding requires separate
+   * primitives. Every segment shares the cap lift (`POLAR_CAP_RADIUS_SCALE`),
+   * so segment borders sit on the same latitude circle and the seam reads
    * geometrically continuous.
    */
   private _createPolarCapPrimitive(
@@ -593,16 +603,14 @@ export class Globe {
     v0: number,
     vRange: number,
     textures: Array<GPUTexture | null>
-  ): TilePrimitiveEntry {
-    const boundTexture = textures.find(t => t !== null) as GPUTexture;
-    const vertsPerSeg  = (POLAR_CAP_PARTITIONS + 1) * (POLAR_CAP_PARTITIONS + 1) * 8;
-    const indicesPerSeg = POLAR_CAP_PARTITIONS * POLAR_CAP_PARTITIONS * 6;
-    const allVertices  = new Float32Array(vertsPerSeg * n);
-    const allIndices   = new Uint32Array(indicesPerSeg * n);
-    let vOff = 0, iOff = 0, baseVertex = 0;
+  ): TilePrimitiveEntry[] {
+    const entries: TilePrimitiveEntry[] = [];
     for (let x = 0; x < n; x++) {
       const west = -CesiumMath.PI + (x / n) * CesiumMath.TWO_PI;
       const east = -CesiumMath.PI + ((x + 1) / n) * CesiumMath.TWO_PI;
+      // Each segment owns its own full-UV geometry: the segment's Primitive
+      // binds the column-x texture directly, so we sample the texture's full
+      // [0,1] uv range and let the texture itself cover column x.
       const geometry = EllipsoidGeometry.createRegion(
         west,
         south,
@@ -610,27 +618,22 @@ export class Globe {
         north,
         POLAR_CAP_PARTITIONS,
         {
-          uvRect: { u0: x / n, v0, u1: (x + 1) / n, v1: v0 + vRange },
+          uvRect: { u0: 0, v0, u1: 1, v1: v0 + vRange },
           radiusScale: POLAR_CAP_RADIUS_SCALE,
         },
       );
-      allVertices.set(geometry.vertices, vOff);
-      vOff += geometry.vertices.length;
-      for (let i = 0; i < geometry.indices.length; i++) {
-        allIndices[iOff + i] = geometry.indices[i] + baseVertex;
-      }
-      iOff += geometry.indices.length;
-      baseVertex += geometry.vertexCount;
+      const primitive = new Primitive(this._context, {
+        vertices:    geometry.vertices,
+        indices:     geometry.indices,
+        translucent: false,
+      });
+      Matrix4.identity(primitive.modelMatrix);
+      const tex = textures[x];
+      if (tex !== null) primitive.setTexture(tex, this._getTileSampler());
+      primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
+      entries.push({ primitive, texture: tex as GPUTexture });
     }
-    const primitive = new Primitive(this._context, {
-      vertices:    allVertices,
-      indices:     allIndices,
-      translucent: false,
-    });
-    Matrix4.identity(primitive.modelMatrix);
-    primitive.setTexture(boundTexture, this._getTileSampler());
-    primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
-    return { primitive, texture: boundTexture, textures };
+    return entries;
   }
 
   /** Build one per-tile primitive (region geometry + tile texture). */
@@ -1005,11 +1008,10 @@ export class Globe {
   /** Destroy both polar cap patches (textures stay owned by the layer cache). */
   private _clearPolarCaps(): void {
     for (const which of ['north', 'south'] as const) {
-      const cap = this._polarCaps[which];
-      if (cap !== null) {
-        this._destroyTilePrimitive(cap);
-        this._polarCaps[which] = null;
-      }
+      const entries = this._polarCaps[which];
+      if (entries === null) continue;
+      for (const entry of entries) this._destroyTilePrimitive(entry);
+      this._polarCaps[which] = null;
     }
   }
 
