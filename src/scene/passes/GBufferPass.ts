@@ -128,21 +128,31 @@ export class GBufferPass implements IPass {
     const pass = this._beginRenderPass(encoder);
     pass.setPipeline(inputs.opaquePipeline);
 
-    // Globe (base sphere + per-tile imagery primitives). Not frustum-culled
-    // here: the base mesh is a single planet-wide sphere and tile visibility
-    // is already decided by the imagery quadtree selection each frame.
+    // Globe surface. While imagery layers are active (surfaceIsQuadtree) the
+    // tile quadtree IS the globe surface — the base sphere is skipped so it
+    // cannot compete in the depth buffer beneath the tiles (CesiumJS
+    // architecture; a drawn base sphere would force lift offsets at every
+    // tile seam, which previously showed as polar/level-boundary seam rings).
+    // The base sphere still draws for the legacy single-texture / procedural
+    // path (no layers), and while tiles stream in the pinned L2 roots cover
+    // the planet (TileTextureCache PIN_LEVEL), so nothing flashes through.
+    // Not frustum-culled here: the base mesh is a single planet-wide sphere
+    // and tile visibility is already decided by the imagery quadtree
+    // selection each frame.
     // Lighting off (CesiumJS `globe.enableLighting=false` default): the whole
     // globe surface draws through the unlit pipeline so imagery shows its raw
     // albedo — with the sun light the back-lit hemisphere drops to ambient
     // (~5% brightness) and reads as holes against the space background.
     const gp = inputs.globe.primitive;
-    if (gp && inputs.globe.show) {
+    if (inputs.globe.show) {
       const globePipeline =
         inputs.globe.enableLighting || !inputs.unlitPipeline
           ? inputs.opaquePipeline
           : inputs.unlitPipeline;
       pass.setPipeline(globePipeline);
-      gp.drawOpaque(pass, inputs.cameraBindGroup);
+      if (gp && !inputs.globe.surfaceIsQuadtree) {
+        gp.drawOpaque(pass, inputs.cameraBindGroup);
+      }
       inputs.globe.drawTiles(pass, inputs.cameraBindGroup);
       // Restore the lit pipeline for the primitives loop below (it assumes
       // `currentPipeline` starts at the lit pipeline).

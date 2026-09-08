@@ -147,6 +147,19 @@ export class Globe {
   get terrainLayer(): TerrainLayer | null { return this._terrainLayer; }
 
   /**
+   * True while the imagery quadtree owns the globe surface (any layer in the
+   * collection, visible or hidden — hidden layers warm their roots too, so
+   * the pinned L2 roots always cover the planet). In that state GBufferPass
+   * skips the base sphere entirely (CesiumJS architecture: the tile quadtree
+   * IS the globe surface; a second sphere underneath would only compete in
+   * the depth buffer and force lift offsets at every seam). The base sphere
+   * still draws for the legacy single-texture / procedural path (no layers).
+   */
+  get surfaceIsQuadtree(): boolean {
+    return this.layers.length > 0;
+  }
+
+  /**
    * Attach (or detach with `null`) a terrain provider. While attached the
    * globe streams terrain meshes each frame and renders displaced tile
    * geometry instead of the flat per-tile regions.
@@ -981,36 +994,24 @@ interface CachedTileGeometry {
 const TILE_PARTITIONS = 8;
 
 /**
- * Tiles are drawn above the base globe so the legacy fallback texture
- * underneath never z-fights with them. The lift must exceed the worst-case
- * chord-vs-arc sagitta of a tile triangle sinking below the (much finer)
- * base-globe mesh: with TILE_PARTITIONS = 8 the largest tiles (L2 roots,
- * ≈11.25° per cell) sag ≈ 1 − cos(5.6°) ≈ 0.0048 below the surface, while
- * the base globe (128 stacks, ≈2.8° cells) sags only ≈ 0.0003. A 0.1% lift
- * (1.001) is swallowed by that gap — mid-tile fragments lose the depth test
- * against the base globe and vanish, leaving the base colour showing through
- * (the "uncovered regions" defect).
- *
- * Level-dependent lift (2026-09-08 eagle-eye fix): small overview canvases
- * (e.g. the 62_eagleEyeMap mini viewer) keep the camera at ~1.94 R nadir and
- * never refine past the L2 roots — and at the disc edge those big tiles are
- * viewed at a ~30° grazing angle, where depth-buffer perspective compression
- * shrinks the effective lift below the 0.0048 worst-case sagitta. Mid-tile
- * fragments then lose the depth test against the base globe and pop out as
- * diamond-shaped holes (20-30% of the disc). Coarse levels (≤ 3) get 2%,
- * which clears the grazing-angle case with margin; finer levels keep 0.8%
- * (≈50 km at true scale, imperceptible at their viewing distances).
+ * Tile geometry sits ON the true ellipsoid surface (CesiumJS architecture:
+ * the quadtree IS the globe surface — there is no separate base sphere
+ * competing in the depth buffer beneath the tiles). While imagery layers
+ * are active the base globe is not drawn at all (see GBufferPass), so no
+ * lift is needed anywhere — a uniform 1.0 keeps every seam pair at the same
+ * radius by construction. The historical 1.008/1.02 tiered lifts (and the
+ * edgeLift pinning that level mixing required) exist only for the retired
+ * "tiles above a drawn base globe" architecture; `edgeLift` stays a no-op.
  */
-function tileRadiusScale(level: number): number {
-  return level <= 3 ? 1.02 : 1.008;
+function tileRadiusScale(_level: number): number {
+  return 1.0;
 }
 
 /**
- * Polar cap patches render at the coarse lift unconditionally; row tiles
- * bordering ±85.05° pin their edge rows here (`Globe._edgeLiftFor`), so the
- * cap/tile seam stays continuous for every mix of levels in the row.
+ * Polar caps render on the same true surface as the row tiles (uniform 1.0);
+ * kept as a named constant to document the cap/tile seam rule.
  */
-const POLAR_CAP_RADIUS_SCALE = 1.02;
+const POLAR_CAP_RADIUS_SCALE = 1.0;
 
 /** Longitude × latitude partitions of a polar cap patch (small — it only
  *  stretches one ROOT-row of imagery over the 4.95° cap). */
