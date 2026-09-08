@@ -65,8 +65,10 @@
         { key: 'man',   label: '人',     url: '/data/model/CesiumMan/Cesium_Man.glb',            lon: 300,  lat: 0,    heading: 180, size: 12 },
         { key: 'gv',    label: '军车',   url: '/data/gltf/groundvehicle.gltf',                   lon: 0,    lat: -400, heading: 270, size: 30 },
         // 外部 .bin 引用的 gltf（几何在外置二进制文件）：与内嵌 GLB 相对，
-        // 覆盖 GltfLoader 相对 baseUrl 规范化路径
-        { key: 'trafo', label: '变压器', url: '/data/model/750kV变压器模型/1-7T-ACF1-334-GIM01-750kV变压器模型01.gltf', lon: 300, lat: -400, heading: 0, size: 30 },
+        // 覆盖 GltfLoader 相对 baseUrl 规范化路径。
+        // 注：外链 buffer 用 .dat 扩展名——Chrome 会把 .bin 标记为可执行类下载
+        // 触发安全软件深扫（实测 42B 也要 45-70s），.dat 则毫秒级到达
+        { key: 'trafo', label: '外部bin三角形', url: '/data/model/triangle_ext.gltf', lon: 300, lat: -400, heading: 0, size: 60 },
       ];
 
       const models = {};   // key -> { model, def }

@@ -1,1 +1,2456 @@
-{"accessors":[{"name":"Mseh_0_positions","bufferView":0,"byteOffset":0,"componentType":5126,"count":7662,"type":"VEC3","min":[-5439.729980468750000,-1270.475463867187500,349.573638916015620],"max":[5563.143554687500000,1848.000000000000000,6067.568847656250000]},{"name":"Mseh_1_normals","bufferView":1,"byteOffset":0,"componentType":5126,"count":7662,"type":"VEC3","min":[-11018.284179687500000,-11025.000000000000000,-9171.096679687500000],"max":[11025.000000000000000,9176.686523437500000,11018.284179687500000]},{"name":"Mseh_2_colour","bufferView":3,"byteOffset":0,"componentType":5126,"count":7662,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_3_indices","bufferView":4,"byteOffset":0,"componentType":5125,"count":22932,"type":"SCALAR","min":[0],"max":[7661]},{"name":"Mseh_4_positions","bufferView":0,"byteOffset":91944,"componentType":5126,"count":708,"type":"VEC3","min":[-5179.500000000000000,-1893.000000000000000,-0.042733479291201],"max":[5179.500000000000000,1893.000000000000000,4190.573730468750000]},{"name":"Mseh_5_normals","bufferView":1,"byteOffset":91944,"componentType":5126,"count":708,"type":"VEC3","min":[-720.000000000000000,-140.000000000000000,-1.000000000000000],"max":[720.000000000000000,140.000000000000000,1.000000000000000]},{"name":"Mseh_6_colour","bufferView":3,"byteOffset":122592,"componentType":5126,"count":708,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_7_indices","bufferView":4,"byteOffset":91728,"componentType":5125,"count":1068,"type":"SCALAR","min":[0],"max":[707]},{"name":"Mseh_8_positions","bufferView":0,"byteOffset":100440,"componentType":5126,"count":48,"type":"VEC3","min":[-50.000000000000000,-500.000000000000000,0.000000000000000],"max":[50.000000000000000,500.000000000000000,1602.000000000000000]},{"name":"Mseh_9_normals","bufferView":1,"byteOffset":100440,"componentType":5126,"count":48,"type":"VEC3","min":[-1.000000000000000,-1.000000000000000,-1.000000000000000],"max":[1.000000000000000,1.000000000000000,1.000000000000000]},{"name":"Mseh_10_indices","bufferView":4,"byteOffset":96000,"componentType":5125,"count":96,"type":"SCALAR","min":[0],"max":[47]},{"name":"Mseh_11_positions","bufferView":0,"byteOffset":101016,"componentType":5126,"count":96,"type":"VEC3","min":[-4449.498046875000000,-2250.000000000000000,-0.169899687170982],"max":[4450.501953125000000,2250.000000000000000,39.830101013183594]},{"name":"Mseh_12_normals","bufferView":1,"byteOffset":101016,"componentType":5126,"count":96,"type":"VEC3","min":[-1.000000000000000,-1.000000000000000,-1.000000000000000],"max":[1.000000000000000,1.000000000000000,1.000000000000000]},{"name":"Mseh_13_colour","bufferView":3,"byteOffset":133920,"componentType":5126,"count":96,"type":"VEC4","min":[0.905882358551025,0.921568632125854,0.854901969432831,0.000000000000000],"max":[0.905882358551025,0.921568632125854,0.854901969432831,0.000000000000000]},{"name":"Mseh_14_indices","bufferView":4,"byteOffset":96384,"componentType":5125,"count":144,"type":"SCALAR","min":[0],"max":[95]},{"name":"Mseh_15_positions","bufferView":0,"byteOffset":102168,"componentType":5126,"count":592,"type":"VEC3","min":[-4794.141113281250000,-663.873413085937500,-0.042733479291201],"max":[1099.859130859375000,1063.440063476562500,2005.050903320312500]},{"name":"Mseh_16_normals","bufferView":1,"byteOffset":102168,"componentType":5126,"count":592,"type":"VEC3","min":[-1.000000000000000,-863.656738281250000,-870.000000000000000],"max":[1.000000000000000,863.656738281250000,870.000000000000000]},{"name":"Mseh_17_colour","bufferView":3,"byteOffset":135456,"componentType":5126,"count":592,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_18_indices","bufferView":4,"byteOffset":96960,"componentType":5125,"count":1452,"type":"SCALAR","min":[0],"max":[591]},{"name":"Mseh_19_positions","bufferView":0,"byteOffset":109272,"componentType":5126,"count":72,"type":"VEC3","min":[-500.000000000000000,-235.000000000000000,-0.042733479291201],"max":[500.000000000000000,235.000000000000000,1501.957275390625000]},{"name":"Mseh_20_normals","bufferView":1,"byteOffset":109272,"componentType":5126,"count":72,"type":"VEC3","min":[-1.000000000000000,-1.000000000000000,-1.000000000000000],"max":[1.000000000000000,1.000000000000000,1.000000000000000]},{"name":"Mseh_21_colour","bufferView":3,"byteOffset":144928,"componentType":5126,"count":72,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_22_indices","bufferView":4,"byteOffset":102768,"componentType":5125,"count":108,"type":"SCALAR","min":[0],"max":[71]},{"name":"Mseh_23_positions","bufferView":0,"byteOffset":110136,"componentType":5126,"count":106,"type":"VEC3","min":[-100.000000000000000,-99.270889282226563,0.000000000000000],"max":[100.000000000000000,99.270889282226563,300.000000000000000]},{"name":"Mseh_24_normals","bufferView":1,"byteOffset":110136,"componentType":5126,"count":106,"type":"VEC3","min":[-100.000000000000000,-99.270889282226563,-1.000000000000000],"max":[100.000000000000000,99.270889282226563,1.000000000000000]},{"name":"Mseh_25_colour","bufferView":3,"byteOffset":146080,"componentType":5126,"count":106,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_26_indices","bufferView":4,"byteOffset":103200,"componentType":5125,"count":300,"type":"SCALAR","min":[0],"max":[105]},{"name":"Mseh_27_positions","bufferView":0,"byteOffset":111408,"componentType":5126,"count":24,"type":"VEC3","min":[-25.000000000000000,-300.000000000000000,0.000000000000000],"max":[25.000000000000000,300.000000000000000,10.000000000000000]},{"name":"Mseh_28_normals","bufferView":1,"byteOffset":111408,"componentType":5126,"count":24,"type":"VEC3","min":[-1.000000000000000,-1.000000000000000,-1.000000000000000],"max":[1.000000000000000,1.000000000000000,1.000000000000000]},{"name":"Mseh_29_colour","bufferView":3,"byteOffset":147776,"componentType":5126,"count":24,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_30_indices","bufferView":4,"byteOffset":104400,"componentType":5125,"count":36,"type":"SCALAR","min":[0],"max":[23]},{"name":"Mseh_31_positions","bufferView":0,"byteOffset":111696,"componentType":5126,"count":1132,"type":"VEC3","min":[-769.000000000000000,-3506.919189453125000,-3729.045898437500000],"max":[769.000000000000000,81.402130126953125,466.954010009765620]},{"name":"Mseh_32_normals","bufferView":1,"byteOffset":111696,"componentType":5126,"count":1132,"type":"VEC3","min":[-545.989868164062500,-126.000000000000000,-550.000000000000000],"max":[545.989868164062500,126.000000000000000,550.000000000000000]},{"name":"Mseh_33_indices","bufferView":4,"byteOffset":104544,"componentType":5125,"count":3108,"type":"SCALAR","min":[0],"max":[1131]},{"name":"Mseh_34_positions","bufferView":0,"byteOffset":125280,"componentType":5126,"count":318,"type":"VEC3","min":[-80.000000000000000,-79.416709899902344,0.000000000000000],"max":[80.000000000000000,79.416709899902344,108.000000000000000]},{"name":"Mseh_35_normals","bufferView":1,"byteOffset":125280,"componentType":5126,"count":318,"type":"VEC3","min":[-80.000000000000000,-79.416709899902344,-1.000000000000000],"max":[80.000000000000000,79.416709899902344,1.000000000000000]},{"name":"Mseh_36_indices","bufferView":4,"byteOffset":116976,"componentType":5125,"count":900,"type":"SCALAR","min":[0],"max":[317]},{"name":"Mseh_37_positions","bufferView":0,"byteOffset":129096,"componentType":5126,"count":212,"type":"VEC3","min":[-100.000000000000000,-99.270889282226563,0.000000000000000],"max":[100.000000000000000,99.270889282226563,5000.000000000000000]},{"name":"Mseh_38_normals","bufferView":1,"byteOffset":129096,"componentType":5126,"count":212,"type":"VEC3","min":[-100.000000000000000,-99.270889282226563,-1.000000000000000],"max":[100.000000000000000,99.270889282226563,1.000000000000000]},{"name":"Mseh_39_colour","bufferView":3,"byteOffset":148160,"componentType":5126,"count":212,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_40_indices","bufferView":4,"byteOffset":120576,"componentType":5125,"count":600,"type":"SCALAR","min":[0],"max":[211]},{"name":"Mseh_41_positions","bufferView":0,"byteOffset":131640,"componentType":5126,"count":3680,"type":"VEC3","min":[-3384.631835937500000,-6487.637207031250000,1403.435791015625000],"max":[-1926.631713867187500,-1698.000000000000000,13575.647460937500000]},{"name":"Mseh_42_normals","bufferView":1,"byteOffset":131640,"componentType":5126,"count":3680,"type":"VEC3","min":[-707287.750000000000000,-1003047.312500000000000,-1038431.000000000000000],"max":[707287.750000000000000,198443.375000000000000,205443.703125000000000]},{"name":"Mseh_43_colour","bufferView":3,"byteOffset":151552,"componentType":5126,"count":3680,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_44_indices","bufferView":4,"byteOffset":122976,"componentType":5125,"count":13140,"type":"SCALAR","min":[0],"max":[3679]},{"name":"Mseh_45_positions","bufferView":0,"byteOffset":175800,"componentType":5126,"count":31252,"type":"VEC3","min":[-3003.079833984375000,-6082.547851562500000,5719.026367187500000],"max":[-2308.183593750000000,-3753.710693359375000,12091.505859375000000]},{"name":"Mseh_46_normals","bufferView":1,"byteOffset":175800,"componentType":5126,"count":31252,"type":"VEC3","min":[-256.118896484375000,-249.208862304687500,-66.775314331054688],"max":[256.118896484375000,249.208862304687500,348.636749267578120]},{"name":"Mseh_47_colour","bufferView":3,"byteOffset":210432,"componentType":5126,"count":31252,"type":"VEC4","min":[0.356862753629684,0.227450981736183,0.160784319043159,0.000000000000000],"max":[0.356862753629684,0.227450981736183,0.160784319043159,0.000000000000000]},{"name":"Mseh_48_indices","bufferView":4,"byteOffset":175536,"componentType":5125,"count":93744,"type":"SCALAR","min":[0],"max":[31251]},{"name":"Mseh_49_positions","bufferView":0,"byteOffset":550824,"componentType":5126,"count":5066,"type":"VEC3","min":[-4893.992187500000000,915.481933593750000,3667.979248046875000],"max":[-2209.826416015625000,2921.438964843750000,6817.257324218750000]},{"name":"Mseh_50_normals","bufferView":1,"byteOffset":550824,"componentType":5126,"count":5066,"type":"VEC3","min":[-340.000000000000000,-294.448638916015620,-216.506347656250000],"max":[340.000000000000000,294.448638916015620,216.506347656250000]},{"name":"Mseh_51_colour","bufferView":3,"byteOffset":710464,"componentType":5126,"count":5066,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_52_indices","bufferView":4,"byteOffset":550512,"componentType":5125,"count":14904,"type":"SCALAR","min":[0],"max":[5065]},{"name":"Mseh_53_positions","bufferView":0,"byteOffset":611616,"componentType":5126,"count":12584,"type":"VEC3","min":[-4763.992187500000000,1706.311035156250000,5042.599609375000000],"max":[-2340.992431640625000,2561.389648437500000,6114.327636718750000]},{"name":"Mseh_54_normals","bufferView":1,"byteOffset":611616,"componentType":5126,"count":12584,"type":"VEC3","min":[-110.000000000000000,-94.568222045898438,-54.598987579345703],"max":[110.000000000000000,127.398109436035160,193.785186767578120]},{"name":"Mseh_55_colour","bufferView":3,"byteOffset":791520,"componentType":5126,"count":12584,"type":"VEC4","min":[0.356862753629684,0.227450981736183,0.160784319043159,0.000000000000000],"max":[0.356862753629684,0.227450981736183,0.160784319043159,0.000000000000000]},{"name":"Mseh_56_indices","bufferView":4,"byteOffset":610128,"componentType":5125,"count":37728,"type":"SCALAR","min":[0],"max":[12583]},{"name":"Mseh_57_positions","bufferView":0,"byteOffset":762624,"componentType":5126,"count":4732,"type":"VEC3","min":[3742.594726562500000,168.577987670898440,3785.801025390625000],"max":[5102.579589843750000,1288.353637695312500,10900.775390625000000]},{"name":"Mseh_58_normals","bufferView":1,"byteOffset":762624,"componentType":5126,"count":4732,"type":"VEC3","min":[-19854.177734375000000,-20000.000000000000000,-17671.550781250000000],"max":[19854.177734375000000,20000.000000000000000,17671.550781250000000]},{"name":"Mseh_59_colour","bufferView":3,"byteOffset":992864,"componentType":5126,"count":4732,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_60_indices","bufferView":4,"byteOffset":761040,"componentType":5125,"count":17856,"type":"SCALAR","min":[0],"max":[4731]},{"name":"Mseh_61_positions","bufferView":0,"byteOffset":819408,"componentType":5126,"count":15652,"type":"VEC3","min":[4053.453857421875000,473.465789794921870,5819.400878906250000],"max":[4559.735351562500000,983.465820312500000,9375.401367187500000]},{"name":"Mseh_62_normals","bufferView":1,"byteOffset":819408,"componentType":5126,"count":15652,"type":"VEC3","min":[-153.869873046875000,-155.000000000000000,-1.000000000000000],"max":[153.869873046875000,155.000000000000000,251.062484741210940]},{"name":"Mseh_63_colour","bufferView":3,"byteOffset":1068576,"componentType":5126,"count":15652,"type":"VEC4","min":[0.356862753629684,0.227450981736183,0.160784319043159,0.000000000000000],"max":[0.356862753629684,0.227450981736183,0.160784319043159,0.000000000000000]},{"name":"Mseh_64_indices","bufferView":4,"byteOffset":832464,"componentType":5125,"count":46944,"type":"SCALAR","min":[0],"max":[15651]},{"name":"Mseh_65_positions","bufferView":0,"byteOffset":1007232,"componentType":5126,"count":2533,"type":"VEC3","min":[2343.658691406250000,1059.665649414062500,3554.037109375000000],"max":[3023.658691406250000,2990.750732421875000,6515.189941406250000]},{"name":"Mseh_66_normals","bufferView":1,"byteOffset":1007232,"componentType":5126,"count":2533,"type":"VEC3","min":[-340.000000000000000,-294.448638916015620,-216.506347656250000],"max":[340.000000000000000,294.448638916015620,216.506347656250000]},{"name":"Mseh_67_colour","bufferView":3,"byteOffset":1319008,"componentType":5126,"count":2533,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_68_indices","bufferView":4,"byteOffset":1020240,"componentType":5125,"count":7452,"type":"SCALAR","min":[0],"max":[2532]},{"name":"Mseh_69_positions","bufferView":0,"byteOffset":1037628,"componentType":5126,"count":6292,"type":"VEC3","min":[2473.658691406250000,1817.708251953125000,4813.229003906250000],"max":[2893.658691406250000,2672.786865234375000,5884.957031250000000]},{"name":"Mseh_70_normals","bufferView":1,"byteOffset":1037628,"componentType":5126,"count":6292,"type":"VEC3","min":[-110.000000000000000,-94.568222045898438,-54.598987579345703],"max":[110.000000000000000,127.398109436035160,193.785186767578120]},{"name":"Mseh_71_colour","bufferView":3,"byteOffset":1359536,"componentType":5126,"count":6292,"type":"VEC4","min":[0.356862753629684,0.227450981736183,0.160784319043159,0.000000000000000],"max":[0.356862753629684,0.227450981736183,0.160784319043159,0.000000000000000]},{"name":"Mseh_72_indices","bufferView":4,"byteOffset":1050048,"componentType":5125,"count":18864,"type":"SCALAR","min":[0],"max":[6291]},{"name":"Mseh_73_positions","bufferView":0,"byteOffset":1113132,"componentType":5126,"count":144,"type":"VEC3","min":[-38.965839385986328,-38.150001525878906,-0.042733479291201],"max":[308.034149169921870,183.850006103515620,453.957275390625000]},{"name":"Mseh_74_normals","bufferView":1,"byteOffset":1113132,"componentType":5126,"count":144,"type":"VEC3","min":[-1.000000000000000,-1.000000000000000,-1.000000000000000],"max":[1.000000000000000,1.000000000000000,1.000000000000000]},{"name":"Mseh_75_colour","bufferView":3,"byteOffset":1460208,"componentType":5126,"count":144,"type":"VEC4","min":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000],"max":[0.541176497936249,0.584313750267029,0.592156887054443,0.000000000000000]},{"name":"Mseh_76_indices","bufferView":4,"byteOffset":1125504,"componentType":5125,"count":216,"type":"SCALAR","min":[0],"max":[143]}],"asset":{"generator":"EarthView-CesiumModelTool","version":"2.0"},"bufferViews":[{"name":"bufferView__positions","buffer":0,"byteLength":1114860,"byteOffset":0,"byteStride":12,"target":34962},{"name":"bufferView__normals","buffer":0,"byteLength":1114860,"byteOffset":1114860,"byteStride":12,"target":34962},{"name":"bufferView__texcoords","buffer":0,"byteLength":0,"byteOffset":2229720,"byteStride":8,"target":34962},{"name":"bufferView__colour","buffer":0,"byteLength":1462512,"byteOffset":2229720,"byteStride":16,"target":34962},{"name":"bufferView__indices","buffer":0,"byteLength":1126368,"byteOffset":3692232,"target":34963}],"materials":[{"name":"Color_138.0_149.0_151.0_0.0_culling","pbrMetallicRoughness":{"baseColorFactor":[0.541176,0.584314,0.592157,0.000000],"metallicFactor":0,"roughnessFactor":1},"emissiveFactor":[0.000000,0.000000,0.000000],"alphaMode":"OPAQUE","doubleSided":true},{"name":"Color_231.0_235.0_218.0_0.0_culling","pbrMetallicRoughness":{"baseColorFactor":[0.905882,0.921569,0.854902,0.000000],"metallicFactor":0,"roughnessFactor":1},"emissiveFactor":[0.000000,0.000000,0.000000],"alphaMode":"OPAQUE","doubleSided":true},{"name":"Color_91.0_58.0_41.0_0.0_culling","pbrMetallicRoughness":{"baseColorFactor":[0.356863,0.227451,0.160784,0.000000],"metallicFactor":0,"roughnessFactor":1},"emissiveFactor":[0.000000,0.000000,0.000000],"alphaMode":"OPAQUE","doubleSided":true}],"meshes":[{"name":"Mseh_3","primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"COLOR_0":2},"indices":3,"material":0,"mode":4}]},{"name":"Mseh_7","primitives":[{"attributes":{"POSITION":4,"NORMAL":5,"COLOR_0":6},"indices":7,"material":0,"mode":4}]},{"name":"Mseh_10","primitives":[{"attributes":{"POSITION":8,"NORMAL":9},"indices":10,"material":0,"mode":4}]},{"name":"Mseh_14","primitives":[{"attributes":{"POSITION":11,"NORMAL":12,"COLOR_0":13},"indices":14,"material":1,"mode":4}]},{"name":"Mseh_18","primitives":[{"attributes":{"POSITION":15,"NORMAL":16,"COLOR_0":17},"indices":18,"material":0,"mode":4}]},{"name":"Mseh_22","primitives":[{"attributes":{"POSITION":19,"NORMAL":20,"COLOR_0":21},"indices":22,"material":0,"mode":4}]},{"name":"Mseh_26","primitives":[{"attributes":{"POSITION":23,"NORMAL":24,"COLOR_0":25},"indices":26,"material":0,"mode":4}]},{"name":"Mseh_30","primitives":[{"attributes":{"POSITION":27,"NORMAL":28,"COLOR_0":29},"indices":30,"material":0,"mode":4}]},{"name":"Mseh_33","primitives":[{"attributes":{"POSITION":31,"NORMAL":32},"indices":33,"material":0,"mode":4}]},{"name":"Mseh_36","primitives":[{"attributes":{"POSITION":34,"NORMAL":35},"indices":36,"material":0,"mode":4}]},{"name":"Mseh_40","primitives":[{"attributes":{"POSITION":37,"NORMAL":38,"COLOR_0":39},"indices":40,"material":0,"mode":4}]},{"name":"Mseh_44","primitives":[{"attributes":{"POSITION":41,"NORMAL":42,"COLOR_0":43},"indices":44,"material":0,"mode":4}]},{"name":"Mseh_48","primitives":[{"attributes":{"POSITION":45,"NORMAL":46,"COLOR_0":47},"indices":48,"material":2,"mode":4}]},{"name":"Mseh_52","primitives":[{"attributes":{"POSITION":49,"NORMAL":50,"COLOR_0":51},"indices":52,"material":0,"mode":4}]},{"name":"Mseh_56","primitives":[{"attributes":{"POSITION":53,"NORMAL":54,"COLOR_0":55},"indices":56,"material":2,"mode":4}]},{"name":"Mseh_60","primitives":[{"attributes":{"POSITION":57,"NORMAL":58,"COLOR_0":59},"indices":60,"material":0,"mode":4}]},{"name":"Mseh_64","primitives":[{"attributes":{"POSITION":61,"NORMAL":62,"COLOR_0":63},"indices":64,"material":2,"mode":4}]},{"name":"Mseh_68","primitives":[{"attributes":{"POSITION":65,"NORMAL":66,"COLOR_0":67},"indices":68,"material":0,"mode":4}]},{"name":"Mseh_72","primitives":[{"attributes":{"POSITION":69,"NORMAL":70,"COLOR_0":71},"indices":72,"material":2,"mode":4}]},{"name":"Mseh_76","primitives":[{"attributes":{"POSITION":73,"NORMAL":74,"COLOR_0":75},"indices":76,"material":0,"mode":4}]}],"nodes":[{"name":"RootNodeName","children":[1]},{"name":"750KV变压器模型01[0]","children":[2,3,4,5,6,7,9,11,13,15,17,19,21,23,25,27,29,31,33,36,39,42,45]},{"name":"mesh_16","mesh":0,"scale":[0.001000,0.001000,0.001000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"mesh_17","mesh":1,"scale":[0.001000,0.001000,0.001000],"translation":[0.000000,-0.000043,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"mesh_18","mesh":2,"scale":[0.001000,0.001000,0.001000],"translation":[-4.934700,4.190531,-0.199783],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"mesh_18","mesh":2,"scale":[0.001000,0.001000,0.001000],"translation":[-1.180552,4.190531,-0.199783],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"mesh_19","mesh":3,"scale":[0.001000,0.001000,0.001000],"translation":[0.000000,-0.000043,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"油枕[1]","children":[8]},{"name":"mesh_0","mesh":4,"scale":[0.001000,0.001000,0.001000],"translation":[-1.229690,5.792573,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"端子箱[2]","children":[10]},{"name":"mesh_1","mesh":5,"scale":[0.001000,0.001000,0.001000],"translation":[4.434034,0.667613,-2.023000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"气体继电器[3]","children":[12]},{"name":"mesh_2","mesh":6,"scale":[0.001000,0.001000,0.001000],"translation":[-3.336218,5.999156,0.379970],"rotation":[-0.508650,-0.491198,0.491198,0.508650]},{"name":"油面温控器[4]","children":[14]},{"name":"mesh_3","mesh":7,"scale":[0.001000,0.001000,0.001000],"translation":[-0.129477,6.909467,-0.277117],"rotation":[0.000000,0.707107,0.000000,0.707107]},{"name":"散热器（冷却器）[5]","children":[16]},{"name":"mesh_4","mesh":8,"scale":[0.001000,0.001000,0.001000],"translation":[-1.132006,4.190531,0.297999],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"散热器（冷却器）-1[6]","children":[18]},{"name":"mesh_4","mesh":8,"scale":[0.001000,0.001000,0.001000],"translation":[0.850994,4.190531,0.297999],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"散热器（冷却器）-2[7]","children":[20]},{"name":"mesh_4","mesh":8,"scale":[0.001000,0.001000,0.001000],"translation":[2.702994,4.190531,0.297999],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"散热器（冷却器）-3[8]","children":[22]},{"name":"mesh_4","mesh":8,"scale":[-0.001000,-0.001000,-0.001000],"translation":[-2.084006,4.190574,-0.297999],"rotation":[-0.000000,0.707107,-0.707107,0.000000]},{"name":"散热器（冷却器）-4[9]","children":[24]},{"name":"mesh_4","mesh":8,"scale":[-0.001000,-0.001000,-0.001000],"translation":[0.188994,4.190574,-0.297999],"rotation":[-0.000000,0.707107,-0.707107,0.000000]},{"name":"散热器（冷却器）-5[10]","children":[26]},{"name":"mesh_4","mesh":8,"scale":[-0.001000,-0.001000,-0.001000],"translation":[2.110994,4.190574,-0.297999],"rotation":[-0.000000,0.707107,-0.707107,0.000000]},{"name":"压力释放装置[11]","children":[28]},{"name":"mesh_5","mesh":9,"scale":[-0.001000,-0.001000,-0.001000],"translation":[4.225270,0.199957,-0.500000],"rotation":[0.707107,-0.000000,-0.707107,0.000000]},{"name":"压力释放装置-1[12]","children":[30]},{"name":"mesh_5","mesh":9,"scale":[0.001000,0.001000,0.001000],"translation":[-4.979730,0.199957,-0.500000],"rotation":[0.000000,-0.707107,0.000000,0.707107]},{"name":"吸湿器[13]","children":[32]},{"name":"mesh_6","mesh":10,"scale":[-0.001000,-0.001000,-0.001000],"translation":[-5.560000,1.431039,-0.199783],"rotation":[0.500000,0.500000,-0.500000,0.500000]},{"name":"高压套管[14]","children":[34,35]},{"name":"mesh_7","mesh":11,"scale":[0.001000,0.001000,0.001000],"translation":[-0.001556,-0.000043,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"mesh_8","mesh":12,"scale":[0.001000,0.001000,0.001000],"translation":[-0.001556,-0.000043,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"低压套管[15]","children":[37,38]},{"name":"mesh_9","mesh":13,"scale":[0.001000,0.001000,0.001000],"translation":[0.003611,-0.001934,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"mesh_10","mesh":14,"scale":[0.001000,0.001000,0.001000],"translation":[0.003611,-0.001934,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"中压套管[16]","children":[40,41]},{"name":"mesh_11","mesh":15,"scale":[0.001000,0.001000,0.001000],"translation":[-0.001225,-0.000043,-0.000223],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"mesh_12","mesh":16,"scale":[0.001000,0.001000,0.001000],"translation":[-0.001225,-0.000043,-0.000223],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"中性点套管[17]","children":[43,44]},{"name":"mesh_13","mesh":17,"scale":[0.001000,0.001000,0.001000],"translation":[0.000166,0.001634,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"mesh_14","mesh":18,"scale":[0.001000,0.001000,0.001000],"translation":[0.000166,0.001634,0.000000],"rotation":[-0.707107,0.000000,0.000000,0.707107]},{"name":"分接开关[18]","children":[46]},{"name":"mesh_15","mesh":19,"scale":[0.001000,0.001000,0.001000],"translation":[4.979773,1.400721,0.672864],"rotation":[0.500000,-0.500000,0.500000,-0.500000]}],"samplers":[{"magFilter":9729,"minFilter":9729,"wrapS":10497,"wrapT":10497}],"scene":0,"buffers":[{"name":"1-7T-ACF1-334-GIM01-750kV变压器模型01.mesh","byteLength":4818600,"uri":"1-7T-ACF1-334-GIM01-750kV变压器模型01.bin"}],"scenes":[{"nodes":[0]}]}
+{
+ "accessors": [
+  {
+   "name": "Mseh_0_positions",
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 7662,
+   "type": "VEC3",
+   "min": [
+    -5439.72998046875,
+    -1270.4754638671875,
+    349.5736389160156
+   ],
+   "max": [
+    5563.1435546875,
+    1848,
+    6067.56884765625
+   ]
+  },
+  {
+   "name": "Mseh_1_normals",
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 7662,
+   "type": "VEC3",
+   "min": [
+    -11018.2841796875,
+    -11025,
+    -9171.0966796875
+   ],
+   "max": [
+    11025,
+    9176.6865234375,
+    11018.2841796875
+   ]
+  },
+  {
+   "name": "Mseh_2_colour",
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 7662,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_3_indices",
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 22932,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    7661
+   ]
+  },
+  {
+   "name": "Mseh_4_positions",
+   "bufferView": 0,
+   "byteOffset": 91944,
+   "componentType": 5126,
+   "count": 708,
+   "type": "VEC3",
+   "min": [
+    -5179.5,
+    -1893,
+    -0.042733479291201
+   ],
+   "max": [
+    5179.5,
+    1893,
+    4190.57373046875
+   ]
+  },
+  {
+   "name": "Mseh_5_normals",
+   "bufferView": 1,
+   "byteOffset": 91944,
+   "componentType": 5126,
+   "count": 708,
+   "type": "VEC3",
+   "min": [
+    -720,
+    -140,
+    -1
+   ],
+   "max": [
+    720,
+    140,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_6_colour",
+   "bufferView": 3,
+   "byteOffset": 122592,
+   "componentType": 5126,
+   "count": 708,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_7_indices",
+   "bufferView": 4,
+   "byteOffset": 91728,
+   "componentType": 5125,
+   "count": 1068,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    707
+   ]
+  },
+  {
+   "name": "Mseh_8_positions",
+   "bufferView": 0,
+   "byteOffset": 100440,
+   "componentType": 5126,
+   "count": 48,
+   "type": "VEC3",
+   "min": [
+    -50,
+    -500,
+    0
+   ],
+   "max": [
+    50,
+    500,
+    1602
+   ]
+  },
+  {
+   "name": "Mseh_9_normals",
+   "bufferView": 1,
+   "byteOffset": 100440,
+   "componentType": 5126,
+   "count": 48,
+   "type": "VEC3",
+   "min": [
+    -1,
+    -1,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_10_indices",
+   "bufferView": 4,
+   "byteOffset": 96000,
+   "componentType": 5125,
+   "count": 96,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    47
+   ]
+  },
+  {
+   "name": "Mseh_11_positions",
+   "bufferView": 0,
+   "byteOffset": 101016,
+   "componentType": 5126,
+   "count": 96,
+   "type": "VEC3",
+   "min": [
+    -4449.498046875,
+    -2250,
+    -0.169899687170982
+   ],
+   "max": [
+    4450.501953125,
+    2250,
+    39.830101013183594
+   ]
+  },
+  {
+   "name": "Mseh_12_normals",
+   "bufferView": 1,
+   "byteOffset": 101016,
+   "componentType": 5126,
+   "count": 96,
+   "type": "VEC3",
+   "min": [
+    -1,
+    -1,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_13_colour",
+   "bufferView": 3,
+   "byteOffset": 133920,
+   "componentType": 5126,
+   "count": 96,
+   "type": "VEC4",
+   "min": [
+    0.905882358551025,
+    0.921568632125854,
+    0.854901969432831,
+    0
+   ],
+   "max": [
+    0.905882358551025,
+    0.921568632125854,
+    0.854901969432831,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_14_indices",
+   "bufferView": 4,
+   "byteOffset": 96384,
+   "componentType": 5125,
+   "count": 144,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    95
+   ]
+  },
+  {
+   "name": "Mseh_15_positions",
+   "bufferView": 0,
+   "byteOffset": 102168,
+   "componentType": 5126,
+   "count": 592,
+   "type": "VEC3",
+   "min": [
+    -4794.14111328125,
+    -663.8734130859375,
+    -0.042733479291201
+   ],
+   "max": [
+    1099.859130859375,
+    1063.4400634765625,
+    2005.0509033203125
+   ]
+  },
+  {
+   "name": "Mseh_16_normals",
+   "bufferView": 1,
+   "byteOffset": 102168,
+   "componentType": 5126,
+   "count": 592,
+   "type": "VEC3",
+   "min": [
+    -1,
+    -863.65673828125,
+    -870
+   ],
+   "max": [
+    1,
+    863.65673828125,
+    870
+   ]
+  },
+  {
+   "name": "Mseh_17_colour",
+   "bufferView": 3,
+   "byteOffset": 135456,
+   "componentType": 5126,
+   "count": 592,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_18_indices",
+   "bufferView": 4,
+   "byteOffset": 96960,
+   "componentType": 5125,
+   "count": 1452,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    591
+   ]
+  },
+  {
+   "name": "Mseh_19_positions",
+   "bufferView": 0,
+   "byteOffset": 109272,
+   "componentType": 5126,
+   "count": 72,
+   "type": "VEC3",
+   "min": [
+    -500,
+    -235,
+    -0.042733479291201
+   ],
+   "max": [
+    500,
+    235,
+    1501.957275390625
+   ]
+  },
+  {
+   "name": "Mseh_20_normals",
+   "bufferView": 1,
+   "byteOffset": 109272,
+   "componentType": 5126,
+   "count": 72,
+   "type": "VEC3",
+   "min": [
+    -1,
+    -1,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_21_colour",
+   "bufferView": 3,
+   "byteOffset": 144928,
+   "componentType": 5126,
+   "count": 72,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_22_indices",
+   "bufferView": 4,
+   "byteOffset": 102768,
+   "componentType": 5125,
+   "count": 108,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    71
+   ]
+  },
+  {
+   "name": "Mseh_23_positions",
+   "bufferView": 0,
+   "byteOffset": 110136,
+   "componentType": 5126,
+   "count": 106,
+   "type": "VEC3",
+   "min": [
+    -100,
+    -99.27088928222656,
+    0
+   ],
+   "max": [
+    100,
+    99.27088928222656,
+    300
+   ]
+  },
+  {
+   "name": "Mseh_24_normals",
+   "bufferView": 1,
+   "byteOffset": 110136,
+   "componentType": 5126,
+   "count": 106,
+   "type": "VEC3",
+   "min": [
+    -100,
+    -99.27088928222656,
+    -1
+   ],
+   "max": [
+    100,
+    99.27088928222656,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_25_colour",
+   "bufferView": 3,
+   "byteOffset": 146080,
+   "componentType": 5126,
+   "count": 106,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_26_indices",
+   "bufferView": 4,
+   "byteOffset": 103200,
+   "componentType": 5125,
+   "count": 300,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    105
+   ]
+  },
+  {
+   "name": "Mseh_27_positions",
+   "bufferView": 0,
+   "byteOffset": 111408,
+   "componentType": 5126,
+   "count": 24,
+   "type": "VEC3",
+   "min": [
+    -25,
+    -300,
+    0
+   ],
+   "max": [
+    25,
+    300,
+    10
+   ]
+  },
+  {
+   "name": "Mseh_28_normals",
+   "bufferView": 1,
+   "byteOffset": 111408,
+   "componentType": 5126,
+   "count": 24,
+   "type": "VEC3",
+   "min": [
+    -1,
+    -1,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_29_colour",
+   "bufferView": 3,
+   "byteOffset": 147776,
+   "componentType": 5126,
+   "count": 24,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_30_indices",
+   "bufferView": 4,
+   "byteOffset": 104400,
+   "componentType": 5125,
+   "count": 36,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    23
+   ]
+  },
+  {
+   "name": "Mseh_31_positions",
+   "bufferView": 0,
+   "byteOffset": 111696,
+   "componentType": 5126,
+   "count": 1132,
+   "type": "VEC3",
+   "min": [
+    -769,
+    -3506.919189453125,
+    -3729.0458984375
+   ],
+   "max": [
+    769,
+    81.40213012695312,
+    466.9540100097656
+   ]
+  },
+  {
+   "name": "Mseh_32_normals",
+   "bufferView": 1,
+   "byteOffset": 111696,
+   "componentType": 5126,
+   "count": 1132,
+   "type": "VEC3",
+   "min": [
+    -545.9898681640625,
+    -126,
+    -550
+   ],
+   "max": [
+    545.9898681640625,
+    126,
+    550
+   ]
+  },
+  {
+   "name": "Mseh_33_indices",
+   "bufferView": 4,
+   "byteOffset": 104544,
+   "componentType": 5125,
+   "count": 3108,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    1131
+   ]
+  },
+  {
+   "name": "Mseh_34_positions",
+   "bufferView": 0,
+   "byteOffset": 125280,
+   "componentType": 5126,
+   "count": 318,
+   "type": "VEC3",
+   "min": [
+    -80,
+    -79.41670989990234,
+    0
+   ],
+   "max": [
+    80,
+    79.41670989990234,
+    108
+   ]
+  },
+  {
+   "name": "Mseh_35_normals",
+   "bufferView": 1,
+   "byteOffset": 125280,
+   "componentType": 5126,
+   "count": 318,
+   "type": "VEC3",
+   "min": [
+    -80,
+    -79.41670989990234,
+    -1
+   ],
+   "max": [
+    80,
+    79.41670989990234,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_36_indices",
+   "bufferView": 4,
+   "byteOffset": 116976,
+   "componentType": 5125,
+   "count": 900,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    317
+   ]
+  },
+  {
+   "name": "Mseh_37_positions",
+   "bufferView": 0,
+   "byteOffset": 129096,
+   "componentType": 5126,
+   "count": 212,
+   "type": "VEC3",
+   "min": [
+    -100,
+    -99.27088928222656,
+    0
+   ],
+   "max": [
+    100,
+    99.27088928222656,
+    5000
+   ]
+  },
+  {
+   "name": "Mseh_38_normals",
+   "bufferView": 1,
+   "byteOffset": 129096,
+   "componentType": 5126,
+   "count": 212,
+   "type": "VEC3",
+   "min": [
+    -100,
+    -99.27088928222656,
+    -1
+   ],
+   "max": [
+    100,
+    99.27088928222656,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_39_colour",
+   "bufferView": 3,
+   "byteOffset": 148160,
+   "componentType": 5126,
+   "count": 212,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_40_indices",
+   "bufferView": 4,
+   "byteOffset": 120576,
+   "componentType": 5125,
+   "count": 600,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    211
+   ]
+  },
+  {
+   "name": "Mseh_41_positions",
+   "bufferView": 0,
+   "byteOffset": 131640,
+   "componentType": 5126,
+   "count": 3680,
+   "type": "VEC3",
+   "min": [
+    -3384.6318359375,
+    -6487.63720703125,
+    1403.435791015625
+   ],
+   "max": [
+    -1926.6317138671875,
+    -1698,
+    13575.6474609375
+   ]
+  },
+  {
+   "name": "Mseh_42_normals",
+   "bufferView": 1,
+   "byteOffset": 131640,
+   "componentType": 5126,
+   "count": 3680,
+   "type": "VEC3",
+   "min": [
+    -707287.75,
+    -1003047.3125,
+    -1038431
+   ],
+   "max": [
+    707287.75,
+    198443.375,
+    205443.703125
+   ]
+  },
+  {
+   "name": "Mseh_43_colour",
+   "bufferView": 3,
+   "byteOffset": 151552,
+   "componentType": 5126,
+   "count": 3680,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_44_indices",
+   "bufferView": 4,
+   "byteOffset": 122976,
+   "componentType": 5125,
+   "count": 13140,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    3679
+   ]
+  },
+  {
+   "name": "Mseh_45_positions",
+   "bufferView": 0,
+   "byteOffset": 175800,
+   "componentType": 5126,
+   "count": 31252,
+   "type": "VEC3",
+   "min": [
+    -3003.079833984375,
+    -6082.5478515625,
+    5719.0263671875
+   ],
+   "max": [
+    -2308.18359375,
+    -3753.710693359375,
+    12091.505859375
+   ]
+  },
+  {
+   "name": "Mseh_46_normals",
+   "bufferView": 1,
+   "byteOffset": 175800,
+   "componentType": 5126,
+   "count": 31252,
+   "type": "VEC3",
+   "min": [
+    -256.118896484375,
+    -249.2088623046875,
+    -66.77531433105469
+   ],
+   "max": [
+    256.118896484375,
+    249.2088623046875,
+    348.6367492675781
+   ]
+  },
+  {
+   "name": "Mseh_47_colour",
+   "bufferView": 3,
+   "byteOffset": 210432,
+   "componentType": 5126,
+   "count": 31252,
+   "type": "VEC4",
+   "min": [
+    0.356862753629684,
+    0.227450981736183,
+    0.160784319043159,
+    0
+   ],
+   "max": [
+    0.356862753629684,
+    0.227450981736183,
+    0.160784319043159,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_48_indices",
+   "bufferView": 4,
+   "byteOffset": 175536,
+   "componentType": 5125,
+   "count": 93744,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    31251
+   ]
+  },
+  {
+   "name": "Mseh_49_positions",
+   "bufferView": 0,
+   "byteOffset": 550824,
+   "componentType": 5126,
+   "count": 5066,
+   "type": "VEC3",
+   "min": [
+    -4893.9921875,
+    915.48193359375,
+    3667.979248046875
+   ],
+   "max": [
+    -2209.826416015625,
+    2921.43896484375,
+    6817.25732421875
+   ]
+  },
+  {
+   "name": "Mseh_50_normals",
+   "bufferView": 1,
+   "byteOffset": 550824,
+   "componentType": 5126,
+   "count": 5066,
+   "type": "VEC3",
+   "min": [
+    -340,
+    -294.4486389160156,
+    -216.50634765625
+   ],
+   "max": [
+    340,
+    294.4486389160156,
+    216.50634765625
+   ]
+  },
+  {
+   "name": "Mseh_51_colour",
+   "bufferView": 3,
+   "byteOffset": 710464,
+   "componentType": 5126,
+   "count": 5066,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_52_indices",
+   "bufferView": 4,
+   "byteOffset": 550512,
+   "componentType": 5125,
+   "count": 14904,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    5065
+   ]
+  },
+  {
+   "name": "Mseh_53_positions",
+   "bufferView": 0,
+   "byteOffset": 611616,
+   "componentType": 5126,
+   "count": 12584,
+   "type": "VEC3",
+   "min": [
+    -4763.9921875,
+    1706.31103515625,
+    5042.599609375
+   ],
+   "max": [
+    -2340.992431640625,
+    2561.3896484375,
+    6114.32763671875
+   ]
+  },
+  {
+   "name": "Mseh_54_normals",
+   "bufferView": 1,
+   "byteOffset": 611616,
+   "componentType": 5126,
+   "count": 12584,
+   "type": "VEC3",
+   "min": [
+    -110,
+    -94.56822204589844,
+    -54.5989875793457
+   ],
+   "max": [
+    110,
+    127.39810943603516,
+    193.78518676757812
+   ]
+  },
+  {
+   "name": "Mseh_55_colour",
+   "bufferView": 3,
+   "byteOffset": 791520,
+   "componentType": 5126,
+   "count": 12584,
+   "type": "VEC4",
+   "min": [
+    0.356862753629684,
+    0.227450981736183,
+    0.160784319043159,
+    0
+   ],
+   "max": [
+    0.356862753629684,
+    0.227450981736183,
+    0.160784319043159,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_56_indices",
+   "bufferView": 4,
+   "byteOffset": 610128,
+   "componentType": 5125,
+   "count": 37728,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    12583
+   ]
+  },
+  {
+   "name": "Mseh_57_positions",
+   "bufferView": 0,
+   "byteOffset": 762624,
+   "componentType": 5126,
+   "count": 4732,
+   "type": "VEC3",
+   "min": [
+    3742.5947265625,
+    168.57798767089844,
+    3785.801025390625
+   ],
+   "max": [
+    5102.57958984375,
+    1288.3536376953125,
+    10900.775390625
+   ]
+  },
+  {
+   "name": "Mseh_58_normals",
+   "bufferView": 1,
+   "byteOffset": 762624,
+   "componentType": 5126,
+   "count": 4732,
+   "type": "VEC3",
+   "min": [
+    -19854.177734375,
+    -20000,
+    -17671.55078125
+   ],
+   "max": [
+    19854.177734375,
+    20000,
+    17671.55078125
+   ]
+  },
+  {
+   "name": "Mseh_59_colour",
+   "bufferView": 3,
+   "byteOffset": 992864,
+   "componentType": 5126,
+   "count": 4732,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_60_indices",
+   "bufferView": 4,
+   "byteOffset": 761040,
+   "componentType": 5125,
+   "count": 17856,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    4731
+   ]
+  },
+  {
+   "name": "Mseh_61_positions",
+   "bufferView": 0,
+   "byteOffset": 819408,
+   "componentType": 5126,
+   "count": 15652,
+   "type": "VEC3",
+   "min": [
+    4053.453857421875,
+    473.4657897949219,
+    5819.40087890625
+   ],
+   "max": [
+    4559.7353515625,
+    983.4658203125,
+    9375.4013671875
+   ]
+  },
+  {
+   "name": "Mseh_62_normals",
+   "bufferView": 1,
+   "byteOffset": 819408,
+   "componentType": 5126,
+   "count": 15652,
+   "type": "VEC3",
+   "min": [
+    -153.869873046875,
+    -155,
+    -1
+   ],
+   "max": [
+    153.869873046875,
+    155,
+    251.06248474121094
+   ]
+  },
+  {
+   "name": "Mseh_63_colour",
+   "bufferView": 3,
+   "byteOffset": 1068576,
+   "componentType": 5126,
+   "count": 15652,
+   "type": "VEC4",
+   "min": [
+    0.356862753629684,
+    0.227450981736183,
+    0.160784319043159,
+    0
+   ],
+   "max": [
+    0.356862753629684,
+    0.227450981736183,
+    0.160784319043159,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_64_indices",
+   "bufferView": 4,
+   "byteOffset": 832464,
+   "componentType": 5125,
+   "count": 46944,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    15651
+   ]
+  },
+  {
+   "name": "Mseh_65_positions",
+   "bufferView": 0,
+   "byteOffset": 1007232,
+   "componentType": 5126,
+   "count": 2533,
+   "type": "VEC3",
+   "min": [
+    2343.65869140625,
+    1059.6656494140625,
+    3554.037109375
+   ],
+   "max": [
+    3023.65869140625,
+    2990.750732421875,
+    6515.18994140625
+   ]
+  },
+  {
+   "name": "Mseh_66_normals",
+   "bufferView": 1,
+   "byteOffset": 1007232,
+   "componentType": 5126,
+   "count": 2533,
+   "type": "VEC3",
+   "min": [
+    -340,
+    -294.4486389160156,
+    -216.50634765625
+   ],
+   "max": [
+    340,
+    294.4486389160156,
+    216.50634765625
+   ]
+  },
+  {
+   "name": "Mseh_67_colour",
+   "bufferView": 3,
+   "byteOffset": 1319008,
+   "componentType": 5126,
+   "count": 2533,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_68_indices",
+   "bufferView": 4,
+   "byteOffset": 1020240,
+   "componentType": 5125,
+   "count": 7452,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    2532
+   ]
+  },
+  {
+   "name": "Mseh_69_positions",
+   "bufferView": 0,
+   "byteOffset": 1037628,
+   "componentType": 5126,
+   "count": 6292,
+   "type": "VEC3",
+   "min": [
+    2473.65869140625,
+    1817.708251953125,
+    4813.22900390625
+   ],
+   "max": [
+    2893.65869140625,
+    2672.786865234375,
+    5884.95703125
+   ]
+  },
+  {
+   "name": "Mseh_70_normals",
+   "bufferView": 1,
+   "byteOffset": 1037628,
+   "componentType": 5126,
+   "count": 6292,
+   "type": "VEC3",
+   "min": [
+    -110,
+    -94.56822204589844,
+    -54.5989875793457
+   ],
+   "max": [
+    110,
+    127.39810943603516,
+    193.78518676757812
+   ]
+  },
+  {
+   "name": "Mseh_71_colour",
+   "bufferView": 3,
+   "byteOffset": 1359536,
+   "componentType": 5126,
+   "count": 6292,
+   "type": "VEC4",
+   "min": [
+    0.356862753629684,
+    0.227450981736183,
+    0.160784319043159,
+    0
+   ],
+   "max": [
+    0.356862753629684,
+    0.227450981736183,
+    0.160784319043159,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_72_indices",
+   "bufferView": 4,
+   "byteOffset": 1050048,
+   "componentType": 5125,
+   "count": 18864,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    6291
+   ]
+  },
+  {
+   "name": "Mseh_73_positions",
+   "bufferView": 0,
+   "byteOffset": 1113132,
+   "componentType": 5126,
+   "count": 144,
+   "type": "VEC3",
+   "min": [
+    -38.96583938598633,
+    -38.150001525878906,
+    -0.042733479291201
+   ],
+   "max": [
+    308.0341491699219,
+    183.85000610351562,
+    453.957275390625
+   ]
+  },
+  {
+   "name": "Mseh_74_normals",
+   "bufferView": 1,
+   "byteOffset": 1113132,
+   "componentType": 5126,
+   "count": 144,
+   "type": "VEC3",
+   "min": [
+    -1,
+    -1,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "name": "Mseh_75_colour",
+   "bufferView": 3,
+   "byteOffset": 1460208,
+   "componentType": 5126,
+   "count": 144,
+   "type": "VEC4",
+   "min": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ],
+   "max": [
+    0.541176497936249,
+    0.584313750267029,
+    0.592156887054443,
+    0
+   ]
+  },
+  {
+   "name": "Mseh_76_indices",
+   "bufferView": 4,
+   "byteOffset": 1125504,
+   "componentType": 5125,
+   "count": 216,
+   "type": "SCALAR",
+   "min": [
+    0
+   ],
+   "max": [
+    143
+   ]
+  }
+ ],
+ "asset": {
+  "generator": "EarthView-CesiumModelTool",
+  "version": "2.0"
+ },
+ "bufferViews": [
+  {
+   "name": "bufferView__positions",
+   "buffer": 0,
+   "byteLength": 1114860,
+   "byteOffset": 0,
+   "byteStride": 12,
+   "target": 34962
+  },
+  {
+   "name": "bufferView__normals",
+   "buffer": 0,
+   "byteLength": 1114860,
+   "byteOffset": 1114860,
+   "byteStride": 12,
+   "target": 34962
+  },
+  {
+   "name": "bufferView__texcoords",
+   "buffer": 0,
+   "byteLength": 0,
+   "byteOffset": 2229720,
+   "byteStride": 8,
+   "target": 34962
+  },
+  {
+   "name": "bufferView__colour",
+   "buffer": 0,
+   "byteLength": 1462512,
+   "byteOffset": 2229720,
+   "byteStride": 16,
+   "target": 34962
+  },
+  {
+   "name": "bufferView__indices",
+   "buffer": 0,
+   "byteLength": 1126368,
+   "byteOffset": 3692232,
+   "target": 34963
+  }
+ ],
+ "materials": [
+  {
+   "name": "Color_138.0_149.0_151.0_0.0_culling",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.541176,
+     0.584314,
+     0.592157,
+     0
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 1
+   },
+   "emissiveFactor": [
+    0,
+    0,
+    0
+   ],
+   "alphaMode": "OPAQUE",
+   "doubleSided": true
+  },
+  {
+   "name": "Color_231.0_235.0_218.0_0.0_culling",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.905882,
+     0.921569,
+     0.854902,
+     0
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 1
+   },
+   "emissiveFactor": [
+    0,
+    0,
+    0
+   ],
+   "alphaMode": "OPAQUE",
+   "doubleSided": true
+  },
+  {
+   "name": "Color_91.0_58.0_41.0_0.0_culling",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.356863,
+     0.227451,
+     0.160784,
+     0
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 1
+   },
+   "emissiveFactor": [
+    0,
+    0,
+    0
+   ],
+   "alphaMode": "OPAQUE",
+   "doubleSided": true
+  }
+ ],
+ "meshes": [
+  {
+   "name": "Mseh_3",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "COLOR_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_7",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "COLOR_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_10",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9
+     },
+     "indices": 10,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_14",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 11,
+      "NORMAL": 12,
+      "COLOR_0": 13
+     },
+     "indices": 14,
+     "material": 1,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_18",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 15,
+      "NORMAL": 16,
+      "COLOR_0": 17
+     },
+     "indices": 18,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_22",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 19,
+      "NORMAL": 20,
+      "COLOR_0": 21
+     },
+     "indices": 22,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_26",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 23,
+      "NORMAL": 24,
+      "COLOR_0": 25
+     },
+     "indices": 26,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_30",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 27,
+      "NORMAL": 28,
+      "COLOR_0": 29
+     },
+     "indices": 30,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_33",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 31,
+      "NORMAL": 32
+     },
+     "indices": 33,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_36",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 34,
+      "NORMAL": 35
+     },
+     "indices": 36,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_40",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 37,
+      "NORMAL": 38,
+      "COLOR_0": 39
+     },
+     "indices": 40,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_44",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 41,
+      "NORMAL": 42,
+      "COLOR_0": 43
+     },
+     "indices": 44,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_48",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 45,
+      "NORMAL": 46,
+      "COLOR_0": 47
+     },
+     "indices": 48,
+     "material": 2,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_52",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 49,
+      "NORMAL": 50,
+      "COLOR_0": 51
+     },
+     "indices": 52,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_56",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 53,
+      "NORMAL": 54,
+      "COLOR_0": 55
+     },
+     "indices": 56,
+     "material": 2,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_60",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 57,
+      "NORMAL": 58,
+      "COLOR_0": 59
+     },
+     "indices": 60,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_64",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 61,
+      "NORMAL": 62,
+      "COLOR_0": 63
+     },
+     "indices": 64,
+     "material": 2,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_68",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 65,
+      "NORMAL": 66,
+      "COLOR_0": 67
+     },
+     "indices": 68,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_72",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 69,
+      "NORMAL": 70,
+      "COLOR_0": 71
+     },
+     "indices": 72,
+     "material": 2,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "name": "Mseh_76",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 73,
+      "NORMAL": 74,
+      "COLOR_0": 75
+     },
+     "indices": 76,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "RootNodeName",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "750KV变压器模型01[0]",
+   "children": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    11,
+    13,
+    15,
+    17,
+    19,
+    21,
+    23,
+    25,
+    27,
+    29,
+    31,
+    33,
+    36,
+    39,
+    42,
+    45
+   ]
+  },
+  {
+   "name": "mesh_16",
+   "mesh": 0,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "mesh_17",
+   "mesh": 1,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    0,
+    -0.000043,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "mesh_18",
+   "mesh": 2,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -4.9347,
+    4.190531,
+    -0.199783
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "mesh_18",
+   "mesh": 2,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -1.180552,
+    4.190531,
+    -0.199783
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "mesh_19",
+   "mesh": 3,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    0,
+    -0.000043,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "油枕[1]",
+   "children": [
+    8
+   ]
+  },
+  {
+   "name": "mesh_0",
+   "mesh": 4,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -1.22969,
+    5.792573,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "端子箱[2]",
+   "children": [
+    10
+   ]
+  },
+  {
+   "name": "mesh_1",
+   "mesh": 5,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    4.434034,
+    0.667613,
+    -2.023
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "气体继电器[3]",
+   "children": [
+    12
+   ]
+  },
+  {
+   "name": "mesh_2",
+   "mesh": 6,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -3.336218,
+    5.999156,
+    0.37997
+   ],
+   "rotation": [
+    -0.50865,
+    -0.491198,
+    0.491198,
+    0.50865
+   ]
+  },
+  {
+   "name": "油面温控器[4]",
+   "children": [
+    14
+   ]
+  },
+  {
+   "name": "mesh_3",
+   "mesh": 7,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -0.129477,
+    6.909467,
+    -0.277117
+   ],
+   "rotation": [
+    0,
+    0.707107,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "散热器（冷却器）[5]",
+   "children": [
+    16
+   ]
+  },
+  {
+   "name": "mesh_4",
+   "mesh": 8,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -1.132006,
+    4.190531,
+    0.297999
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "散热器（冷却器）-1[6]",
+   "children": [
+    18
+   ]
+  },
+  {
+   "name": "mesh_4",
+   "mesh": 8,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    0.850994,
+    4.190531,
+    0.297999
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "散热器（冷却器）-2[7]",
+   "children": [
+    20
+   ]
+  },
+  {
+   "name": "mesh_4",
+   "mesh": 8,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    2.702994,
+    4.190531,
+    0.297999
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "散热器（冷却器）-3[8]",
+   "children": [
+    22
+   ]
+  },
+  {
+   "name": "mesh_4",
+   "mesh": 8,
+   "scale": [
+    -0.001,
+    -0.001,
+    -0.001
+   ],
+   "translation": [
+    -2.084006,
+    4.190574,
+    -0.297999
+   ],
+   "rotation": [
+    0,
+    0.707107,
+    -0.707107,
+    0
+   ]
+  },
+  {
+   "name": "散热器（冷却器）-4[9]",
+   "children": [
+    24
+   ]
+  },
+  {
+   "name": "mesh_4",
+   "mesh": 8,
+   "scale": [
+    -0.001,
+    -0.001,
+    -0.001
+   ],
+   "translation": [
+    0.188994,
+    4.190574,
+    -0.297999
+   ],
+   "rotation": [
+    0,
+    0.707107,
+    -0.707107,
+    0
+   ]
+  },
+  {
+   "name": "散热器（冷却器）-5[10]",
+   "children": [
+    26
+   ]
+  },
+  {
+   "name": "mesh_4",
+   "mesh": 8,
+   "scale": [
+    -0.001,
+    -0.001,
+    -0.001
+   ],
+   "translation": [
+    2.110994,
+    4.190574,
+    -0.297999
+   ],
+   "rotation": [
+    0,
+    0.707107,
+    -0.707107,
+    0
+   ]
+  },
+  {
+   "name": "压力释放装置[11]",
+   "children": [
+    28
+   ]
+  },
+  {
+   "name": "mesh_5",
+   "mesh": 9,
+   "scale": [
+    -0.001,
+    -0.001,
+    -0.001
+   ],
+   "translation": [
+    4.22527,
+    0.199957,
+    -0.5
+   ],
+   "rotation": [
+    0.707107,
+    0,
+    -0.707107,
+    0
+   ]
+  },
+  {
+   "name": "压力释放装置-1[12]",
+   "children": [
+    30
+   ]
+  },
+  {
+   "name": "mesh_5",
+   "mesh": 9,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -4.97973,
+    0.199957,
+    -0.5
+   ],
+   "rotation": [
+    0,
+    -0.707107,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "吸湿器[13]",
+   "children": [
+    32
+   ]
+  },
+  {
+   "name": "mesh_6",
+   "mesh": 10,
+   "scale": [
+    -0.001,
+    -0.001,
+    -0.001
+   ],
+   "translation": [
+    -5.56,
+    1.431039,
+    -0.199783
+   ],
+   "rotation": [
+    0.5,
+    0.5,
+    -0.5,
+    0.5
+   ]
+  },
+  {
+   "name": "高压套管[14]",
+   "children": [
+    34,
+    35
+   ]
+  },
+  {
+   "name": "mesh_7",
+   "mesh": 11,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -0.001556,
+    -0.000043,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "mesh_8",
+   "mesh": 12,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -0.001556,
+    -0.000043,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "低压套管[15]",
+   "children": [
+    37,
+    38
+   ]
+  },
+  {
+   "name": "mesh_9",
+   "mesh": 13,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    0.003611,
+    -0.001934,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "mesh_10",
+   "mesh": 14,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    0.003611,
+    -0.001934,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "中压套管[16]",
+   "children": [
+    40,
+    41
+   ]
+  },
+  {
+   "name": "mesh_11",
+   "mesh": 15,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -0.001225,
+    -0.000043,
+    -0.000223
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "mesh_12",
+   "mesh": 16,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    -0.001225,
+    -0.000043,
+    -0.000223
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "中性点套管[17]",
+   "children": [
+    43,
+    44
+   ]
+  },
+  {
+   "name": "mesh_13",
+   "mesh": 17,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    0.000166,
+    0.001634,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "mesh_14",
+   "mesh": 18,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    0.000166,
+    0.001634,
+    0
+   ],
+   "rotation": [
+    -0.707107,
+    0,
+    0,
+    0.707107
+   ]
+  },
+  {
+   "name": "分接开关[18]",
+   "children": [
+    46
+   ]
+  },
+  {
+   "name": "mesh_15",
+   "mesh": 19,
+   "scale": [
+    0.001,
+    0.001,
+    0.001
+   ],
+   "translation": [
+    4.979773,
+    1.400721,
+    0.672864
+   ],
+   "rotation": [
+    0.5,
+    -0.5,
+    0.5,
+    -0.5
+   ]
+  }
+ ],
+ "samplers": [
+  {
+   "magFilter": 9729,
+   "minFilter": 9729,
+   "wrapS": 10497,
+   "wrapT": 10497
+  }
+ ],
+ "scene": 0,
+ "buffers": [
+  {
+   "name": "1-7T-ACF1-334-GIM01-750kV变压器模型01.mesh",
+   "byteLength": 4818600,
+   "uri": "1-7T-ACF1-334-GIM01-750kV变压器模型01.dat"
+  }
+ ],
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ]
+}

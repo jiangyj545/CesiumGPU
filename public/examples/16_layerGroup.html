@@ -47,6 +47,14 @@
       const layers = viewer.globe.layers;
       const result = document.getElementById('result');
 
+      // ── 服务可用性探测（离线影像服务未启动时给出明确提示）──────────
+      fetch('http://localhost:8890/tiles/Mapnik/3/6/3.png', { method: 'HEAD' })
+        .then(r => { if (!r.ok) throw new Error(r.status); })
+        .catch(() => {
+          result.insertAdjacentHTML('beforeend',
+            '\n⚠ 离线影像服务(8890)未启动：运行 python .omc/tmp/maptiles_server.py 后刷新');
+        });
+
       // ── 两组图层：组 = ImageryLayer 数组，组操作即批量操作 ──────────
       const baseGroup = [
         layers.addImageryProvider(

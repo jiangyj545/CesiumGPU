@@ -49,6 +49,14 @@
       const C3 = engine.Cartesian3;
       const result = document.getElementById('result');
 
+      // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
+      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+        .then(r => { if (!r.ok) throw new Error(r.status); })
+        .catch(() => {
+          result.insertAdjacentHTML('beforeend',
+            '\n⚠ 离线地形服务(8888)未启动：运行 python .omc/tmp/terrain_server.py 后刷新');
+        });
+
       // ── 地形层（湖北 quantized-mesh）────────────────────────────────
       try {
         viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({

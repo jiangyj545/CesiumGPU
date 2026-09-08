@@ -539,7 +539,7 @@ export class Globe {
         CesiumMath.PI,
         north,
         POLAR_CAP_PARTITIONS,
-        { uvRect, radiusScale: TILE_RADIUS_SCALE },
+        { uvRect, radiusScale: tileRadiusScale(2) },
       );
       const primitive = new Primitive(this._context, {
         vertices:    geometry.vertices,
@@ -600,7 +600,7 @@ export class Globe {
       // Mercator tiles distribute pixel rows in Mercator-y; a linear v
       // offsets every row's content northward (≈7.7° mid-latitude) —
       // the "map squeezed into the Arctic" defect.
-      { uvRect, radiusScale: TILE_RADIUS_SCALE, mercatorV: true }
+      { uvRect, radiusScale: tileRadiusScale(tile.level), mercatorV: true }
     );
 
     if (this._geometryCache.size >= TILE_GEOMETRY_CACHE_CAPACITY) {
@@ -942,11 +942,21 @@ const TILE_PARTITIONS = 8;
  * the base globe (128 stacks, ≈2.8° cells) sags only ≈ 0.0003. A 0.1% lift
  * (1.001) is swallowed by that gap — mid-tile fragments lose the depth test
  * against the base globe and vanish, leaving the base colour showing through
- * (the "uncovered regions" defect). 0.8% clears the worst case with margin
- * and stays visually imperceptible (≈50 km at true Earth scale, far below
- * global-view pixel size).
+ * (the "uncovered regions" defect).
+ *
+ * Level-dependent lift (2026-09-08 eagle-eye fix): small overview canvases
+ * (e.g. the 62_eagleEyeMap mini viewer) keep the camera at ~1.94 R nadir and
+ * never refine past the L2 roots — and at the disc edge those big tiles are
+ * viewed at a ~30° grazing angle, where depth-buffer perspective compression
+ * shrinks the effective lift below the 0.0048 worst-case sagitta. Mid-tile
+ * fragments then lose the depth test against the base globe and pop out as
+ * diamond-shaped holes (20-30% of the disc). Coarse levels (≤ 3) get 2%,
+ * which clears the grazing-angle case with margin; finer levels keep 0.8%
+ * (≈50 km at true scale, imperceptible at their viewing distances).
  */
-const TILE_RADIUS_SCALE = 1.008;
+function tileRadiusScale(level: number): number {
+  return level <= 3 ? 1.02 : 1.008;
+}
 
 /** Longitude × latitude partitions of a polar cap patch (small — it only
  *  stretches one ROOT-row of imagery over the 4.95° cap). */
