@@ -654,27 +654,23 @@ export class Globe {
   }
 
   /**
-   * Edge lifts pinning this tile's north/south boundary rows to the lift of
-   * whatever renders across that boundary (seam continuity rule: both sides
-   * of a shared latitude circle must sit at the same radius, or the step
-   * reads as a seam ring at grazing angles). Sources:
-   *  - a live neighbour tile in the adjacent quadtree row (may be a coarser
-   *    level with a larger lift), or
-   *  - the polar cap (constant 1.02) when the row borders ±85.05°.
+   * Edge lifts pinning this tile's north/south boundary rows to a live
+   * neighbour tile's lift when that neighbour is coarser (its larger lift
+   * would otherwise show as a radial step on the shared latitude circle —
+   * the seam continuity rule).
+   *
+   * Polar caps are excluded on purpose: they sit a hair above the true
+   * surface (`POLAR_CAP_RADIUS_SCALE = 1.0005`) and the cap and the bordering
+   * L2 ROOT tile are independent meshes. Pinning the tile to the cap's lift
+   * makes them share a depth at ±85.05° and produce a z-fight ring. Letting
+   * the tile stay at its own `tileRadiusScale(level)` puts the cap strictly
+   * above it on screen — depth test wins deterministically, no ring.
    */
   private _edgeLiftFor(tile: TileKey): { north?: number; south?: number } | undefined {
     const own = tileRadiusScale(tile.level);
-    if (own >= POLAR_CAP_RADIUS_SCALE) return undefined; // already coarse — nothing to pin
     const rows = 2 ** tile.level;
     const edge: { north?: number; south?: number } = {};
-    // The cap renders at POLAR_CAP_RADIUS_SCALE across ±85.05° regardless of
-    // the row's level, so bordering tiles always ramp to it.
-    if (tile.y === 0) edge.north = POLAR_CAP_RADIUS_SCALE;
-    if (tile.y === rows - 1) edge.south = POLAR_CAP_RADIUS_SCALE;
-    // Neighbour rows: a live coarser tile whose row band covers the latitude
-    // circle just north/south of us forces its (larger) lift onto the shared
-    // edge. Bands are compared in this tile's row units: a neighbour at level
-    // L spans rows [y·rows/2^L, (y+1)·rows/2^L) in our units.
+    // Neighbour rows only — see doc comment for why the cap is excluded.
     for (const key of this._tilePrimitives.keys()) {
       const parts = key.split('/');
       const lvl = parseInt(parts[0], 10);
@@ -1078,10 +1074,16 @@ function tileRadiusScale(_level: number): number {
 }
 
 /**
- * Polar caps render on the same true surface as the row tiles (uniform 1.0);
- * kept as a named constant to document the cap/tile seam rule.
+ * Polar caps render a hair above the row tiles' true surface. At the cap's
+ * 85.05° boundary every longitude vertex coincides with the bordering L2
+ * ROOT column tile's top stack — same latitude, same longitude, identical
+ * radius → identical depth → z-fighting renders as a thin black ring at
+ * the ice-sheet edge. A 5e-4 lift (≈3.2 km) is depth-precision safe, far
+ * below any visible step at grazing angles, and (because it exceeds
+ * `tileRadiusScale`) automatically re-enables the edgeLift ramp so the
+ * bordering tile's stack=0 pins to the same height — seam continuity kept.
  */
-const POLAR_CAP_RADIUS_SCALE = 1.0;
+const POLAR_CAP_RADIUS_SCALE = 1.0005;
 
 /** Longitude × latitude partitions of a polar cap patch (small — it only
  *  stretches one ROOT-row of imagery over the 4.95° cap). */
