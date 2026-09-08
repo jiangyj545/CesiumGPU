@@ -69,6 +69,9 @@ export class Globe {
    * "hole" whenever the poles rotate into view. Each patch re-samples the
    * top/bottom row of the ROOT level grid stretched over the cap.
    */
+  /** Adjacent-row tile level each cap's lift was built for (seam continuity). */
+  private _polarCapLiftLevel: { north: number; south: number } = { north: -1, south: -1 };
+
   private _polarCaps: { north: TilePrimitiveEntry | null; south: TilePrimitiveEntry | null } = {
     north: null,
     south: null,
@@ -511,6 +514,20 @@ export class Globe {
       const resolved = layer.resolveTexture(refTile);
       const current = this._polarCaps[which];
 
+      // Coarsest live tile in the adjacent row decides the seam-side lift.
+      // Near views refine the row past L3 (fine lift) while the L2 roots are
+      // gone from the map, so default to fine unless a coarse tile is present.
+      let adjacentLevel = 4;
+      for (const key of this._tilePrimitives.keys()) {
+        const parts = key.split('/');
+        const lvl = parseInt(parts[0], 10);
+        const row = parseInt(parts[2], 10);
+        const rows = 2 ** lvl;
+        if (which === 'north' ? row === 0 : row === rows - 1) {
+          adjacentLevel = Math.min(adjacentLevel, lvl);
+        }
+      }
+
       if (resolved === null) {
         // Nothing loaded yet for this row — drop any stale cap primitive.
         if (current !== null) {
@@ -519,7 +536,11 @@ export class Globe {
         }
         continue;
       }
-      if (current !== null && current.texture === resolved.texture) continue; // up to date
+      if (
+        current !== null &&
+        current.texture === resolved.texture &&
+        this._polarCapLiftLevel[which] === adjacentLevel
+      ) continue; // up to date
 
       if (current !== null) this._destroyTilePrimitive(current);
 
@@ -533,13 +554,18 @@ export class Globe {
       // TileKey y grows southward; texture v likewise (row 0 = north edge).
       const v0 = which === 'north' ? 0.0 : 1.0 - vRange;
       const uvRect = { u0: 0.0, v0, u1: 1.0, v1: v0 + vRange };
+      // Cap lift follows the coarsest tile actually rendering in the
+      // adjacent row: the row is covered by L2 roots in far views (coarse
+      // lift, matching those tiles) but refines past L3 near the pole — the
+      // cap must switch to the fine lift with them or the 85.05° boundary
+      // shows a (1.02 − 1.008) ≈ 76 km radial step, visible as a seam ring.
       const geometry = EllipsoidGeometry.createRegion(
         -CesiumMath.PI,
         south,
         CesiumMath.PI,
         north,
         POLAR_CAP_PARTITIONS,
-        { uvRect, radiusScale: tileRadiusScale(2) },
+        { uvRect, radiusScale: tileRadiusScale(adjacentLevel) },
       );
       const primitive = new Primitive(this._context, {
         vertices:    geometry.vertices,
@@ -550,6 +576,7 @@ export class Globe {
       primitive.setTexture(resolved.texture, this._getTileSampler());
       primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
       this._polarCaps[which] = { primitive, texture: resolved.texture };
+      this._polarCapLiftLevel[which] = adjacentLevel;
     }
   }
 
@@ -960,7 +987,7 @@ function tileRadiusScale(level: number): number {
 
 /** Longitude × latitude partitions of a polar cap patch (small — it only
  *  stretches one ROOT-row of imagery over the 4.95° cap). */
-const POLAR_CAP_PARTITIONS = 16;
+const POLAR_CAP_PARTITIONS = 64;
 
 /** WGS84 polar / equatorial ratio (matches EllipsoidGeometry normalisation). */
 const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
