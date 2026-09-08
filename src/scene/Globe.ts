@@ -4,6 +4,7 @@ import { EllipsoidGeometry } from './EllipsoidGeometry';
 import { Camera } from './Camera';
 import { ImageryLayerCollection } from '../imagery/ImageryLayerCollection';
 import { ImageryLayer } from '../imagery/ImageryLayer';
+import type { ResolvedTileTexture } from '../imagery/ImageryLayer';
 import { TileKey } from '../imagery/TileKey';
 import { Color } from '../math/Color';
 import { CesiumMath } from '../math/CesiumMath';
@@ -506,25 +507,37 @@ export class Globe {
    * dedicated geometry that re-samples the ROOT grid's top / bottom row
    * stretched poleward. Without them the base colour bleeds through the
    * caps — visually a "hole" at high-latitude views.
+   *
+   * Per-ROOT-column sampling (CesiumJS semantics: each imagery tile
+   * stretches its own mercator edge pixels poleward). The historical single
+   * full-sweep patch bound only column 0's texture over all longitudes —
+   * a 270° longitude misplacement that also smeared column 0's blue/white
+   * transition row into a uniform ring at the ice-sheet edge (read as a
+   * "seam circle" at grazing views). Each column now samples its own
+   * u-sub-rect, so cap imagery lines up with the row below it.
    */
   private _syncPolarCaps(layer: ImageryLayer): void {
     const rootLevel = Math.min(ImageryLayer.ROOT_LEVEL, layer.provider.maximumLevel);
     const n = 2 ** rootLevel;
     const mercatorEdge = Math.atan(Math.sinh(Math.PI)); // ±85.0511°
 
-    // The cap texture is any resident tile covering the top/bottom row at
-    // the coarsest level with an own or fallback texture; row 0 = north.
     const caps: Array<'north' | 'south'> = ['north', 'south'];
     for (const which of caps) {
-      // Find a resident texture for the cap's reference row (the row's
-      // first tile via the fallback chain is enough — every tile in a row
-      // resolves up to the same coarse ancestors).
       const y = which === 'north' ? 0 : n - 1;
-      const refTile = new TileKey(rootLevel, 0, y);
-      const resolved = layer.resolveTexture(refTile);
       const current = this._polarCaps[which];
 
-      if (resolved === null) {
+      // Resolve one texture per ROOT column of the reference row. Columns
+      // resolve through their own ancestor chains, so partial loads still
+      // cover the whole cap (blurry is fine — same transient as CesiumJS).
+      const resolvedPerColumn: Array<ResolvedTileTexture | null> = [];
+      let anyResolved = false;
+      for (let x = 0; x < n; x++) {
+        const resolved = layer.resolveTexture(new TileKey(rootLevel, x, y));
+        resolvedPerColumn.push(resolved);
+        if (resolved !== null) anyResolved = true;
+      }
+
+      if (!anyResolved) {
         // Nothing loaded yet for this row — drop any stale cap primitive.
         if (current !== null) {
           this._destroyTilePrimitive(current);
@@ -532,41 +545,92 @@ export class Globe {
         }
         continue;
       }
-      if (current !== null && current.texture === resolved.texture) continue; // up to date
+      // Up to date when every column still resolves the same texture.
+      const sameTextures =
+        current?.textures !== undefined &&
+        current.textures.length === n &&
+        current.textures.every((tex, x) => tex === (resolvedPerColumn[x]?.texture ?? null));
+      if (sameTextures) continue;
 
       if (current !== null) this._destroyTilePrimitive(current);
 
-      // Cap geometry: full longitude sweep, Mercator edge → pole. UVs map
-      // onto the reference row's sub-rect inside the resolved texture
-      // (row stretched over the 4.95° cap — standard global-viewer behaviour).
+      // Column textures with fallback: an unloaded column reuses the most
+      // recent earlier column's texture (its u-sub-rect then shows
+      // neighbouring imagery until the real column loads).
+      const textures: Array<GPUTexture | null> = [];
+      let fallback: GPUTexture | null = null;
+      for (let x = 0; x < n; x++) {
+        const tex: GPUTexture | null = resolvedPerColumn[x]?.texture ?? fallback;
+        textures.push(tex);
+        if (tex !== null) fallback = tex;
+      }
+
       const south = which === 'north' ? mercatorEdge : -CesiumMath.PI_OVER_TWO;
       const north = which === 'north' ? CesiumMath.PI_OVER_TWO : -mercatorEdge;
-      const rowsTotal = n;
-      const vRange = 1.0 / rowsTotal;
       // TileKey y grows southward; texture v likewise (row 0 = north edge).
+      const vRange = 1.0 / n;
       const v0 = which === 'north' ? 0.0 : 1.0 - vRange;
-      const uvRect = { u0: 0.0, v0, u1: 1.0, v1: v0 + vRange };
-      // The cap always sits at the coarse lift: bordering row tiles pin
-      // their edge rows to the same value via `_edgeLiftFor`, so the 85.05°
-      // seam is continuous no matter which levels render in the row.
+
+      this._polarCaps[which] = this._createPolarCapPrimitive(
+        south, north, n, v0, vRange, textures
+      );
+    }
+  }
+
+  /**
+   * Build the cap as one merged primitive with `n` longitude segments, each
+   * segment's UVs remapped into its own column's u-sub-rect. A single bound
+   * texture suffices even with mixed column textures: fallback columns
+   * reuse an earlier column's texture object (resolved in the caller), so
+   * every segment's sub-rect samples the same bound texture. All segments
+   * share the cap lift (`POLAR_CAP_RADIUS_SCALE`), so segment borders are
+   * geometrically continuous.
+   */
+  private _createPolarCapPrimitive(
+    south: number,
+    north: number,
+    n: number,
+    v0: number,
+    vRange: number,
+    textures: Array<GPUTexture | null>
+  ): TilePrimitiveEntry {
+    const boundTexture = textures.find(t => t !== null) as GPUTexture;
+    const vertsPerSeg  = (POLAR_CAP_PARTITIONS + 1) * (POLAR_CAP_PARTITIONS + 1) * 8;
+    const indicesPerSeg = POLAR_CAP_PARTITIONS * POLAR_CAP_PARTITIONS * 6;
+    const allVertices  = new Float32Array(vertsPerSeg * n);
+    const allIndices   = new Uint32Array(indicesPerSeg * n);
+    let vOff = 0, iOff = 0, baseVertex = 0;
+    for (let x = 0; x < n; x++) {
+      const west = -CesiumMath.PI + (x / n) * CesiumMath.TWO_PI;
+      const east = -CesiumMath.PI + ((x + 1) / n) * CesiumMath.TWO_PI;
       const geometry = EllipsoidGeometry.createRegion(
-        -CesiumMath.PI,
+        west,
         south,
-        CesiumMath.PI,
+        east,
         north,
         POLAR_CAP_PARTITIONS,
-        { uvRect, radiusScale: POLAR_CAP_RADIUS_SCALE },
+        {
+          uvRect: { u0: x / n, v0, u1: (x + 1) / n, v1: v0 + vRange },
+          radiusScale: POLAR_CAP_RADIUS_SCALE,
+        },
       );
-      const primitive = new Primitive(this._context, {
-        vertices:    geometry.vertices,
-        indices:     geometry.indices,
-        translucent: false,
-      });
-      Matrix4.identity(primitive.modelMatrix);
-      primitive.setTexture(resolved.texture, this._getTileSampler());
-      primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
-      this._polarCaps[which] = { primitive, texture: resolved.texture };
+      allVertices.set(geometry.vertices, vOff);
+      vOff += geometry.vertices.length;
+      for (let i = 0; i < geometry.indices.length; i++) {
+        allIndices[iOff + i] = geometry.indices[i] + baseVertex;
+      }
+      iOff += geometry.indices.length;
+      baseVertex += geometry.vertexCount;
     }
+    const primitive = new Primitive(this._context, {
+      vertices:    allVertices,
+      indices:     allIndices,
+      translucent: false,
+    });
+    Matrix4.identity(primitive.modelMatrix);
+    primitive.setTexture(boundTexture, this._getTileSampler());
+    primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
+    return { primitive, texture: boundTexture, textures };
   }
 
   /** Build one per-tile primitive (region geometry + tile texture). */
@@ -977,6 +1041,12 @@ interface TilePrimitiveEntry {
   primitive: Primitive;
   /** Texture reference used to detect bind-group-invalidating changes. */
   texture: GPUTexture;
+  /**
+   * Polar caps only: per-ROOT-column textures sampled by the cap segments
+   * (first non-null equals `texture`). Used to detect when any column's
+   * resolved texture changes and the cap needs a rebuild.
+   */
+  textures?: Array<GPUTexture | null>;
   /**
    * Terrain only: geometry cache key the primitive was built from (detects
    * stitch-signature changes that require a rebuild).
