@@ -48,7 +48,9 @@ export interface CreateRegionOptions {
    * tile images distribute their pixel rows uniformly in Mercator-y space,
    * which is non-linear in latitude — a linear v makes every row's content
    * sit too far north (≈7.7° at mid latitudes, worse toward the poles),
-   * squeezing the whole map toward the Arctic. Default: false (linear).
+   * squeezing the whole map toward the Arctic. Latitudes beyond the Mercator
+   * domain (pole-stretched tile rows) clamp to the domain edge. Default:
+   * false (linear).
    */
   mercatorV?: boolean;
 }
@@ -217,9 +219,17 @@ export class EllipsoidGeometry {
     // Mercator rows: v must follow the Mercator-y of the latitude, not the
     // latitude itself (see CreateRegionOptions.mercatorV). Precompute the
     // edge ys so each stack maps lat → normalized y → v.
+    //
+    // Pole-stretched rows (top/bottom tile rows) carry latitudes beyond the
+    // Mercator domain ±atan(sinh π) ≈ ±85.0511°, where tan() diverges —
+    // clamp into the domain so the edge v spans the whole stretch (edge-row
+    // imagery smeared poleward, CesiumJS semantics).
     const mercatorV  = options.mercatorV ?? false;
-    const mercNorthY = Math.asinh(Math.tan(north));
-    const mercSouthY = Math.asinh(Math.tan(south));
+    const MERC_EDGE  = Math.atan(Math.sinh(Math.PI));
+    const mercY = (lat: number): number =>
+      Math.asinh(Math.tan(Math.min(MERC_EDGE, Math.max(-MERC_EDGE, lat))));
+    const mercNorthY = mercY(north);
+    const mercSouthY = mercY(south);
 
     const stacks = partitions; // rows: north → south
     const slices = partitions; // columns: west → east
@@ -248,10 +258,11 @@ export class EllipsoidGeometry {
       let v: number;
       if (mercatorV) {
         // Normalise this row's Mercator-y into [0, 1] across the region.
-        // tan() diverges at ±π/2 — polar-cap callers must stay in the
-        // Mercator domain (cap patches sample the top/bottom row linearly).
-        const y = Math.asinh(Math.tan(lat));
-        const tn = (y - mercNorthY) / (mercSouthY - mercNorthY);
+        // A row clamped entirely past the domain edge degenerates to
+        // mercNorthY === mercSouthY → tn pinned to 0 (pure edge smear).
+        const y = mercY(lat);
+        const denom = mercSouthY - mercNorthY;
+        const tn = denom !== 0 ? (y - mercNorthY) / denom : 0;
         v = uvRect.v0 + (uvRect.v1 - uvRect.v0) * tn;
       } else {
         v = uvRect.v0 + (uvRect.v1 - uvRect.v0) * t;
