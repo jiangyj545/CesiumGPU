@@ -1,6 +1,7 @@
 import { TileKey } from './TileKey';
 import { ImageryProvider } from './ImageryProvider';
 import { TileTextureCache, TileTextureCacheStats } from './TileTextureCache';
+import { analyseTopRows, readBitmapRowMeans, cropTopRows, MIN_CROP_LEAD_ROWS, CanvasSurface } from './TopRowBlackFill';
 import { MipmapGenerator } from '../renderer/MipmapGenerator';
 import { Camera } from '../scene/Camera';
 import { Cartesian3 } from '../math/Cartesian3';
@@ -392,16 +393,60 @@ export class ImageryLayer {
 
     let uploaded = 0;
     while (uploaded < this._uploadsPerFrame && this._uploadQueue.length > 0) {
-      const item = this._uploadQueue.shift() as UploadItem;
-      this._cache.put(item.key, this._createTileTexture(device, item.key, item.bitmap));
+      const item   = this._uploadQueue.shift() as UploadItem;
+      // 顶行"深蓝黑填充数据"治理：整张黑 → null（不建纹理、不进缓存，
+      // resolveTexture 的祖先回退链自动生效）；部分黑 → 裁剪重绘画布。
+      const source = this._prepareTopRowTile(item.key, item.bitmap);
+      if (source !== null) {
+        this._cache.put(item.key, this._createTileTexture(device, item.key, source));
+      }
+      // 位图统一在此释放（create/canvas 绘制均为同步操作，关闭安全；
+      // 整张黑路径也已跳过上传，同样需要释放）。
+      item.bitmap.close();
       uploaded++;
     }
   }
 
-  /** Create a mipmapped rgba8unorm texture from a decoded tile bitmap. */
-  private _createTileTexture(device: GPUDevice, key: string, bitmap: ImageBitmap): GPUTexture {
-    const width  = bitmap.width;
-    const height = bitmap.height;
+  /**
+   * 顶行瓦片（y === 0）"深蓝黑填充数据"治理（数据事实见
+   * TopRowBlackFill.ts 文件头：天地图/高德卫星 85.05°N 以上无影像，
+   * 顶行顶部带 10~15 亮度的深蓝黑行；z4 顶行 11/16、z5 顶行 32/32 整张黑）。
+   * 返回值：
+   * - `null`      整张黑 → 调用方跳过上传，缓存无此 key 时祖先回退链生效；
+   * - 裁剪画布    顶部连续黑行 ≥ MIN_CROP_LEAD_ROWS → 有效区域已拉伸到整幅，
+   *               语义为 83°~85.05°N 显示 83° 处影像的拉伸（与天地图官网
+   *               "极区不可见"观感一致）；
+   * - 原位图      正常影像（含检测环境不可用、黑行不足 8 的情况）→ 现状路径。
+   * 南极底行（y === 2^z - 1）数据完全干净，不做任何处理。
+   * 开销：仅 y === 0 瓦片上传时各执行一次（每级 2^z 张），逐行隔列采样。
+   */
+  private _prepareTopRowTile(key: string, bitmap: ImageBitmap): ImageBitmap | CanvasSurface | null {
+    if (TileKey.fromKey(key).y !== 0) return bitmap;
+
+    const rowMeans = readBitmapRowMeans(bitmap);
+    if (rowMeans === null) return bitmap; // node / 无 canvas 环境：按现状路径放行
+
+    const { leadBlackRows, allBlack } = analyseTopRows(rowMeans);
+    if (allBlack) {
+      console.debug(`ImageryLayer: tile ${key} no-data (all black)`);
+      return null; // 不建纹理、不进缓存 → 祖先回退链生效（位图由调用方释放）
+    }
+    if (leadBlackRows >= MIN_CROP_LEAD_ROWS) {
+      const cropped = cropTopRows(bitmap, leadBlackRows);
+      if (cropped !== null) return cropped; // 画布创建失败（无 canvas）则回退原位图
+    }
+    return bitmap;
+  }
+
+  /**
+   * Create a mipmapped rgba8unorm texture from a decoded tile bitmap
+   * （或顶行裁剪重绘产生的画布源——canvas 是合法的 CanvasImageSource，
+   * copyExternalImageToTexture 与 mip 生成路径完全一致）。
+   * 位图的释放由调用方（_flushUploads）统一负责。
+   */
+  private _createTileTexture(device: GPUDevice, key: string, source: ImageBitmap | CanvasSurface): GPUTexture {
+    const width  = source.width;
+    const height = source.height;
     const texture = device.createTexture({
       label:  `Imagery.Tile.${key.replace(/\//g, '_')}`,
       size:   { width, height },
@@ -410,12 +455,11 @@ export class ImageryLayer {
       mipLevelCount: MipmapGenerator.requiredMipLevelCount(width, height),
     });
     device.queue.copyExternalImageToTexture(
-      { source: bitmap },
+      { source },
       { texture },
       { width, height }
     );
     this._mipmapGenerator.generateMips(device, texture, 'rgba8unorm');
-    bitmap.close();
     return texture;
   }
 

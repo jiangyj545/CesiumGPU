@@ -44,6 +44,16 @@ export interface CreateRegionOptions {
   /** Stacks used to ramp from edgeLift to radiusScale. Default: 2. */
   edgeLiftRamp?: number;
   /**
+   * Skirt depth as a fraction of the local radius (normalised radius units).
+   * When > 0, the four edge rows/columns each get a duplicated "skirt" vertex
+   * ring pushed radially inward by this fraction, with a triangle strip
+   * connecting it to the surface edge — hiding the wedge-shaped T-junction
+   * slivers where quadtree tiles of different levels share an edge (coarse
+   * edge = chord, fine mid-edge vertices on the arc). CesiumJS skirt
+   * semantics. Default: 0 (no skirt, byte-identical geometry).
+   */
+  skirtDepth?: number;
+  /**
    * Map v through the Web-Mercator function instead of linearly. Mercator
    * tile images distribute their pixel rows uniformly in Mercator-y space,
    * which is non-linear in latitude — a linear v makes every row's content
@@ -53,28 +63,6 @@ export interface CreateRegionOptions {
    * false (linear).
    */
   mercatorV?: boolean;
-  /**
-   * Per-row v floor (texture-space, absolute — NOT relative to uvRect).
-   * Rows whose sampled v would fall below this value sample this value
-   * instead: geometry poleward of the clamp latitude shows the clamp
-   * latitude's imagery row (e.g. Arctic pack ice) rather than the black
-   * filler rows Web-Mercator sources place there. Rows equatorward of the
-   * clamp keep their original mapping (no content shift). Applied after
-   * the mercatorV/linear mapping. Default: undefined (no clamp).
-   */
-  sampleClampVNorth?: number;
-  /** South-pole counterpart: per-row v ceiling (v grows southward). */
-  sampleClampVSouth?: number;
-  /**
-   * Latitude (radians) whose Mercator-y anchors v=0 of the mapping domain.
-   * Default: `north` (the geometry's own northern edge). Set when the
-   * geometry's north edge is CLAMPED south of the tile's real north edge
-   * (polar fill boundary): rows then sample their own latitude's texel
-   * (v is the texture-absolute Mercator position), so the surviving
-   * equatorward rows keep their correct content instead of being
-   * renormalised across the shortened rectangle.
-   */
-  uvNorthLat?: number;
 }
 
 /**
@@ -235,8 +223,6 @@ export class EllipsoidGeometry {
     const uvRect  = options.uvRect ?? { u0: 0, v0: 0, u1: 1, v1: 1 };
     const scale   = options.radiusScale ?? 1.0;
     const edgeLift = options.edgeLift;
-    const sampleClampVNorth = options.sampleClampVNorth;
-    const sampleClampVSouth = options.sampleClampVSouth;
     const ratio   = WGS84_POLAR_RATIO;
     const ratioSq = ratio * ratio;
 
@@ -252,17 +238,21 @@ export class EllipsoidGeometry {
     const MERC_EDGE  = Math.atan(Math.sinh(Math.PI));
     const mercY = (lat: number): number =>
       Math.asinh(Math.tan(Math.min(MERC_EDGE, Math.max(-MERC_EDGE, lat))));
-    // v=0 anchor: the geometry's north edge by default, or the (larger)
-    // uvNorthLat when the north edge is clamped (polar fill boundary) —
-    // rows then keep their texture-absolute Mercator v.
-    const mercNorthY = mercY(options.uvNorthLat ?? north);
+    const mercNorthY = mercY(north);
     const mercSouthY = mercY(south);
 
     const stacks = partitions; // rows: north → south
     const slices = partitions; // columns: west → east
     const ramp = Math.min(options.edgeLiftRamp ?? 2, stacks);
 
-    const vertexCount = (stacks + 1) * (slices + 1);
+    // 裙边（skirtDepth > 0 时才生成）：四条边各复制一份边缘顶点（角顶点按边
+    // 重复、不去重），追加在表面网格之后。
+    const skirtDepth       = options.skirtDepth ?? 0;
+    const hasSkirt         = skirtDepth > 0;
+    const baseVertexCount  = (stacks + 1) * (slices + 1);
+    const skirtVertexCount = hasSkirt ? 2 * (slices + 1) + 2 * (stacks + 1) : 0;
+
+    const vertexCount = baseVertexCount + skirtVertexCount;
     const vertices    = new Float32Array(vertexCount * 8); // [pos(3), normal(3), uv(2)]
 
     let vi = 0;
@@ -293,15 +283,6 @@ export class EllipsoidGeometry {
         v = uvRect.v0 + (uvRect.v1 - uvRect.v0) * tn;
       } else {
         v = uvRect.v0 + (uvRect.v1 - uvRect.v0) * t;
-      }
-      // Polar sample clamp (per-ROW, not endpoint-linear): rows poleward of
-      // the clamp latitude sample the clamp row; rows equatorward keep their
-      // own mapping. An endpoint-only remap would shift content at every
-      // latitude between the clamp and the tile's far edge.
-      if (sampleClampVNorth !== undefined && v < sampleClampVNorth) {
-        v = sampleClampVNorth;
-      } else if (sampleClampVSouth !== undefined && v > sampleClampVSouth) {
-        v = sampleClampVSouth;
       }
       const cosLat = Math.cos(lat);
       const sinLat = Math.sin(lat);
@@ -334,7 +315,10 @@ export class EllipsoidGeometry {
       }
     }
 
-    const indexCount = stacks * slices * 6;
+    // 裙边三角形：每条边 (该边顶点数 - 1) 个四边形 × 2 三角形，
+    // 共 2*slices + 2*stacks 个四边形。
+    const skirtIndexCount = hasSkirt ? 6 * (2 * slices + 2 * stacks) : 0;
+    const indexCount = stacks * slices * 6 + skirtIndexCount;
     const indices    = new Uint32Array(indexCount);
     let   idx        = 0;
     const stride     = slices + 1;
@@ -354,6 +338,62 @@ export class EllipsoidGeometry {
         indices[idx++] = c;
         indices[idx++] = d;
       }
+    }
+
+    // ── 裙边：跨 level 共边 T-junction 遮盖 ────────────────────────────────────
+    // 粗层瓦片边缘是弦线（平面三角形插值），细层中点顶点浮在弧上，共边处留有
+    // 楔形缝、掠射角下透出背景。把每条边的顶点复制一份、半径乘 (1-skirtDepth)
+    // 向地心压，与边缘顶点连成向下垂的裙边面，从外侧遮住缝隙。
+    if (hasSkirt) {
+      const skirtScale = 1 - skirtDepth;
+      let viSkirt = baseVertexCount; // 裙边顶点追加在表面网格之后
+
+      // 生成一条边的裙边：edge 为表面顶点索引（按遍历顺序）。winding 推导：
+      // 设遍历方向单位切向 D、径向朝外 R̂、裙边落差 -h·R̂，则四边形
+      // (T_a, T_b, B_a) 的面法向 = D × (-h·R̂) = -h·(D × R̂)。
+      // 北缘（D=东）：法向朝北 = 朝瓦片外侧；东缘（D=南）：D×R̂ = 西 → 法向朝东 = 外侧。
+      // 南/西缘该式正好朝瓦片内侧，需翻转（交换后两个索引）。
+      const emitEdgeSkirt = (edge: number[], flip: boolean): void => {
+        const skirts: number[] = [];
+        for (const v of edge) {
+          // 同 lat/lon、半径乘 (1-skirtDepth)；法线沿用表面法线、uv 沿用边缘值。
+          for (let f = 0; f < 8; f++) vertices[viSkirt * 8 + f] = vertices[v * 8 + f];
+          vertices[viSkirt * 8]     *= skirtScale;
+          vertices[viSkirt * 8 + 1] *= skirtScale;
+          vertices[viSkirt * 8 + 2] *= skirtScale;
+          skirts.push(viSkirt++);
+        }
+        for (let i = 0; i + 1 < edge.length; i++) {
+          const ta = edge[i];
+          const tb = edge[i + 1];
+          const ba = skirts[i];
+          const bb = skirts[i + 1];
+          if (!flip) {
+            indices[idx++] = ta; indices[idx++] = tb; indices[idx++] = ba;
+            indices[idx++] = tb; indices[idx++] = bb; indices[idx++] = ba;
+          } else {
+            indices[idx++] = ta; indices[idx++] = ba; indices[idx++] = tb;
+            indices[idx++] = ba; indices[idx++] = bb; indices[idx++] = tb;
+          }
+        }
+      };
+
+      const north: number[] = [];
+      const south: number[] = [];
+      const west: number[]  = [];
+      const east: number[]  = [];
+      for (let s = 0; s <= slices; s++) {
+        north.push(0 * stride + s);      // stack 0（北缘），西 → 东
+        south.push(stacks * stride + s); // stack stacks（南缘），西 → 东
+      }
+      for (let stack = 0; stack <= stacks; stack++) {
+        west.push(stack * stride + 0);      // slice 0（西缘），北 → 南
+        east.push(stack * stride + slices); // slice slices（东缘），北 → 南
+      }
+      emitEdgeSkirt(north, false);
+      emitEdgeSkirt(south, true);
+      emitEdgeSkirt(west, true);
+      emitEdgeSkirt(east, false);
     }
 
     return { vertices, indices, vertexCount, indexCount };

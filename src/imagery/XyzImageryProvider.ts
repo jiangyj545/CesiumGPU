@@ -10,10 +10,6 @@ export interface XyzImageryProviderOptions {
   maximumLevel?: number;
   /** Native tile size in pixels. Default: 256 */
   tileSize?: number;
-  /** See {@link ImageryProvider.polarSampleClampNorth} (degrees). */
-  polarSampleClampNorth?: number;
-  /** See {@link ImageryProvider.polarSampleClampSouth} (degrees). */
-  polarSampleClampSouth?: number;
 }
 
 /**
@@ -28,16 +24,12 @@ export class XyzImageryProvider implements ImageryProvider {
   readonly maximumLevel: number;
   readonly tileSize: number;
   readonly subdomains: readonly string[];
-  readonly polarSampleClampNorth?: number;
-  readonly polarSampleClampSouth?: number;
 
   constructor(options: XyzImageryProviderOptions) {
     this.url          = options.url;
     this.subdomains   = options.subdomains ?? [];
     this.maximumLevel = options.maximumLevel ?? 18;
     this.tileSize     = options.tileSize ?? 256;
-    this.polarSampleClampNorth = options.polarSampleClampNorth;
-    this.polarSampleClampSouth = options.polarSampleClampSouth;
   }
 
   /** Built-in Open Street Map raster tile preset. */
@@ -65,10 +57,6 @@ export class XyzImageryProvider implements ImageryProvider {
       subdomains:   ['0', '1', '2', '3', '4', '5', '6', '7'],
       maximumLevel: 18,
       tileSize:     256,
-      // 天地图影像在 ~80.7°N 以北（L2 顶行顶部 43–104 行、L3 部分整张）是
-      // (7,6,40) 黑填充——全球视角下 78–85°N 黑带被读作极区接缝环。顶行
-      // 瓦片从 78°N 行开始采样（北冰洋浮冰，白），黑行不再进入画面。
-      polarSampleClampNorth: 78,
     });
   }
 

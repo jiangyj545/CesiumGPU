@@ -31,21 +31,6 @@ export interface ImageryProvider {
   readonly ready: boolean;
 
   /**
-   * Latitude (degrees, positive north) poleward of which this provider's
-   * imagery is black filler. Web-Mercator sources stop at ±85.0511° and pad
-   * their pole rows with near-black pixels (Tianditu/Gaode carry 43–104
-   * black rows at L2, fully black tiles at L3); rendered as-is those rows
-   * paint a black band at 78–85°N that reads as a seam ring from global
-   * views. When set, pole-row tiles sample their texture starting at this
-   * latitude — the band shows this row's real content (Arctic pack ice)
-   * instead of the filler. Default: undefined (sample the full tile).
-   */
-  readonly polarSampleClampNorth?: number;
-
-  /** South-pole counterpart of {@link polarSampleClampNorth} (degrees, positive south). */
-  readonly polarSampleClampSouth?: number;
-
-  /**
    * Resolve the concrete request URL for a tile, substituting `{z}/{x}/{y}`
    * and rotating `{s}` deterministically over the tile coordinates.
    */
