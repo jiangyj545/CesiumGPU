@@ -20,12 +20,13 @@ describe('Globe polar fill winding', () => {
   const build = (west: number, east: number, isNorth: boolean) => {
     const globe = new Globe({ device: {} } as never);
     const g = globe as unknown as {
-      _buildPolarFillGeometry(w: number, e: number, n: boolean): {
+      _buildPolarFillGeometry(w: number, e: number, n: boolean, edgeLat: number): {
         vertices: Float32Array;
         indices: Uint32Array;
       };
     };
-    return g._buildPolarFillGeometry(west, east, isNorth);
+    const MERC_EDGE = Math.atan(Math.sinh(Math.PI));
+    return g._buildPolarFillGeometry(west, east, isNorth, isNorth ? MERC_EDGE : -MERC_EDGE);
   };
 
   /** 所有非退化三角形面法向必须与顶点椭球外法向同向（朝外=可正面渲染）。 */

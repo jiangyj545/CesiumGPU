@@ -53,6 +53,28 @@ export interface CreateRegionOptions {
    * false (linear).
    */
   mercatorV?: boolean;
+  /**
+   * Per-row v floor (texture-space, absolute — NOT relative to uvRect).
+   * Rows whose sampled v would fall below this value sample this value
+   * instead: geometry poleward of the clamp latitude shows the clamp
+   * latitude's imagery row (e.g. Arctic pack ice) rather than the black
+   * filler rows Web-Mercator sources place there. Rows equatorward of the
+   * clamp keep their original mapping (no content shift). Applied after
+   * the mercatorV/linear mapping. Default: undefined (no clamp).
+   */
+  sampleClampVNorth?: number;
+  /** South-pole counterpart: per-row v ceiling (v grows southward). */
+  sampleClampVSouth?: number;
+  /**
+   * Latitude (radians) whose Mercator-y anchors v=0 of the mapping domain.
+   * Default: `north` (the geometry's own northern edge). Set when the
+   * geometry's north edge is CLAMPED south of the tile's real north edge
+   * (polar fill boundary): rows then sample their own latitude's texel
+   * (v is the texture-absolute Mercator position), so the surviving
+   * equatorward rows keep their correct content instead of being
+   * renormalised across the shortened rectangle.
+   */
+  uvNorthLat?: number;
 }
 
 /**
@@ -213,6 +235,8 @@ export class EllipsoidGeometry {
     const uvRect  = options.uvRect ?? { u0: 0, v0: 0, u1: 1, v1: 1 };
     const scale   = options.radiusScale ?? 1.0;
     const edgeLift = options.edgeLift;
+    const sampleClampVNorth = options.sampleClampVNorth;
+    const sampleClampVSouth = options.sampleClampVSouth;
     const ratio   = WGS84_POLAR_RATIO;
     const ratioSq = ratio * ratio;
 
@@ -228,7 +252,10 @@ export class EllipsoidGeometry {
     const MERC_EDGE  = Math.atan(Math.sinh(Math.PI));
     const mercY = (lat: number): number =>
       Math.asinh(Math.tan(Math.min(MERC_EDGE, Math.max(-MERC_EDGE, lat))));
-    const mercNorthY = mercY(north);
+    // v=0 anchor: the geometry's north edge by default, or the (larger)
+    // uvNorthLat when the north edge is clamped (polar fill boundary) —
+    // rows then keep their texture-absolute Mercator v.
+    const mercNorthY = mercY(options.uvNorthLat ?? north);
     const mercSouthY = mercY(south);
 
     const stacks = partitions; // rows: north → south
@@ -266,6 +293,15 @@ export class EllipsoidGeometry {
         v = uvRect.v0 + (uvRect.v1 - uvRect.v0) * tn;
       } else {
         v = uvRect.v0 + (uvRect.v1 - uvRect.v0) * t;
+      }
+      // Polar sample clamp (per-ROW, not endpoint-linear): rows poleward of
+      // the clamp latitude sample the clamp row; rows equatorward keep their
+      // own mapping. An endpoint-only remap would shift content at every
+      // latitude between the clamp and the tile's far edge.
+      if (sampleClampVNorth !== undefined && v < sampleClampVNorth) {
+        v = sampleClampVNorth;
+      } else if (sampleClampVSouth !== undefined && v > sampleClampVSouth) {
+        v = sampleClampVSouth;
       }
       const cosLat = Math.cos(lat);
       const sinLat = Math.sin(lat);

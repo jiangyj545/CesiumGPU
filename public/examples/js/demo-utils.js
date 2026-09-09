@@ -61,6 +61,9 @@
       subdomains: ['1', '2', '3', '4'],
       maximumLevel: 18,
       tileSize: 256,
+      // 80.7°N 以北是 (7,6,40) 黑填充（L2 顶行 43~104 行，L3 部分整张黑）——
+      // 顶行从 78°N 行开始采样（北冰洋浮冰），黑带不再进入画面。
+      polarSampleClampNorth: 78,
     },
     // 高德矢量地图
     'gaode-vec': {
@@ -68,6 +71,7 @@
       subdomains: ['1', '2', '3', '4'],
       maximumLevel: 18,
       tileSize: 256,
+      polarSampleClampNorth: 78,
     },
     // OpenStreetMap
     osm: {

@@ -80,6 +80,13 @@ export class Globe {
   private _iceTexture: GPUTexture | null = null;
   /** ROOT column count the current fill segments were built for. */
   private _polarFillColumns = -1;
+
+  /**
+   * Active provider's polar sample-clamp latitude in radians
+   * (Infinity = no clamp). See {@link ImageryProvider.polarSampleClampNorth}
+   * and {@link Globe._applyPolarClamp}.
+   */
+  private _polarClampNorth = Number.POSITIVE_INFINITY;
   /** CPU geometry cache keyed by `"<tileKey>#<ancestorLevels>"`. */
   private _geometryCache = new Map<string, CachedTileGeometry>();
   /**
@@ -388,6 +395,7 @@ export class Globe {
       this._clearTilePrimitives();
     } else {
       layer.update(this._context.device, camera, this._context.drawingBufferHeight);
+      this._applyPolarClamp(layer);
       this._syncTilePrimitives(layer);
       this._syncPolarFills(layer);
     }
@@ -466,6 +474,22 @@ export class Globe {
     return out;
   }
 
+  /**
+   * Track the active layer's polar sample-clamp latitude
+   * ({@link ImageryProvider.polarSampleClampNorth}). The clamp is baked
+   * into pole-row vertex UVs and into which texture those rows render from,
+   * so a change (switching layers whose providers declare different polar
+   * coverage) must drop the geometry cache and rebuild every tile primitive.
+   */
+  private _applyPolarClamp(layer: ImageryLayer): void {
+    const degrees = layer.provider.polarSampleClampNorth;
+    const north = degrees !== undefined ? degrees * Math.PI / 180 : Number.POSITIVE_INFINITY;
+    if (north === this._polarClampNorth) return;
+    this._polarClampNorth = north;
+    this._geometryCache.clear();
+    this._clearTilePrimitives();
+  }
+
   /** Reconcile tile primitives with the layer's selected set. */
   private _syncTilePrimitives(layer: ImageryLayer): void {
     const selected = layer.selectedTiles;
@@ -482,7 +506,29 @@ export class Globe {
 
     // Create / retexture primitives for selected tiles.
     for (const tile of selected) {
-      const resolved = layer.resolveTexture(tile);
+      let resolved = layer.resolveTexture(tile);
+      // Polar sample clamp: pole rows render from the ROOT texture — refined
+      // pole-row tiles' own textures lie (mostly) poleward of the clamp
+      // latitude, i.e. in black-filler territory (some providers' L3 pole
+      // rows are entirely black), while the ROOT pole row spans well past
+      // the clamp latitude and carries real content (Arctic pack ice) there.
+      if (
+        resolved !== null &&
+        Number.isFinite(this._polarClampNorth) &&
+        tile.y === 0 &&
+        tile.level > ImageryLayer.ROOT_LEVEL
+      ) {
+        const d = tile.level - ImageryLayer.ROOT_LEVEL;
+        const root = layer.resolveTexture(
+          new TileKey(ImageryLayer.ROOT_LEVEL, tile.x >> d, 0)
+        );
+        if (root !== null) {
+          resolved = {
+            texture:        root.texture,
+            ancestorLevels: root.ancestorLevels + d,
+          };
+        }
+      }
       if (resolved === null) {
         // Nothing loaded (e.g. the tile's texture was just evicted and no
         // ancestor is resident): drop any stale primitive so it cannot keep
@@ -539,10 +585,19 @@ export class Globe {
     for (const which of ['north', 'south'] as const) {
       const isNorth = which === 'north';
       const entries: TilePrimitiveEntry[] = [];
+      // North edge follows the provider's polar clamp when declared (the
+      // fill extends down to meet the clamped pole-row tiles, hiding the
+      // dark filler rows of sources like Tianditu/Gaode); the south edge
+      // stays at the Mercator boundary (Antarctic imagery is real content).
+      const northEdge = Number.isFinite(this._polarClampNorth)
+        ? this._polarClampNorth
+        : MERCATOR_EDGE;
       for (let x = 0; x < n; x++) {
         const west = -Math.PI + (x / n) * 2 * Math.PI;
         const east = -Math.PI + ((x + 1) / n) * 2 * Math.PI;
-        const geometry = this._buildPolarFillGeometry(west, east, isNorth);
+        const geometry = this._buildPolarFillGeometry(
+          west, east, isNorth, isNorth ? northEdge : -MERCATOR_EDGE
+        );
         const primitive = new Primitive(this._context, {
           vertices:    geometry.vertices,
           indices:     geometry.indices,
@@ -568,12 +623,13 @@ export class Globe {
   private _buildPolarFillGeometry(
     west: number,
     east: number,
-    isNorth: boolean
+    isNorth: boolean,
+    edgeLat: number
   ): { vertices: Float32Array; indices: Uint32Array } {
     const stacks = POLAR_FILL_STACKS;
     const slices = POLAR_FILL_SLICES;
     const pole   = isNorth ? Math.PI / 2 : -Math.PI / 2;
-    const edge   = isNorth ? MERCATOR_EDGE : -MERCATOR_EDGE;
+    const edge   = edgeLat; // boundary latitude (85.0511°, or the provider's clamp)
     // Skirt latitude: one step further past the boundary (toward the equator).
     const skirtLat = edge + (edge - pole) / stacks * 0.5;
 
@@ -754,16 +810,28 @@ export class Globe {
       uvRect = { u0, v0, u1: u0 + inv, v1: v0 + inv };
     }
 
+    // Polar fill boundary clamp: when the provider declares its imagery
+    // dead poleward of a latitude (black filler — see ImageryProvider.
+    // polarSampleClampNorth), the pole-row geometry is CUT at that latitude
+    // (the ice-white polar fill takes over from there to the pole) and the
+    // surviving rows keep their texture-absolute Mercator v via uvNorthLat.
+    let north = rect.north;
+    let uvNorthLat: number | undefined;
+    if (Number.isFinite(this._polarClampNorth) && rect.north > this._polarClampNorth) {
+      north = this._polarClampNorth;
+      uvNorthLat = rect.north;
+    }
+
     const geometry = EllipsoidGeometry.createRegion(
       rect.west,
       rect.south,
       rect.east,
-      rect.north,
+      north,
       TILE_PARTITIONS,
       // Mercator tiles distribute pixel rows in Mercator-y; a linear v
       // offsets every row's content northward (≈7.7° mid-latitude) —
       // the "map squeezed into the Arctic" defect.
-      { uvRect, radiusScale: tileRadiusScale(tile.level), edgeLift, mercatorV: true }
+      { uvRect, radiusScale: tileRadiusScale(tile.level), edgeLift, mercatorV: true, uvNorthLat }
     );
 
     if (this._geometryCache.size >= TILE_GEOMETRY_CACHE_CAPACITY) {
