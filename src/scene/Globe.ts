@@ -623,12 +623,26 @@ export class Globe {
         const b = a + stride;
         const c = b + 1;
         const d = a + 1;
-        indices[idx++] = a;
-        indices[idx++] = b;
-        indices[idx++] = d;
-        indices[idx++] = b;
-        indices[idx++] = c;
-        indices[idx++] = d;
+        // Rows run pole → 85.05°: in the north that matches createRegion's
+        // north → south row order (front faces outward), but in the south it
+        // is reversed — the same index pattern would face inward there and be
+        // backface-culled entirely (south cap rendered as a hole). Flip the
+        // winding for the south cap so both caps face outward.
+        if (isNorth) {
+          indices[idx++] = a;
+          indices[idx++] = b;
+          indices[idx++] = d;
+          indices[idx++] = b;
+          indices[idx++] = c;
+          indices[idx++] = d;
+        } else {
+          indices[idx++] = a;
+          indices[idx++] = d;
+          indices[idx++] = b;
+          indices[idx++] = b;
+          indices[idx++] = d;
+          indices[idx++] = c;
+        }
       }
     }
     return { vertices, indices };
