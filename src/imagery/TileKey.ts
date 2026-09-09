@@ -84,20 +84,17 @@ export class TileKey {
   /**
    * Web Mercator tile bounds in radians. Exact in longitude; in latitude the
    * rectangle is bounded by the Mercator edge latitudes of rows y and y+1.
-   *
-   * CesiumJS `WebMercatorTilingScheme` semantics: the top row of every level
-   * stretches to the north pole and the bottom row to the south pole
-   * (±85.0511° → ±90°). The row's edge imagery smears over the polar cap and
-   * the surface stays one continuous mesh — no separate cap geometry hovering
-   * above the tiles, hence no cap/tile z-fight at the 85.05° circle.
+   * (CesiumJS `WebMercatorTilingScheme` also stops at ±85.0511° — the polar
+   * caps are NOT tile geometry; see Globe._syncPolarFills for the flat-fill
+   * patches that cover ±85.0511°…90°.)
    */
   rectangle(): TileRectangle {
     const n = TileKey.tilesAtLevel(this.level);
     return {
       west:  (this.x / n) * 2.0 * Math.PI - Math.PI,
       east:  ((this.x + 1) / n) * 2.0 * Math.PI - Math.PI,
-      north: this.y === 0 ? Math.PI / 2 : TileKey.tileYToLatitude(this.y, this.level),
-      south: this.y === n - 1 ? -Math.PI / 2 : TileKey.tileYToLatitude(this.y + 1, this.level),
+      north: TileKey.tileYToLatitude(this.y, this.level),
+      south: TileKey.tileYToLatitude(this.y + 1, this.level),
     };
   }
 

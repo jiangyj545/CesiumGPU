@@ -62,6 +62,24 @@ export class Globe {
   private _tileSampler: GPUSampler | null = null;
   /** Live tile primitives, keyed by tile key. */
   private _tilePrimitives = new Map<string, TilePrimitiveEntry>();
+  /**
+   * Polar fill patches (north + south): Web Mercator imagery has no coverage
+   * poleward of ±85.0511°, and pole-row tiles from common providers carry
+   * near-black filler pixels in their top rows — smearing them poleward
+   * paints the caps black with a hard dark circle at 85.05°. CesiumJS fills
+   * imagery-less regions with a flat colour; each pole gets one flat
+   * ice-white segment per ROOT column, edge-shared with the pole row tiles
+   * (same radius) plus a short skirt tucked underneath (see
+   * {@link Globe._syncPolarFills}).
+   */
+  private _polarFills: { north: TilePrimitiveEntry[] | null; south: TilePrimitiveEntry[] | null } = {
+    north: null,
+    south: null,
+  };
+  /** Flat 1×1 ice-white texture shared by all polar fill segments. */
+  private _iceTexture: GPUTexture | null = null;
+  /** ROOT column count the current fill segments were built for. */
+  private _polarFillColumns = -1;
   /** CPU geometry cache keyed by `"<tileKey>#<ancestorLevels>"`. */
   private _geometryCache = new Map<string, CachedTileGeometry>();
   /**
@@ -371,6 +389,7 @@ export class Globe {
     } else {
       layer.update(this._context.device, camera, this._context.drawingBufferHeight);
       this._syncTilePrimitives(layer);
+      this._syncPolarFills(layer);
     }
 
     // Hidden layers still tick `update` — ImageryLayer uses the hidden branch
@@ -405,6 +424,13 @@ export class Globe {
     for (const entry of this._tilePrimitives.values()) {
       entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
+    // Polar fills ride along with the flat imagery path (terrain replaces the
+    // whole flat tile set including fills — see the early return above).
+    for (const which of ['north', 'south'] as const) {
+      const entries = this._polarFills[which];
+      if (entries === null) continue;
+      for (const entry of entries) entry.primitive.drawOpaque(pass, cameraBindGroup);
+    }
   }
 
   /** Number of live tile primitives (for spike HUDs). */
@@ -419,10 +445,10 @@ export class Globe {
    *
    * MUST stay same-source with {@link Globe.drawTiles}: while terrain
    * primitives exist, drawTiles draws ONLY the terrain set (flat imagery
-   * tiles are skipped by its early return), so the pick pass must paint
-   * the terrain geometry too — otherwise picking rasterises the flat imagery
-   * tiles while the G-Buffer holds displaced terrain meshes, and every pick
-   * lands systematically offset.
+   * tiles and polar fills are skipped by its early return), so the pick pass
+   * must paint the terrain geometry too — otherwise picking rasterises the
+   * flat imagery tiles while the G-Buffer holds displaced terrain meshes,
+   * and every pick lands systematically offset.
    */
   get tilePrimitives(): Primitive[] {
     if (this._terrainPrimitives.size > 0) {
@@ -432,6 +458,11 @@ export class Globe {
     }
     const out: Primitive[] = [];
     for (const entry of this._tilePrimitives.values()) out.push(entry.primitive);
+    for (const which of ['north', 'south'] as const) {
+      const entries = this._polarFills[which];
+      if (entries === null) continue;
+      for (const entry of entries) out.push(entry.primitive);
+    }
     return out;
   }
 
@@ -477,6 +508,161 @@ export class Globe {
         this._tilePrimitives.set(tile.key, entry);
       }
     }
+  }
+
+  /**
+   * Keep the two polar fill patches in step with the active layer (CesiumJS
+   * imagery-gap semantics — regions without imagery coverage render a flat
+   * fill colour instead of smeared edge pixels).
+   *
+   * Pole-row tiles from common providers (Tianditu, Gaode) carry near-black
+   * filler rows at their top edge; the historical pole-stretch approach
+   * smeared those rows over the caps, painting them black with a hard dark
+   * circle at 85.05°. Each pole is instead covered by `n` flat ice-white
+   * segments — one per ROOT column — whose edge row sits exactly ON the
+   * 85.0511° latitude circle at the same radius as the bordering pole-row
+   * tiles (edge-shared, no lift → no depth conflict), plus one skirt row
+   * slightly below the surface that hides any T-junction slivers where a
+   * refined tile's denser boundary vertices meet the segment edge.
+   *
+   * The fills are texture-independent (flat colour), so unlike the retired
+   * cap patches they exist from the first frame — no load-order seams.
+   */
+  private _syncPolarFills(layer: ImageryLayer): void {
+    const rootLevel = Math.min(ImageryLayer.ROOT_LEVEL, layer.provider.maximumLevel);
+    const n = 2 ** rootLevel;
+    if (n === this._polarFillColumns && this._polarFills.north !== null) return;
+    this._clearPolarFills();
+    this._polarFillColumns = n;
+
+    const ice = this._getIceTexture();
+    for (const which of ['north', 'south'] as const) {
+      const isNorth = which === 'north';
+      const entries: TilePrimitiveEntry[] = [];
+      for (let x = 0; x < n; x++) {
+        const west = -Math.PI + (x / n) * 2 * Math.PI;
+        const east = -Math.PI + ((x + 1) / n) * 2 * Math.PI;
+        const geometry = this._buildPolarFillGeometry(west, east, isNorth);
+        const primitive = new Primitive(this._context, {
+          vertices:    geometry.vertices,
+          indices:     geometry.indices,
+          translucent: false,
+        });
+        Matrix4.identity(primitive.modelMatrix);
+        primitive.setTexture(ice, this._getTileSampler());
+        primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
+        entries.push({ primitive, texture: ice });
+      }
+      this._polarFills[which] = entries;
+    }
+  }
+
+  /**
+   * Flat grid over one ROOT-column slice of a polar cap (85.0511° → pole),
+   * same vertex layout as {@link EllipsoidGeometry.createRegion} ([pos(3),
+   * normal(3), uv(2)], x on the unit sphere with y/z squashed by the WGS84
+   * polar ratio). Rows run pole → 85.0511° at r = 1 (edge-shared with the
+   * pole-row tiles), then one skirt row past the boundary at r slightly
+   * below 1 (hidden under the neighbouring tiles, closes T-junction gaps).
+   */
+  private _buildPolarFillGeometry(
+    west: number,
+    east: number,
+    isNorth: boolean
+  ): { vertices: Float32Array; indices: Uint32Array } {
+    const stacks = POLAR_FILL_STACKS;
+    const slices = POLAR_FILL_SLICES;
+    const pole   = isNorth ? Math.PI / 2 : -Math.PI / 2;
+    const edge   = isNorth ? MERCATOR_EDGE : -MERCATOR_EDGE;
+    // Skirt latitude: one step further past the boundary (toward the equator).
+    const skirtLat = edge + (edge - pole) / stacks * 0.5;
+
+    const rows = stacks + 2; // main surface rows (stacks+1) + skirt row
+    const vertexCount = rows * (slices + 1);
+    const vertices = new Float32Array(vertexCount * 8);
+    const ratio = WGS84_POLAR_RATIO;
+    const ratioSq = ratio * ratio;
+
+    let vi = 0;
+    for (let stack = 0; stack <= stacks + 1; stack++) {
+      const isSkirt = stack === stacks + 1;
+      const lat = isSkirt
+        ? skirtLat
+        : pole + (edge - pole) * (stack / stacks);
+      const r = isSkirt ? POLAR_FILL_SKIRT_RADIUS : 1.0;
+      const cosLat = Math.cos(lat);
+      const sinLat = Math.sin(lat);
+      for (let slice = 0; slice <= slices; slice++) {
+        const lon = west + (east - west) * (slice / slices);
+        const nx = cosLat * Math.cos(lon);
+        const ny = cosLat * Math.sin(lon);
+        const nz = sinLat;
+
+        vertices[vi++] = r * nx;
+        vertices[vi++] = r * ny * ratio;
+        vertices[vi++] = r * nz * ratio;
+
+        const ny2 = ny / ratioSq;
+        const nz2 = nz / ratioSq;
+        const nLen = Math.sqrt(nx * nx + ny2 * ny2 + nz2 * nz2);
+        vertices[vi++] = nx / nLen;
+        vertices[vi++] = ny2 / nLen;
+        vertices[vi++] = nz2 / nLen;
+
+        vertices[vi++] = 0; // uv unused (flat 1×1 texture)
+        vertices[vi++] = 0;
+      }
+    }
+
+    const indices = new Uint32Array((stacks + 1) * slices * 6);
+    let idx = 0;
+    const stride = slices + 1;
+    for (let stack = 0; stack <= stacks; stack++) {
+      for (let slice = 0; slice < slices; slice++) {
+        const a = stack * stride + slice;
+        const b = a + stride;
+        const c = b + 1;
+        const d = a + 1;
+        indices[idx++] = a;
+        indices[idx++] = b;
+        indices[idx++] = d;
+        indices[idx++] = b;
+        indices[idx++] = c;
+        indices[idx++] = d;
+      }
+    }
+    return { vertices, indices };
+  }
+
+  /** Lazily created shared 1×1 ice-white texture (polar fill colour). */
+  private _getIceTexture(): GPUTexture {
+    if (this._iceTexture !== null) return this._iceTexture;
+    const texture = this._context.device.createTexture({
+      label: 'Globe.PolarIceFill',
+      size:  { width: 1, height: 1 },
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    // Ice white (matches the retired procedural base-globe polar ice tone).
+    this._context.device.queue.writeTexture(
+      { texture },
+      new Uint8Array([238, 243, 248, 255]),
+      {},
+      { width: 1, height: 1 },
+    );
+    this._iceTexture = texture;
+    return texture;
+  }
+
+  /** Destroy both polar fill patches (the shared ice texture stays). */
+  private _clearPolarFills(): void {
+    for (const which of ['north', 'south'] as const) {
+      const entries = this._polarFills[which];
+      if (entries === null) continue;
+      for (const entry of entries) this._destroyTilePrimitive(entry);
+      this._polarFills[which] = null;
+    }
+    this._polarFillColumns = -1;
   }
 
   /** Build one per-tile primitive (region geometry + tile texture). */
@@ -835,13 +1021,17 @@ export class Globe {
     this._detachTexture = null;
   }
 
-  /** Destroy all tile primitives (no layer active). */
+  /** Destroy all tile primitives including the polar fills (no layer active). */
   private _clearTilePrimitives(): void {
-    if (this._tilePrimitives.size === 0) return;
+    if (this._tilePrimitives.size === 0) {
+      this._clearPolarFills();
+      return;
+    }
     for (const entry of this._tilePrimitives.values()) {
       this._destroyTilePrimitive(entry);
     }
     this._tilePrimitives.clear();
+    this._clearPolarFills();
   }
 
   destroy(): void {
@@ -857,6 +1047,8 @@ export class Globe {
     this._geometryCache.clear();
     this._detachTexture?.destroy();
     this._detachTexture = null;
+    this._iceTexture?.destroy();
+    this._iceTexture = null;
     this.layers.destroy();
     this._primitive?.destroy();
     this._imageryTexture?.destroy();
@@ -900,6 +1092,20 @@ function tileRadiusScale(_level: number): number {
 
 /** WGS84 polar / equatorial ratio (matches EllipsoidGeometry normalisation). */
 const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
+
+/** Web Mercator domain edge: ±atan(sinh π) ≈ ±85.0511° (CesiumJS semantics). */
+const MERCATOR_EDGE = Math.atan(Math.sinh(Math.PI));
+
+/** Latitude × longitude subdivisions of one polar fill segment. */
+const POLAR_FILL_STACKS = 8;
+const POLAR_FILL_SLICES = 8;
+
+/**
+ * Skirt radius for the polar fill boundary row — a hair below the surface
+ * (≈0.05% ≈ 3.2 km) so the row is depth-occluded by the bordering pole-row
+ * tiles and only becomes visible through T-junction slivers it must fill.
+ */
+const POLAR_FILL_SKIRT_RADIUS = 0.9995;
 
 /** Max cached tile geometries (CPU arrays only; ~4 KB each at 8×8). */
 const TILE_GEOMETRY_CACHE_CAPACITY = 1024;

@@ -6,9 +6,10 @@ import type { Primitive } from '../../src/scene/Primitive';
  * Globe.tilePrimitives getter 必须与 drawTiles 的绘制集合同源：
  *
  * 背景 bug：`_terrainPrimitives.size > 0` 时 drawTiles 只画地形 primitive 并
- * 提前 return（影像瓦片不画），但 getter 只返回 `_tilePrimitives`、不含地形。
- * PickPass 用该 getter 做 GPU 拾取重绘 → 地形激活时 G-Buffer 渲染的是地形
- * 网格，拾取 pass 画的却是平面影像瓦片，拾取命中位置系统性偏差。
+ * 提前 return（影像瓦片 + 极冠填充都不画），但 getter 只返回 `_tilePrimitives`、
+ * 不含地形与极冠。PickPass 用该 getter 做 GPU 拾取重绘 → 地形激活时
+ * G-Buffer 渲染的是地形网格，拾取 pass 画的却是平面影像瓦片，拾取命中
+ * 位置系统性偏差。
  *
  * node 环境无 WebGPU：mock Primitive 最小表面（只暴露 drawOpaque），
  * mock pass encoder 记录每个 primitive 的 draw 调用，验证纯集合逻辑。
@@ -36,13 +37,26 @@ function makePassRecorder() {
 }
 
 /** 注入 mock 条目到 private Map（仓库先例：globeLighting.spec.ts 同手法）。 */
-function inject(globe: Globe, parts: { imagery?: string[]; terrain?: string[] }) {
+function inject(
+  globe: Globe,
+  parts: {
+    imagery?: string[];
+    terrain?: string[];
+    fills?: { north?: string; south?: string };
+  }
+) {
   const g = globe as unknown as Record<string, any>;
   for (const label of parts.imagery ?? []) {
     g._tilePrimitives.set(label, { primitive: mockPrimitive(label), texture: {} });
   }
   for (const label of parts.terrain ?? []) {
     g._terrainPrimitives.set(label, { primitive: mockPrimitive(label), texture: {} });
+  }
+  if (parts.fills?.north) {
+    g._polarFills.north = [{ primitive: mockPrimitive(parts.fills.north), texture: {} }];
+  }
+  if (parts.fills?.south) {
+    g._polarFills.south = [{ primitive: mockPrimitive(parts.fills.south), texture: {} }];
   }
 }
 
@@ -52,41 +66,49 @@ function labelsOf(primitives: Primitive[]): string[] {
 }
 
 describe('Globe.tilePrimitives 与 drawTiles 绘制集合同源', () => {
-  it('地形 Map 空 + 影像 Map 有条目 → getter 返回影像条目', () => {
+  it('地形 Map 空 + 影像 Map 有条目 → getter 返回影像 + 极冠填充', () => {
     // 字段初始化不触 GPU，context 传最小替身即可
     const globe = new Globe({ device: {} } as never);
-    inject(globe, { imagery: ['1/0/0', '1/1/0'] });
+    inject(globe, { imagery: ['1/0/0', '1/1/0'], fills: { north: 'fill-n', south: 'fill-s' } });
 
-    expect(labelsOf(globe.tilePrimitives)).toEqual(['1/0/0', '1/1/0']);
+    expect(labelsOf(globe.tilePrimitives)).toEqual(['1/0/0', '1/1/0', 'fill-n', 'fill-s']);
   });
 
-  it('地形 Map 有条目 → getter 只返回地形条目（不含影像）', () => {
+  it('地形 Map 有条目 → getter 只返回地形条目（不含影像与极冠填充）', () => {
     const globe = new Globe({ device: {} } as never);
-    inject(globe, { imagery: ['1/0/0'], terrain: ['3/4/2', '3/5/2'] });
+    inject(globe, {
+      imagery: ['1/0/0'],
+      terrain: ['3/4/2', '3/5/2'],
+      fills: { north: 'fill-n', south: 'fill-s' },
+    });
 
     expect(labelsOf(globe.tilePrimitives)).toEqual(['3/4/2', '3/5/2']);
   });
 
   it('drawTiles 的绘制集合与 getter 集合一致（地形激活）', () => {
     const globe = new Globe({ device: {} } as never);
-    inject(globe, { imagery: ['1/0/0'], terrain: ['3/4/2'] });
+    inject(globe, {
+      imagery: ['1/0/0'],
+      terrain: ['3/4/2'],
+      fills: { north: 'fill-n' },
+    });
 
     const { drawn, pass } = makePassRecorder();
     globe.drawTiles(pass, {} as GPUBindGroup);
 
-    // 互斥分支：只画地形，影像瓦片不画（与 getter 同源）
+    // 互斥分支：只画地形，影像瓦片与极冠填充都不画（与 getter 同源）
     expect(drawn).toEqual(['3/4/2']);
     expect(drawn).toEqual(labelsOf(globe.tilePrimitives));
   });
 
   it('drawTiles 的绘制集合与 getter 集合一致（地形为空）', () => {
     const globe = new Globe({ device: {} } as never);
-    inject(globe, { imagery: ['1/0/0', '2/1/1'] });
+    inject(globe, { imagery: ['1/0/0', '2/1/1'], fills: { north: 'fill-n', south: 'fill-s' } });
 
     const { drawn, pass } = makePassRecorder();
     globe.drawTiles(pass, {} as GPUBindGroup);
 
-    expect(drawn).toEqual(['1/0/0', '2/1/1']);
+    expect(drawn).toEqual(['1/0/0', '2/1/1', 'fill-n', 'fill-s']);
     expect(drawn).toEqual(labelsOf(globe.tilePrimitives));
   });
 });

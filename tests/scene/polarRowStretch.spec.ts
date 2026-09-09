@@ -2,21 +2,25 @@ import { describe, expect, it } from 'vitest';
 import { EllipsoidGeometry } from '../../src/scene/EllipsoidGeometry';
 import { TileKey } from '../../src/imagery/TileKey';
 
+const MERC_EDGE = Math.atan(Math.sinh(Math.PI)); // ±85.0511°
+
 /**
- * 极行拉伸（CesiumJS WebMercatorTilingScheme 语义）取代独立极冠贴片：
- * 每级顶行矩形北缘拉伸到 +90°、底行南缘拉伸到 -90°，极区表面与相邻行
- * 是同一连续网格——不存在悬浮的 cap mesh，85.05° 纬圈处的 cap/tile
- * z-fighting 黑圈在结构上不可能出现。此处锁定该行为。
+ * 极区架构（CesiumJS 语义对齐）：
+ * 1. Web Mercator 瓦片矩形止步于 ±85.0511°（CesiumJS WebMercatorTilingScheme
+ *    同款——tileXYToNativeRectangle 无极行特判，北极不在瓦片网格内）；
+ * 2. 极冠由 Globe._syncPolarFills 的平面冰白填充段覆盖（CesiumJS 对无影像
+ *    区域的 fill 语义）——顶行瓦片顶部黑边不再被 smear 成黑色极冠 + 85.05°
+ *    黑圈；
+ * 3. mercatorV 采样对越界纬度钳制进 Mercator 域，不产生 NaN。
  */
-describe('polar row stretch (CesiumJS semantics)', () => {
-  it('顶/底行 rectangle 拉伸到极点，中间行保持 Mercator 边界', () => {
+describe('polar region: mercator bounds + mercatorV domain clamp', () => {
+  it('顶/底行 rectangle 止步于 Mercator 边界（极区不属于瓦片网格）', () => {
     const top = new TileKey(2, 5, 0).rectangle();
-    expect(top.north).toBeCloseTo(Math.PI / 2, 10);
-    // 南缘仍是该行 Mercator 边界（L2 第 0 行 = atan(sinh(π/2)) ≈ 66.51°）
+    expect(top.north).toBeCloseTo(MERC_EDGE, 10);
     expect(top.south).toBeCloseTo(Math.atan(Math.sinh(Math.PI / 2)), 10);
 
     const bottom = new TileKey(2, 5, 3).rectangle();
-    expect(bottom.south).toBeCloseTo(-Math.PI / 2, 10);
+    expect(bottom.south).toBeCloseTo(-MERC_EDGE, 10);
     expect(bottom.north).toBeCloseTo(-Math.atan(Math.sinh(Math.PI / 2)), 10);
 
     const mid = new TileKey(2, 5, 1).rectangle();
@@ -24,7 +28,7 @@ describe('polar row stretch (CesiumJS semantics)', () => {
     expect(mid.south).toBeCloseTo(Math.atan(Math.sinh(0)), 10); // 赤道
   });
 
-  it('极行与相邻行共享纬圈边界（无几何缝隙）', () => {
+  it('相邻行共享纬圈边界（无几何缝隙）', () => {
     const top = new TileKey(2, 0, 0).rectangle();
     const next = new TileKey(2, 0, 1).rectangle();
     expect(top.south).toBeCloseTo(next.north, 10);
@@ -34,35 +38,8 @@ describe('polar row stretch (CesiumJS semantics)', () => {
     expect(bottom.north).toBeCloseTo(above.south, 10);
   });
 
-  it('mercatorV：极点纬度钳制进 Mercator 域，v 单调且无 NaN（边缘行影像拉伸铺满极区）', () => {
-    const rect = new TileKey(2, 0, 0).rectangle();
-    const P = 8;
-    const g = EllipsoidGeometry.createRegion(
-      rect.west, rect.south, rect.east, rect.north, P, { mercatorV: true },
-    );
-
-    // 顶点布局 [pos(3), normal(3), uv(2)]，stride 8；v 在 offset 7。
-    // 每行首个顶点（slice 0）代表该 stack 的 v。
-    let prev = -Infinity;
-    for (let stack = 0; stack <= P; stack++) {
-      const v = g.vertices[stack * (P + 1) * 8 + 7];
-      expect(Number.isFinite(v)).toBe(true);
-      expect(v).toBeGreaterThanOrEqual(0.0 - 1e-9);
-      expect(v).toBeLessThanOrEqual(1.0 + 1e-9);
-      // stack 0 = 北缘（极点）：钳制到域边 → v=0（整行采样纹理最北像素）
-      if (stack === 0) expect(v).toBeCloseTo(0.0, 10);
-      // v 从北到南单调不减：85.05°→90° 段全部钳制到 v=0（CesiumJS 式
-      // 边缘行 smear，相邻 stack 允许相等），Mercator 域内严格递增（无折叠）
-      expect(v).toBeGreaterThanOrEqual(prev);
-      prev = v;
-    }
-    // 南缘（66.51°）v=1：与相邻行的 v=0 精确相接
-    const lastRow = P * (P + 1) * 8 + 7;
-    expect(g.vertices[lastRow]).toBeCloseTo(1.0, 10);
-  });
-
-  it('全拉伸行（南北缘均越过域边）退化为纯边缘采样，不产生 NaN', () => {
-    const g = EllipsoidGeometry.createRegion(-Math.PI / 2, 1.55, 0, Math.PI / 2, 4, {
+  it('mercatorV：越界纬度钳制进 Mercator 域，v 有界且无 NaN', () => {
+    const g = EllipsoidGeometry.createRegion(-Math.PI / 2, MERC_EDGE, 0, Math.PI / 2, 4, {
       mercatorV: true,
       uvRect: { u0: 0, v0: 0.25, u1: 0.5, v1: 0.5 },
     });
