@@ -103,7 +103,7 @@
         const h = sampleHeight(observer.lon, observer.lat);
         obsEntity = viewer.scene.entities.add({
           name: '观察点',
-          position: engine.Cartesian3.fromDegrees(observer.lon, observer.lat, (h + Number(eyeSlider.value)) / 6378137),
+          position: engine.Cartesian3.fromDegreesNormalized(observer.lon, observer.lat, h + Number(eyeSlider.value)),
           point: { pixelSize: 12, color: new engine.Color(1.0, 0.57, 0.2, 1.0) },
         });
       }
@@ -180,7 +180,7 @@
               total++; if (ok) { visible++; azVis++; }
               viewer.scene.entities.add({
                 name: ok ? '通视点' : '遮挡点',
-                position: engine.Cartesian3.fromDegrees(lon, lat, (tH + 5) / 6378137),
+                position: engine.Cartesian3.fromDegreesNormalized(lon, lat, tH + 5),
                 point: {
                   pixelSize: 7 + (r / RING_COUNT) * 5,
                   color: ok ? green : red,

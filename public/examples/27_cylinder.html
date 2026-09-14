@@ -112,7 +112,7 @@
       for (const m of marks) {
         entities.push(scene.entities.add(new engine.Entity({
           name: m.name,
-          position: engine.Cartesian3.fromDegrees(m.lon, m.lat, 0),
+          position: engine.Cartesian3.fromDegreesNormalized(m.lon, m.lat, 0),
           point: { pixelSize: 10, color: engine.Color.WHITE },
           label: { text: m.name, font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
         })));

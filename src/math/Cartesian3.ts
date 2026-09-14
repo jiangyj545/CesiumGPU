@@ -61,6 +61,39 @@ export class Cartesian3 {
   }
 
   /**
+   * Convert from geographic coordinates (WGS84) to the engine-internal
+   * normalized ECEF convention: equatorial radius = 1, z scaled by b/a,
+   * meters converted via division by the equatorial radius (NOT a unit
+   * normalize — mid-latitude surface points keep |v| ≈ 0.9987).
+   *
+   * This is the position convention consumed by {@link Entity.position},
+   * picking and the overlay pass; {@link fromDegrees} returns meters and
+   * must not be assigned directly.
+   *
+   * @param longitude - degrees
+   * @param latitude - degrees
+   * @param height - meters above WGS84 ellipsoid
+   */
+  static fromDegreesNormalized(
+    longitude: number,
+    latitude: number,
+    height: number = 0.0,
+    result?: Cartesian3
+  ): Cartesian3 {
+    const ecef = Cartesian3.fromRadians(
+      CesiumMath.toRadians(longitude),
+      CesiumMath.toRadians(latitude),
+      height
+    );
+    const inv = 1.0 / Cartesian3.EARTH_RADIUS;
+    if (!result) return new Cartesian3(ecef.x * inv, ecef.y * inv, ecef.z * inv);
+    result.x = ecef.x * inv;
+    result.y = ecef.y * inv;
+    result.z = ecef.z * inv;
+    return result;
+  }
+
+  /**
    * Convert from geographic coordinates (radians) to Cartesian3 ECEF (meters).
    */
   static fromRadians(

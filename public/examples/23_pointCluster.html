@@ -104,7 +104,7 @@
         if (!clustered) {
           points.forEach((p, i) => {
             const e = poolGet(i);
-            e.position = engine.Cartesian3.fromDegrees(p.lon, p.lat, 0);
+            e.position = engine.Cartesian3.fromDegreesNormalized(p.lon, p.lat, 0);
             e.point = { pixelSize: 6, color: COLOR_GREEN };
             e.label = { text: '', font: '12px sans-serif', fillColor: engine.Color.WHITE, show: false };
           });
@@ -115,7 +115,7 @@
         clusters.forEach((c, i) => {
           const e = poolGet(i);
           const size = Math.min(12 + Math.log2(c.count + 1) * 4, 42);
-          e.position = engine.Cartesian3.fromDegrees(c.lon, c.lat, 0);
+          e.position = engine.Cartesian3.fromDegreesNormalized(c.lon, c.lat, 0);
           e.point = { pixelSize: size, color: c.count < 10 ? COLOR_GREEN : (c.count < 50 ? COLOR_YELLOW : COLOR_RED) };
           e.label = { text: String(c.count), font: 'bold 14px sans-serif', fillColor: engine.Color.WHITE, show: true };
         });

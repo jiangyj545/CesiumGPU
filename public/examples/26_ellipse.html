@@ -104,7 +104,7 @@
       // 中心点
       entities.push(scene.entities.add(new engine.Entity({
         name: '中心',
-        position: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat, 0),
+        position: engine.Cartesian3.fromDegreesNormalized(CENTER.lon, CENTER.lat, 0),
         point: { pixelSize: 12, color: engine.Color.WHITE },
         label: { text: '北京', font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
       })));

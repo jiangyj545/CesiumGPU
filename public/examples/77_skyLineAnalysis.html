@@ -97,7 +97,7 @@
         const h = sampleHeight(observer.lon, observer.lat);
         observerEntity = viewer.scene.entities.add({
           name: '观察点',
-          position: engine.Cartesian3.fromDegrees(observer.lon, observer.lat, (h + Number(eyeSlider.value)) / 6378137),
+          position: engine.Cartesian3.fromDegreesNormalized(observer.lon, observer.lat, h + Number(eyeSlider.value)),
           point: { pixelSize: 10, color: new engine.Color(1.0, 0.55, 0.2, 1.0) },
         });
       }

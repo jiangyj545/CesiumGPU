@@ -127,7 +127,7 @@
           const c = queue.shift();
           const e = poolGet(idx);
           const size = Math.min(10 + Math.log2(c.count + 1) * 4, 40);
-          e.position = engine.Cartesian3.fromDegrees(c.lon, c.lat, 0);
+          e.position = engine.Cartesian3.fromDegreesNormalized(c.lon, c.lat, 0);
           e.point = { pixelSize: size, color: c.count < 10 ? COLOR_GREEN : (c.count < 50 ? COLOR_YELLOW : COLOR_RED) };
           e.label = { text: String(c.count), font: 'bold 13px sans-serif', fillColor: engine.Color.WHITE, show: true };
         }
@@ -142,8 +142,8 @@
       addBtn('粗粒度 15°（全球）', () => recluster(15));
       addBtn('中粒度 3°', () => recluster(3));
       addBtn('细粒度 0.25°（局地）', () => recluster(0.25));
-      addBtn('飞到欧洲（数据密集）', () => viewer.camera.flyTo({
-        destination: { lon: 10, lat: 50, height: 4_000_000 }, duration: 3,
+      addBtn('飞到中国（数据密集）', () => viewer.camera.flyTo({
+        destination: { lon: 108, lat: 34, height: 4_000_000 }, duration: 3,
       }));
 
       recluster(8);
@@ -163,7 +163,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [10, 45, 12_000_000],
+          view: [105, 32, 12_000_000],
           imagery: 'gaode-sat',
           title: '24 · 大数据聚合',
         }));

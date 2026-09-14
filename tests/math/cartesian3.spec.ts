@@ -39,6 +39,43 @@ describe("Cartesian3", () => {
     });
   });
 
+  describe("fromDegreesNormalized", () => {
+    it("(0,0)：赤道归一化 x = 1", () => {
+      const c = Cartesian3.fromDegreesNormalized(0, 0);
+      expect(c.x).toBeCloseTo(1.0, 12);
+      expect(c.y).toBeCloseTo(0, 12);
+      expect(c.z).toBeCloseTo(0, 12);
+    });
+
+    it("(0,90) 北极：z = b/a ≈ 0.9966472（非单位向量）", () => {
+      const c = Cartesian3.fromDegreesNormalized(0, 90);
+      expect(c.x).toBeCloseTo(0, 12);
+      expect(c.y).toBeCloseTo(0, 12);
+      expect(c.z).toBeCloseTo(6356752.3142 / 6378137.0, 12);
+    });
+
+    it("中纬度 45°：模长 ≈ 0.9987 < 1（除以 a 而非单位化）", () => {
+      const c = Cartesian3.fromDegreesNormalized(120, 45);
+      const mag = Cartesian3.magnitude(c);
+      expect(mag).toBeGreaterThan(0.998);
+      expect(mag).toBeLessThan(1.0);
+      expect(mag).toBeCloseTo(0.9987, 3);
+    });
+
+    it("height 沿径向抬升：赤道 1000m → 模长 ≈ 1 + 1000/a", () => {
+      const c = Cartesian3.fromDegreesNormalized(0, 0, 1000);
+      expect(Cartesian3.magnitude(c)).toBeCloseTo(1 + 1000 / 6378137.0, 12);
+      expect(c.x).toBeCloseTo(1 + 1000 / 6378137.0, 12);
+    });
+
+    it("result 参数复用写入", () => {
+      const out = new Cartesian3();
+      const r = Cartesian3.fromDegreesNormalized(90, 0, 0, out);
+      expect(r).toBe(out);
+      expect(r.y).toBeCloseTo(1.0, 12);
+    });
+  });
+
   describe("normalize", () => {
     it("(3,4,0) 归一化 → (0.6, 0.8, 0)", () => {
       const r = Cartesian3.normalize(new Cartesian3(3, 4, 0), new Cartesian3());

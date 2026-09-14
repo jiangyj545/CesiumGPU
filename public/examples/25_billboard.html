@@ -60,7 +60,7 @@
       for (const c of CITIES) {
         scene.entities.add(new engine.Entity({
           name: c.name,
-          position: engine.Cartesian3.fromDegrees(c.lon, c.lat, 0),
+          position: engine.Cartesian3.fromDegreesNormalized(c.lon, c.lat, 0),
           point: { pixelSize: c.size, color: c.color },
           label: { text: c.name, font: 'bold 15px sans-serif', fillColor: engine.Color.WHITE, show: true },
         }));
@@ -69,7 +69,7 @@
       // 告警点：pixelSize 呼吸脉动（广告牌动效近似）
       const alert = scene.entities.add(new engine.Entity({
         name: '告警点·长沙',
-        position: engine.Cartesian3.fromDegrees(112.939, 28.228, 0),
+        position: engine.Cartesian3.fromDegreesNormalized(112.939, 28.228, 0),
         point: { pixelSize: 24, color: new engine.Color(1, 0.15, 0.1, 0.95) },
         label: { text: '告警 · 长沙', font: 'bold 14px sans-serif', fillColor: engine.Color.YELLOW, show: true },
       }));

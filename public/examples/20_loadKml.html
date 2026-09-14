@@ -133,7 +133,7 @@
             const isEnd = /end/i.test(styleUrl);
             scene.entities.add(new engine.Entity({
               name,
-              position: engine.Cartesian3.fromDegrees(lon, lat, alt || 0),
+              position: engine.Cartesian3.fromDegreesNormalized(lon, lat, alt || 0),
               point: {
                 pixelSize: 16,
                 color: isEnd ? engine.Color.RED : engine.Color.GREEN,

@@ -256,8 +256,8 @@
         llDeg.forEach((v, i) => {
           viewer.scene.entities.add({
             name: `顶点${i + 1}`,
-            position: engine.Cartesian3.fromDegrees(v.lon, v.lat,
-              (sampleHeight(v.lon, v.lat) + 30) / 6378137),
+            position: engine.Cartesian3.fromDegreesNormalized(v.lon, v.lat,
+              sampleHeight(v.lon, v.lat) + 30),
             point: { pixelSize: 9, color: new engine.Color(1.0, 0.83, 0.47, 1.0) },
             label: { text: `P${i + 1}`, fillColor: new engine.Color(1.0, 0.9, 0.6, 1.0) },
           });

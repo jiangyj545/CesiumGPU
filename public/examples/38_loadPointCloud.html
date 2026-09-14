@@ -116,7 +116,7 @@
                       : new engine.Color(0.75, 0.75, 0.78, 1);
           const p = rel(cells[i][0], cells[i][1]);
           cloud.add({
-            position: engine.Cartesian3.fromDegrees(p.lon, p.lat, heights[i]),
+            position: engine.Cartesian3.fromDegreesNormalized(p.lon, p.lat, heights[i]),
             point: { color, pixelSize },
           });
         }

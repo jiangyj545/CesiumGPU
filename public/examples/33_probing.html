@@ -98,7 +98,7 @@
       for (const t of TARGETS) {
         scene.entities.add(new engine.Entity({
           name: t.name,
-          position: engine.Cartesian3.fromDegrees(t.lon, t.lat, 0),
+          position: engine.Cartesian3.fromDegreesNormalized(t.lon, t.lat, 0),
           point: { pixelSize: t.size, color: new engine.Color(1, 0.2, 0.15, 0.95) },
           label: { text: t.name, font: '13px sans-serif', fillColor: engine.Color.WHITE, show: true },
         }));
@@ -106,7 +106,7 @@
       // 雷达站
       scene.entities.add(new engine.Entity({
         name: '雷达站',
-        position: engine.Cartesian3.fromDegrees(RADAR.lon, RADAR.lat, 0),
+        position: engine.Cartesian3.fromDegreesNormalized(RADAR.lon, RADAR.lat, 0),
         point: { pixelSize: 16, color: new engine.Color(0.2, 1, 0.6, 1) },
         label: { text: '雷达站', font: 'bold 14px sans-serif', fillColor: engine.Color.WHITE, show: true },
       }));
