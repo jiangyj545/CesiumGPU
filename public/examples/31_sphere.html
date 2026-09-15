@@ -96,7 +96,7 @@
         const pts = [];
         for (let i = 0; i <= n; i++) {
           const k = i / n;
-          pts.push(engine.Cartesian3.fromDegrees(
+          pts.push(engine.Cartesian3.fromDegreesNormalized(
             from[0] + (to[0] - from[0]) * k,
             from[1] + (to[1] - from[1]) * k,
             Math.sin(k * Math.PI) * peakM + 100_000));

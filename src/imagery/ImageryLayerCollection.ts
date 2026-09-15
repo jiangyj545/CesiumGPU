@@ -35,12 +35,17 @@ export class ImageryLayerCollection {
     return layer;
   }
 
-  /** Remove a layer (and release its GPU textures). Returns false when absent. */
-  remove(layer: ImageryLayer): boolean {
+  /**
+   * Remove a layer from the stack. Returns false when absent.
+   * @param destroy - release the layer's GPU textures (default `true`,
+   *   CesiumJS semantics). Pass `false` when the layer will be re-added
+   *   later (e.g. stack reordering) — a destroyed layer cannot render again.
+   */
+  remove(layer: ImageryLayer, destroy = true): boolean {
     const index = this._layers.indexOf(layer);
     if (index === -1) return false;
     this._layers.splice(index, 1);
-    layer.destroy();
+    if (destroy) layer.destroy();
     return true;
   }
 

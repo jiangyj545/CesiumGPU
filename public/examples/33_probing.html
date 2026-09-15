@@ -51,10 +51,10 @@
       function sectorPositions(centerLon, centerLat, radiusM, headingDeg, sweepDeg, segs = 24) {
         const mPerDegLat = 111_320;
         const mPerDegLon = 111_320 * Math.cos((centerLat * Math.PI) / 180);
-        const positions = [engine.Cartesian3.fromDegrees(centerLon, centerLat, 0)];
+        const positions = [engine.Cartesian3.fromDegreesNormalized(centerLon, centerLat, 0)];
         for (let i = 0; i <= segs; i++) {
           const a = ((headingDeg + (sweepDeg * i) / segs - 90) * Math.PI) / 180; // 0°=正东
-          positions.push(engine.Cartesian3.fromDegrees(
+          positions.push(engine.Cartesian3.fromDegreesNormalized(
             centerLon + (Math.cos(a) * radiusM) / mPerDegLon,
             centerLat + (Math.sin(a) * radiusM) / mPerDegLat, 0));
         }

@@ -85,7 +85,7 @@
         mk('组置顶', () => group.forEach((l) => layers.raiseToTop(l)));
         mk('组内互换顺序', () => {
           // 交换组内两层的栈位置：移除后按逆序重新入栈
-          for (const l of group) layers.remove(l);
+          for (const l of group) layers.remove(l, false);
           for (const l of [...group].reverse()) {
             layers.addImageryProvider(l); // ImageryLayer 实例可直接入栈
           }

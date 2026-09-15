@@ -52,7 +52,7 @@
         [wallLon + halfW, wallLat + halfH],
         [wallLon - halfW, wallLat + halfH],
         [wallLon - halfW, wallLat - halfH], // 闭合
-      ].map(([lon, lat]) => engine.Cartesian3.fromDegrees(lon, lat, 0));
+      ].map(([lon, lat]) => engine.Cartesian3.fromDegreesNormalized(lon, lat, 0));
 
       // 原生 DynamicWall 特效（挂 scene.effects，光带上涌）
       scene.effects.add(new engine.DynamicWall(viewer.context, {
@@ -66,11 +66,11 @@
       // 内圈第二道墙（对比色 / 慢速）
       scene.effects.add(new engine.DynamicWall(viewer.context, {
         positions: [
-          engine.Cartesian3.fromDegrees(wallLon - halfW / 2, wallLat - halfH / 2, 0),
-          engine.Cartesian3.fromDegrees(wallLon + halfW / 2, wallLat - halfH / 2, 0),
-          engine.Cartesian3.fromDegrees(wallLon + halfW / 2, wallLat + halfH / 2, 0),
-          engine.Cartesian3.fromDegrees(wallLon - halfW / 2, wallLat + halfH / 2, 0),
-          engine.Cartesian3.fromDegrees(wallLon - halfW / 2, wallLat - halfH / 2, 0),
+          engine.Cartesian3.fromDegreesNormalized(wallLon - halfW / 2, wallLat - halfH / 2, 0),
+          engine.Cartesian3.fromDegreesNormalized(wallLon + halfW / 2, wallLat - halfH / 2, 0),
+          engine.Cartesian3.fromDegreesNormalized(wallLon + halfW / 2, wallLat + halfH / 2, 0),
+          engine.Cartesian3.fromDegreesNormalized(wallLon - halfW / 2, wallLat + halfH / 2, 0),
+          engine.Cartesian3.fromDegreesNormalized(wallLon - halfW / 2, wallLat - halfH / 2, 0),
         ],
         height: 2500 / engine.Camera.EARTH_SCALE,
         color: [1.0, 0.45, 0.2, 0.8],
@@ -83,7 +83,7 @@
       const corridorPath = [
         [108.75, 34.20], [108.85, 34.24], [108.94, 34.27],
         [109.05, 34.31], [109.18, 34.36],
-      ].map(([lon, lat]) => engine.Cartesian3.fromDegrees(lon, lat, 500));
+      ].map(([lon, lat]) => engine.Cartesian3.fromDegreesNormalized(lon, lat, 500));
       scene.entities.add(new engine.Entity({
         name: '高速走廊（宽 polyline 近似 corridor）',
         polyline: {

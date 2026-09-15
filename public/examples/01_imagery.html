@@ -25,7 +25,7 @@
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
     <h1>01 影像图层切换与叠放</h1>
-    <p class="desc">XyzImageryProvider 加载多底图：高德卫星 / 高德矢量 / OSM / 天地图卫星。
+    <p class="desc">XyzImageryProvider 加载多底图：高德卫星 / 高德矢量 / OSM / 天地图卫星。<br/>注：OSM 官方瓦片 (*.tile.openstreetmap.org) 在大陆网络普遍超时不可达，切到 OSM 层出现破洞属网络环境问题（其余三源不受影响）。
       切换显隐、调整透明度、raiseToTop 改变叠放顺序。</p>
     <div id="controls"></div>
     <div class="row">透明度<input id="alpha" type="range" min="0" max="1" step="0.05" value="1" /><span id="alphaVal">100%</span></div>

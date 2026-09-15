@@ -96,8 +96,8 @@
         return div;
       }
       const pins = [
-        { div: makePin('北京 · 图钉'), world: engine.Cartesian3.fromDegrees(116.407, 39.904, 0) },
-        { div: makePin('上海 · 图钉'), world: engine.Cartesian3.fromDegrees(121.474, 31.230, 0) },
+        { div: makePin('北京 · 图钉'), world: engine.Cartesian3.fromDegreesNormalized(116.407, 39.904, 0) },
+        { div: makePin('上海 · 图钉'), world: engine.Cartesian3.fromDegreesNormalized(121.474, 31.230, 0) },
       ];
       function updatePins() {
         const vp = scene.camera.viewProjectionMatrix.values; // column-major

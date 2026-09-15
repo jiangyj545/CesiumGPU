@@ -74,6 +74,41 @@ function toPositions(coordinates: unknown): Cartesian3[] {
   return coordinates.map((c) => toNormalizedPosition(toPosition(c)));
 }
 
+/**
+ * Max polygon ring edge length (degrees, ~200 km) before linear subdivision.
+ * Simplified boundaries (e.g. a whole-country outline) carry 1000 km+ edges;
+ * the chord of such an edge sags ~19 km below the imagery surface and the
+ * mid-face gets depth-occluded by tiles (polygon renders as a broken ring
+ * with only its edges visible). Subdividing keeps triangulated faces on or
+ * above the surface so the fill renders fully.
+ */
+const MAX_RING_EDGE_DEG = 2.0;
+
+function densifyRing(ring: unknown[]): unknown[] {
+  if (!Array.isArray(ring) || ring.length < 2) return ring;
+  const out: unknown[] = [ring[0]];
+  for (let i = 1; i < ring.length; i++) {
+    const a = ring[i - 1] as number[];
+    const b = ring[i] as number[];
+    if (!Array.isArray(a) || !Array.isArray(b)) {
+      out.push(ring[i]);
+      continue;
+    }
+    const cosLat = Math.cos((((a[1] ?? 0) + (b[1] ?? 0)) / 2) * Math.PI / 180);
+    const distDeg = Math.hypot((b[0] - a[0]) * cosLat, b[1] - a[1]);
+    const n = Math.ceil(distDeg / MAX_RING_EDGE_DEG);
+    for (let k = 1; k < n; k++) {
+      out.push([
+        a[0] + ((b[0] - a[0]) * k) / n,
+        a[1] + ((b[1] - a[1]) * k) / n,
+        (a[2] ?? 0) + (((b[2] ?? 0) - (a[2] ?? 0)) * k) / n,
+      ]);
+    }
+    out.push(b);
+  }
+  return out;
+}
+
 function subName(base: string, index: number, total: number): string {
   return total > 1 ? `${base} ${index}` : base;
 }
@@ -331,8 +366,8 @@ export class GeoJsonDataSource {
       throw new Error('GeoJsonDataSource.load: invalid Polygon coordinates');
     }
     const hierarchy: PolygonHierarchy = {
-      positions: toPositions(coordinates[0]),
-      holes: coordinates.slice(1).map((ring) => toPositions(ring)),
+      positions: toPositions(densifyRing(coordinates[0])),
+      holes: coordinates.slice(1).map((ring) => toPositions(densifyRing(ring))),
     };
     if (hierarchy.holes && hierarchy.holes.length === 0) delete hierarchy.holes;
 

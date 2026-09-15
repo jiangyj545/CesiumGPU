@@ -21,6 +21,13 @@ const LABEL_PAD_Y = 4;
 const LABEL_LIFT_PX = 12;
 /** LRU capacity for baked label textures. */
 const LABEL_CACHE_LIMIT = 128;
+
+/**
+ * Frames an evicted label texture stays alive before destroy(), so previous
+ * frames' in-flight submits never touch a destroyed texture (a WebGPU
+ * uncaptured error invalidates the whole submit → black frame).
+ */
+const RETIRE_GRACE_FRAMES = 3;
 /**
  * Occlusion bias in normalised depth: billboards whose anchor depth is within
  * this margin of the G-Buffer depth are considered ON the surface and drawn.
@@ -84,6 +91,18 @@ export class OverlayPass implements IPass {
 
   /** LRU cache of baked label textures, keyed by unique text. */
   private _labelCache = new Map<string, LabelEntry>();
+
+  /**
+   * Label textures evicted from the LRU awaiting destruction, plus the frame
+   * (see {@link _frameIndex}) at which they become safe to destroy. A texture
+   * evicted this frame may still be referenced by the previous frame's
+   * in-flight GPU submit; destroying it immediately raises a WebGPU
+   * uncaptured error that invalidates the whole submit (frame goes black).
+   */
+  private _retiredTextures: { texture: GPUTexture; retireAtFrame: number }[] = [];
+
+  /** Monotonic frame counter driving deferred texture retirement. */
+  private _frameIndex = 0;
   private _labelCanvas: HTMLCanvasElement | null = null;
 
   /** CPU-built quad data for the current frame. */
@@ -237,6 +256,18 @@ export class OverlayPass implements IPass {
   updateCamera(camera: Camera): void {
     if (!this._cameraUBO || !this._cameraBindGroup || !this._vertexBuffer) return;
 
+    // Retire expired label textures (see RETIRE_GRACE_FRAMES).
+    this._frameIndex++;
+    if (this._retiredTextures.length > 0) {
+      this._retiredTextures = this._retiredTextures.filter((r) => {
+        if (r.retireAtFrame <= this._frameIndex) {
+          r.texture.destroy();
+          return false;
+        }
+        return true;
+      });
+    }
+
     this._width  = this._context.drawingBufferWidth  || 1;
     this._height = this._context.drawingBufferHeight || 1;
 
@@ -364,6 +395,8 @@ export class OverlayPass implements IPass {
   destroy(): void {
     for (const entry of this._labelCache.values()) entry.texture.destroy();
     this._labelCache.clear();
+    for (const r of this._retiredTextures) r.texture.destroy();
+    this._retiredTextures = [];
     this._bindGroupCache.clear();
     this._vertexBuffer?.destroy();
     this._cameraUBO?.destroy();
@@ -535,14 +568,18 @@ export class OverlayPass implements IPass {
     const entry: LabelEntry = { texture, width, height };
     this._labelCache.set(text, entry);
 
-    // LRU eviction.
+    // LRU eviction. Destroying is deferred by RETIRE_GRACE_FRAMES: a texture
+    // can still be referenced by the previous frame's in-flight submit, and
+    // destroying it early raises a WebGPU uncaptured error that invalidates
+    // the whole submit — the frame renders black (seen on cluster re-binning
+    // during zooms).
     while (this._labelCache.size > LABEL_CACHE_LIMIT) {
       const oldestKey = this._labelCache.keys().next().value as string | undefined;
       if (oldestKey === undefined) break;
       const oldest = this._labelCache.get(oldestKey);
       if (oldest) {
         this._bindGroupCache.delete(oldest.texture);
-        oldest.texture.destroy();
+        this._retiredTextures.push({ texture: oldest.texture, retireAtFrame: this._frameIndex + RETIRE_GRACE_FRAMES });
       }
       this._labelCache.delete(oldestKey);
     }

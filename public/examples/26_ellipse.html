@@ -54,7 +54,7 @@
           // 椭圆局部坐标（含旋转）
           const ex = semiMajorM * Math.cos(a) * Math.cos(rot) - semiMinorM * Math.sin(a) * Math.sin(rot);
           const ey = semiMajorM * Math.cos(a) * Math.sin(rot) + semiMinorM * Math.sin(a) * Math.cos(rot);
-          positions.push(engine.Cartesian3.fromDegrees(
+          positions.push(engine.Cartesian3.fromDegreesNormalized(
             centerLon + ex / mPerDegLon,
             centerLat + ey / mPerDegLat,
             0));

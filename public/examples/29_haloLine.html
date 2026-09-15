@@ -52,7 +52,7 @@
           const lon = from[0] + (to[0] - from[0]) * k;
           const lat = from[1] + (to[1] - from[1]) * k;
           const arch = Math.sin(k * Math.PI) * peakM;
-          pts.push(engine.Cartesian3.fromDegrees(lon, lat, arch));
+          pts.push(engine.Cartesian3.fromDegreesNormalized(lon, lat, arch));
         }
         return pts;
       }

@@ -592,6 +592,15 @@ export class Camera {
   }
 
   private _updateProjMatrix(): void {
+    // Dynamic near/far: at high orbit keep the 0.005 near baseline (depth
+    // precision first); below ~32 km altitude shrink near proportionally so
+    // low-altitude roams (e.g. 4-8 km cruises) don't near-clip the ground in
+    // front of the camera. far is tightened alongside to keep the near/far
+    // ratio ≲ 2000 for depth-buffer precision. frustum.near/far are kept in
+    // sync so effect/pick passes reading them stay consistent with the matrix.
+    const altitude = Math.max(Cartesian3.magnitude(this.position) - 1.0, 0.0);
+    this.frustum.near = Math.min(0.005, Math.max(altitude * 0.1, 1e-5));
+    this.frustum.far = Math.max(this.frustum.near * 2000, Math.min(100.0, altitude * 150 + 0.02));
     Matrix4.perspective(
       this.frustum.fov,
       this.frustum.aspectRatio,

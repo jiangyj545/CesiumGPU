@@ -61,7 +61,7 @@
       function parseCoordinates(text) {
         return String(text).trim().split(/\s+/).map((token) => {
           const [lon, lat, alt] = token.split(',').map(Number);
-          return engine.Cartesian3.fromDegrees(lon, lat, alt || 0);
+          return engine.Cartesian3.fromDegreesNormalized(lon, lat, alt || 0);
         });
       }
 
@@ -97,7 +97,7 @@
             scene.entities.add(new engine.Entity({
               name,
               polyline: {
-                positions: trackCoords.map((v) => engine.Cartesian3.fromDegrees(v[0], v[1], v[2] || 0)),
+                positions: trackCoords.map((v) => engine.Cartesian3.fromDegreesNormalized(v[0], v[1], v[2] || 0)),
                 width: styleRef?.width || 4,
                 color: styleRef?.color || engine.Color.CYAN,
               },

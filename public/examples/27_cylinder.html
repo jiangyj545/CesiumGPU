@@ -51,7 +51,7 @@
         const positions = [];
         for (let i = 0; i < segments; i++) {
           const a = (i / segments) * Math.PI * 2;
-          positions.push(engine.Cartesian3.fromDegrees(
+          positions.push(engine.Cartesian3.fromDegreesNormalized(
             centerLon + (Math.cos(a) * radiusM) / mPerDegLon,
             centerLat + (Math.sin(a) * radiusM) / mPerDegLat, 0));
         }
@@ -63,7 +63,7 @@
         const corners = [
           [-halfWM, -halfHM], [halfWM, -halfHM], [halfWM, halfHM], [-halfWM, halfHM],
         ];
-        return corners.map(([dx, dy]) => engine.Cartesian3.fromDegrees(
+        return corners.map(([dx, dy]) => engine.Cartesian3.fromDegreesNormalized(
           centerLon + dx / mPerDegLon, centerLat + dy / mPerDegLat, 0));
       }
 

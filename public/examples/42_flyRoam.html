@@ -155,7 +155,15 @@
       }
 
       function applyCamera(t) {
-        const p = spline.evaluate(t);
+        let p = spline.evaluate(t);
+        // CatmullRom 在航点间会过冲下探（实测 -1.2 km 相机穿地 → 画面全黑），
+        // 钳制最低离地 300 m
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const minR = 1 + 300 / 6378137;
+        if (mag < minR) {
+          const k = minR / mag;
+          p = new C3(p.x * k, p.y * k, p.z * k);
+        }
         viewer.camera.setView({
           destination: new C3(p.x / S, p.y / S, p.z / S), // 归一化 → 米制 ECEF
           orientation: { heading: headingAt(t), pitch: engine.CesiumMath.toRadians(-35) },
@@ -177,7 +185,8 @@
           $('progress').value = t.toFixed(1);
           $('vProg').textContent = t.toFixed(1);
           const p = spline.evaluate(t);
-          const altM = (C3.magnitude(p) - 1) * 6378137;
+          // 显示与 applyCamera 一致的钳后高度(spline 过冲段会短暂显示负值)
+          const altM = Math.max((C3.magnitude(p) - 1) * 6378137, 300);
           result.textContent =
             `航段: ${segName(t)}\n` +
             `高度: ${(altM / 1000).toFixed(1)} km   倍速: ${clock.multiplier}x\n` +

@@ -45,7 +45,7 @@
         return btn;
       }
 
-      const deg = (lon, lat, hM = 0) => engine.Cartesian3.fromDegrees(lon, lat, hM);
+      const deg = (lon, lat, hM = 0) => engine.Cartesian3.fromDegreesNormalized(lon, lat, hM);
 
       // ── 虚线切段：沿路径按 dashM/gapM 交替取段 ────────────────────
       function dashSegments(positions, dashM, gapM, maxSegments = 160) {

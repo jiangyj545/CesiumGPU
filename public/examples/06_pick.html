@@ -89,7 +89,7 @@
         url: '/models/cone4-red.glb',
         scene: viewer.scene,
         modelMatrix: placement,
-        scale: 500_000 / S,
+        scale: 150_000 / S,
       });
 
       // ── primitive → 展示名映射（所有场景 primitive 自动可拾取）──────────
@@ -177,10 +177,10 @@
         lastLines = [`scene.pick: 未找到「${wantType}」（可能不在当前视野内）`];
         refresh();
       }
-      addBtn('自动拾取：多边形A', () => autoPick(engine.Cartesian3.fromDegrees(113.0, 42.8, 100_000), '多边形 A'));
-      addBtn('自动拾取：多边形B', () => autoPick(engine.Cartesian3.fromDegrees(119.8, 37.0, 100_000), '多边形 B'));
-      addBtn('自动拾取：多边形C', () => autoPick(engine.Cartesian3.fromDegrees(103.0, 36.5, 100_000), '多边形 C'));
-      addBtn('自动拾取：地球', () => autoPick(engine.Cartesian3.fromDegrees(100.0, 30.0, 0), '地球'));
+      addBtn('自动拾取：多边形A', () => autoPick(engine.Cartesian3.fromDegreesNormalized(113.0, 42.8, 100_000), '多边形 A'));
+      addBtn('自动拾取：多边形B', () => autoPick(engine.Cartesian3.fromDegreesNormalized(119.8, 37.0, 100_000), '多边形 B'));
+      addBtn('自动拾取：多边形C', () => autoPick(engine.Cartesian3.fromDegreesNormalized(103.0, 36.5, 100_000), '多边形 C'));
+      addBtn('自动拾取：地球', () => autoPick(engine.Cartesian3.fromDegreesNormalized(100.0, 30.0, 0), '地球'));
 
       refresh('提示：直接点击地球 / 多边形 / 模型即可拾取');
     }
