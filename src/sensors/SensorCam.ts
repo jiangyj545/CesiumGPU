@@ -323,6 +323,14 @@ export class SensorCam {
       }
       scene.render();
 
+      // 一次性帧钩子已完成使命：本次 render 的 submit 已包含深度拷贝，
+      // 立即摘除（finally 里的移除兜底异常路径）。若留到 finally，主循环
+      // RAF 的每一帧都会重复编码 copy → depthBuf，与下方 mapAsync 的
+      // mapped 生命周期交错 → "used in submit while mapped" validation
+      // error → 整帧 submit 作废 → 录制态渐进黑帧（深度采样归零）。
+      const hookIdx = scene.frameHooks.indexOf(depthHook);
+      if (hookIdx !== -1) scene.frameHooks.splice(hookIdx, 1);
+
       // ── RGB：主 canvas 原生导出（同帧已呈现）──
       const rgb = context.canvas.toDataURL('image/png');
 
