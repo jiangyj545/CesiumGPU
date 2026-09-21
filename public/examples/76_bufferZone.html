@@ -10,6 +10,9 @@
       border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
     .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
     .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel .mode-tag{display:inline-block;font-size:11px;line-height:1.5;margin-bottom:8px;
+      padding:2px 8px;border-radius:4px;color:#b7f5c4;background:rgba(30,140,90,.25);
+      border:1px solid rgba(74,222,128,.4);}
     .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
     .cg-panel input[type=range]{width:100%;}
     .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
@@ -25,10 +28,11 @@
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
     <h1>76 缓冲区分析</h1>
-    <p class="desc">DrawHandler 取点/取线后在前端生成缓冲多边形（服务端空间分析的
-      前端近似）：<b>点缓冲</b> = 半径 r 的 96 段圆 polygon；<b>线缓冲</b> = 沿线
-      左右偏移 r 构成“胶囊”包络（自交路径为近似并集）。缓冲面面积用
-      Measure.area 求值。</p>
+    <p class="desc">DrawHandler 取点/取线后，分析<b>优先请求后台 PostGIS ST_Buffer</b>
+      （http://localhost:8892，UTM 投影全球任意地点可用）；后台不可达时自动回退前端近似：
+      点缓冲 = 96 段圆 polygon，线缓冲 = 左右偏移 r 的“胶囊”包络。
+      <b>绿色面 = 后台计算</b>，蓝色面 = 前端近似(离线)。</p>
+    <span class="mode-tag">后台 PostGIS ST_Buffer</span>
     <label>缓冲半径 <span id="radiusVal">5.0</span> km</label>
     <input id="radiusSlider" type="range" min="0.5" max="20" step="0.5" value="5" />
     <div id="controls">
@@ -44,7 +48,6 @@
 
     async function demo(viewer, engine) {
       const result = document.getElementById('result');
-      const controls = document.getElementById('controls');
       const radiusSlider = document.getElementById('radiusSlider');
       const radiusVal = document.getElementById('radiusVal');
       const btnPoint = document.getElementById('btnPoint');
@@ -60,7 +63,47 @@
           lat: Math.atan2(uz, Math.hypot(ux, uy)) * 180 / Math.PI,
         };
       }
-      const toUnit = (lon, lat) => engine.Cartesian3.fromDegrees(lon, lat, 0); // 归一化 ECEF
+      const toUnit = (lon, lat) => engine.Cartesian3.fromDegreesNormalized(lon, lat, 0); // 归一化 ECEF
+
+      // ── 0.5 后台 PostGIS 空间分析 API ────────────────────────────────
+      const API_BUFFER = 'http://localhost:8892/api/v1/spatial/buffer';
+      const FETCH_TIMEOUT_MS = 30_000;
+
+      /** POST JSON 并校验 {success, result|error} 包络；非 2xx/失败/超时均抛错 */
+      async function postSpatial(url, body) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+        try {
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+          });
+          const data = await resp.json().catch(() => null);
+          if (!resp.ok || !data || data.success !== true || !data.result) {
+            const msg = data && data.error && data.error.message
+              ? data.error.message : `HTTP ${resp.status}`;
+            throw new Error(msg);
+          }
+          return data.result;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      /** GeoJSON Polygon 外环 → 归一化 ECEF positions（去掉首尾闭合重复点） */
+      function ringToPositions(ring) {
+        if (!Array.isArray(ring) || ring.length < 3) {
+          throw new Error('后台返回的多边形环无效');
+        }
+        const pts = ring.map((c) => toUnit(c[0], c[1]));
+        const n = pts.length;
+        if (n > 1 && ring[0][0] === ring[n - 1][0] && ring[0][1] === ring[n - 1][1]) {
+          pts.pop();
+        }
+        return pts;
+      }
 
       let radiusM = 5000;
       radiusSlider.addEventListener('input', () => {
@@ -130,42 +173,100 @@
         [btnPoint, btnLine].forEach((b) => b.classList.toggle('active', b === btn));
       }
 
-      function addBufferPolygon(ring, originLabel, anchor) {
+      /** serverMode: 'server' 后台(绿) | 'local' 前端近似(蓝) */
+      function addBufferPolygon(ring, serverMode, originLabel, anchor, rM) {
         buffers++;
+        const isServer = serverMode === 'server';
         const area = engine.Measure.area(ring);
         viewer.scene.entities.add({
-          name: `缓冲区#${buffers}`,
-          polygon: { hierarchy: { positions: ring }, color: new engine.Color(0.25, 0.55, 1.0, 0.28) },
+          name: `缓冲区#${buffers}${isServer ? '(后台 PostGIS)' : '(前端近似)'}`,
+          polygon: {
+            hierarchy: { positions: ring },
+            color: isServer
+              ? new engine.Color(0.35, 0.9, 0.45, 0.3)   // 后台：绿，与输入几何区分
+              : new engine.Color(0.25, 0.55, 1.0, 0.28), // 前端近似：蓝
+          },
           position: anchor,
           label: {
-            text: `${originLabel}  r=${(radiusM / 1000).toFixed(1)}km  S=${engine.MeasureCollection.formatArea(area)}`,
+            text: `${originLabel}${isServer ? '·后台' : '·近似'}  r=${(rM / 1000).toFixed(1)}km  S=${engine.MeasureCollection.formatArea(area)}`,
             fillColor: new engine.Color(0.65, 0.85, 1.0, 1.0),
           },
         });
         return area;
       }
 
-      draw.drawEnd.addListener(({ positions }) => {
-        if (mode === 'point' && positions.length >= 1) {
-          const { lon, lat } = toLonLat(positions[0]);
-          const ring = circleRing(lon, lat, radiusM);
-          const area = addBufferPolygon(ring, '点缓冲', positions[0]);
+      function errReason(err) {
+        return err && err.name === 'AbortError'
+          ? '请求超时(30s)' : (err && err.message) || String(err);
+      }
+
+      async function analyzePoint(positions, rM) {
+        const { lon, lat } = toLonLat(positions[0]);
+        result.textContent = '点缓冲：请求后台 PostGIS ST_Buffer …';
+        try {
+          const r = await postSpatial(API_BUFFER, {
+            geometry: { type: 'Point', coordinates: [lon, lat] },
+            distance: rM,
+            segments: 16,
+          });
+          const ring = ringToPositions(r.geometry.coordinates[0]);
+          addBufferPolygon(ring, 'server', '点缓冲', positions[0], rM);
           result.textContent =
-            `点缓冲 #${buffers}\n圆心 ${lon.toFixed(5)}°, ${lat.toFixed(5)}°\n` +
-            `半径 ${(radiusM / 1000).toFixed(1)} km\n缓冲面积 ${engine.MeasureCollection.formatArea(area)}`;
-        } else if (mode === 'polyline' && positions.length >= 2) {
-          const ll = positions.map(toLonLat);
-          const ring = capsuleRing(ll, radiusM);
-          const area = addBufferPolygon(ring, '线缓冲', positions[0]);
+            `点缓冲 #${buffers} [后台 PostGIS ST_Buffer]\n` +
+            `圆心 ${lon.toFixed(5)}°, ${lat.toFixed(5)}°\n` +
+            `半径 ${(rM / 1000).toFixed(1)} km   输入 ${r.input_type}   ${r.crs}\n` +
+            `面积 ${Number(r.area_km2).toFixed(3)} km²   周长 ${Number(r.perimeter_km).toFixed(3)} km`;
+        } catch (err) {
+          console.error('[76] 后台 buffer 失败，回退前端近似', err);
+          const ring = circleRing(lon, lat, rM);
+          const area = addBufferPolygon(ring, 'local', '点缓冲', positions[0], rM);
+          result.textContent =
+            `点缓冲 #${buffers} [前端近似(离线)]\n后台不可用：${errReason(err)}\n` +
+            `圆心 ${lon.toFixed(5)}°, ${lat.toFixed(5)}°\n` +
+            `半径 ${(rM / 1000).toFixed(1)} km\n缓冲面积 ${engine.MeasureCollection.formatArea(area)}`;
+        }
+      }
+
+      async function analyzeLine(positions, rM) {
+        const ll = positions.map(toLonLat);
+        result.textContent = '线缓冲：请求后台 PostGIS ST_Buffer …';
+        try {
+          const r = await postSpatial(API_BUFFER, {
+            geometry: { type: 'LineString', coordinates: ll.map((p) => [p.lon, p.lat]) },
+            distance: rM,
+            segments: 16,
+          });
+          const ring = ringToPositions(r.geometry.coordinates[0]);
+          addBufferPolygon(ring, 'server', '线缓冲', positions[0], rM);
           const length = engine.Measure.distance(positions);
           result.textContent =
-            `线缓冲 #${buffers}\n折线 ${positions.length} 点，长度 ${engine.MeasureCollection.formatDistance(length)}\n` +
-            `半径 ${(radiusM / 1000).toFixed(1)} km\n包络面积 ${engine.MeasureCollection.formatArea(area)}`;
+            `线缓冲 #${buffers} [后台 PostGIS ST_Buffer]\n` +
+            `折线 ${positions.length} 点，长度 ${engine.MeasureCollection.formatDistance(length)}\n` +
+            `半径 ${(rM / 1000).toFixed(1)} km   输入 ${r.input_type}   ${r.crs}\n` +
+            `面积 ${Number(r.area_km2).toFixed(3)} km²   周长 ${Number(r.perimeter_km).toFixed(3)} km`;
+        } catch (err) {
+          console.error('[76] 后台 buffer 失败，回退前端近似', err);
+          const ring = capsuleRing(ll, rM);
+          const area = addBufferPolygon(ring, 'local', '线缓冲', positions[0], rM);
+          const length = engine.Measure.distance(positions);
+          result.textContent =
+            `线缓冲 #${buffers} [前端近似(离线)]\n后台不可用：${errReason(err)}\n` +
+            `折线 ${positions.length} 点，长度 ${engine.MeasureCollection.formatDistance(length)}\n` +
+            `半径 ${(rM / 1000).toFixed(1)} km\n包络面积 ${engine.MeasureCollection.formatArea(area)}`;
+        }
+      }
+
+      draw.drawEnd.addListener(({ positions }) => {
+        const m = mode;
+        mode = null;
+        setActive(null);
+        if (m === 'point' && positions.length >= 1) {
+          analyzePoint(positions, radiusM);
+        } else if (m === 'polyline' && positions.length >= 2) {
+          analyzeLine(positions, radiusM);
         } else {
           result.textContent = '点数不足（线缓冲需 ≥2 点）。';
         }
-        mode = null;
-        setActive(null);
       });
 
       btnPoint.addEventListener('click', () => {

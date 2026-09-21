@@ -19,6 +19,7 @@
     .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
       white-space:pre-wrap;margin-top:8px;}
     .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+    .cg-panel #modeLine{font-size:11px;color:#7dd3fc;margin-top:6px;}
     /* 水位 HUD（右下角大字） */
     #waterHud{position:absolute;right:16px;bottom:16px;z-index:9000;padding:10px 16px;
       background:rgba(8,20,40,.85);border:1px solid rgba(90,180,255,.45);border-radius:8px;
@@ -31,9 +32,11 @@
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
     <h1>79 淹没分析</h1>
-    <p class="desc">湖北山区（神农架—兴山一带）叠加一个半透明水面 polygon，其
-      <code>PolygonGraphics.height</code>（归一化单位）随水位滑杆抬升；同时按网格
-      采样 <code>sampleHeight</code> 统计水位以下格点，估算淹没面积占比。</p>
+    <p class="desc">后台 DEM 高程阈值淹没：把分析区 bounds + 水位提交
+      <code>localhost:8892</code> 的 <code>/submerge</code> 接口，服务端基于 ASTER GDEM
+      逐像素做高程阈值判定，返回<b>淹没区 MultiPolygon</b>（半透明蓝色面渲染到
+      水位高程）、淹没面积与地形高程范围。水位滑杆防抖 500ms 联动（只发最后一次
+      请求）；接口不可用时自动回退前端近似——整块矩形水面 + 网格采样估算。</p>
     <label>水位高程 <span id="levelVal">800</span> m</label>
     <input id="levelSlider" type="range" min="200" max="3000" step="20" value="800" />
     <div id="controls">
@@ -43,9 +46,11 @@
       <button data-level="2400">2400 m</button>
       <button id="btnFloodAll">淹没到 3000 m</button>
     </div>
+    <div id="modeLine">模式：待分析</div>
     <div id="result">初始化中…</div>
-    <p class="warn">⚠ 需要本地地形服务在线：<code>http://localhost:8888</code>（terrain_hubei）。
-      离线时地形为 0 高，任意水位即全淹。</p>
+    <p class="warn">⚠ 后台空间分析服务：<code>http://localhost:8892</code>（ASTER GDEM 高程阈值），
+      离线时自动回退前端近似。前端近似还需要本地地形服务 <code>http://localhost:8888</code>
+      （terrain_hubei）在线，否则地形为 0 高，任意水位即全淹。</p>
   </div>
   <div id="waterHud">
     <div id="waterLevel">800 m</div>
@@ -86,27 +91,86 @@
         : () => 0;
       if (!terrainOk) result.textContent = '（地形离线：0 高椭球模式）';
 
-      // ── 2. 水面 polygon（矩形水域覆盖分析区）────────────────────────
+      // ── 2. 水面渲染：后台 MultiPolygon（主）+ 矩形近似（回退）───────
       // PolygonGraphics.height 用归一化单位（1.0 = 6378137 m）
       const EARTH = 6378137;
-      const deg = { west: 110.35, east: 111.05, south: 31.05, north: 31.55 };
+      const deg = { west: 110.35, east: 111.05, south: 31.05, north: 31.55 }; // 湖北神农架—兴山，DEM 覆盖内
       const ringDeg = [
         [deg.west, deg.south], [deg.east, deg.south],
         [deg.east, deg.north], [deg.west, deg.north],
       ];
       let waterEntity = null;
+      const regionEntities = []; // 后台淹没区渲染的实体
+      function clearWater() {
+        if (waterEntity) { viewer.scene.entities.remove(waterEntity); waterEntity = null; }
+        while (regionEntities.length) viewer.scene.entities.remove(regionEntities.pop());
+      }
+
+      // 回退近似：整块矩形水面盖住分析区（原方案）
       function setWaterLevel(levelM) {
         if (waterEntity) viewer.scene.entities.remove(waterEntity);
+        waterEntity = null;
         waterEntity = viewer.scene.entities.add({
-          name: '水面',
+          name: '水面（前端近似）',
           polygon: {
+            // hierarchy.positions 按归一化 ECEF 消费（EntityVisualizer 约定），
+            // 必须用 fromDegreesNormalized；height 为归一化单位（米 / 6378137）
             hierarchy: {
-              positions: ringDeg.map(([lon, lat]) => engine.Cartesian3.fromDegrees(lon, lat, 0)),
+              positions: ringDeg.map(([lon, lat]) =>
+                engine.Cartesian3.fromDegreesNormalized(lon, lat, 0)),
             },
             height: levelM / EARTH,
             color: new engine.Color(0.15, 0.45, 0.85, 0.55),
           },
         });
+      }
+
+      // ── 2.5 后台 DEM 高程阈值淹没（8891 /submerge）─────────────────
+      const API_BASE = 'http://localhost:8892/api/v1/spatial';
+      const modeLine = document.getElementById('modeLine');
+      function setMode(text) { modeLine.textContent = `模式：${text}`; }
+
+      async function postAnalysis(path, body, ctrl = new AbortController()) {
+        const timer = setTimeout(() => ctrl.abort(), 30_000); // 30s 超时
+        try {
+          const resp = await fetch(`${API_BASE}/${path}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const json = await resp.json();
+          if (!json || !json.result) throw new Error('响应缺少 result 字段');
+          return json.result;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      // region MultiPolygon → 半透明蓝色水面：每个 polygon 一个 Feature，
+      // 外环转 hierarchy.positions、内环转 hierarchy.holes，
+      // properties.style.height 传米（GeoJsonDataSource 内部 /EARTH 归一化）。
+      async function renderWaterRegion(geom, levelM) {
+        const polys = geom.type === 'MultiPolygon' ? geom.coordinates
+          : geom.type === 'Polygon' ? [geom.coordinates] : [];
+        if (!Array.isArray(polys) || polys.length === 0) return 0;
+        const fc = {
+          type: 'FeatureCollection',
+          features: polys.map((coords, i) => ({
+            type: 'Feature',
+            properties: {
+              name: `淹没区 ${i}`,
+              style: { color: '#3b82f68c', height: levelM },
+            },
+            geometry: { type: 'Polygon', coordinates: coords },
+          })),
+        };
+        const ds = await engine.GeoJsonDataSource.load(fc, { name: '淹没区' });
+        for (const e of ds.entities.values) {
+          regionEntities.push(viewer.scene.entities.add(e));
+        }
+        return polys.length;
       }
 
       // ── 3. 淹没统计：网格采样高程 < 水位的格点占比 ──────────────────
@@ -131,23 +195,69 @@
         };
       }
 
-      // ── 4. 交互 ─────────────────────────────────────────────────────
-      let lastStats = 0;
+      // ── 4. 交互：滑杆防抖 500ms 联动后台，失败回退前端近似 ──────────
+      let debounceTimer = 0;
+      let pendingCtrl = null;
+
+      function applyFallback(levelM, reason) {
+        setMode('前端近似（地形采样）');
+        setWaterLevel(levelM);
+        const s = floodStats(levelM);
+        waterSub.textContent = `淹没 ${s.pct.toFixed(1)}%`;
+        result.textContent =
+          `⚠ 后台分析服务(8891)不可用（${reason}），回退前端近似。\n` +
+          `水位 ${levelM} m：分析区内 ${s.pct.toFixed(1)}% 陆地被淹没\n` +
+          `估算淹没面积 ≈ ${Math.round(s.areaKm2).toLocaleString()} km²` +
+          (terrainOk ? '' : '\n（地形离线，统计无效）');
+      }
+
+      async function runBackend(levelM, ctrl) {
+        try {
+          setMode('后台 DEM 高程阈值');
+          waterSub.textContent = '分析中…';
+          result.textContent = `后台分析中…（8891 /submerge，水位 ${levelM} m）`;
+          const res = await postAnalysis('submerge', {
+            bounds: { west: deg.west, south: deg.south, east: deg.east, north: deg.north },
+            level: levelM,
+          }, ctrl);
+
+          clearWater();
+          const nPolys = await renderWaterRegion(res.region, levelM);
+          const area = typeof res.water_area_km2 === 'number' ? res.water_area_km2 : null;
+          const tmin = res.terrain && typeof res.terrain.min_m === 'number' ? res.terrain.min_m : null;
+          const tmax = res.terrain && typeof res.terrain.max_m === 'number' ? res.terrain.max_m : null;
+          waterSub.textContent = `淹没面积 ${area === null ? '--' : Math.round(area).toLocaleString()} km²`;
+          result.textContent =
+            `后台分析完成：淹没区 ${nPolys} 块（MultiPolygon 渲染在 ${levelM} m 水位面）\n` +
+            `淹没面积 water_area_km2 = ${area === null ? '--' : area.toFixed(2)} km²\n` +
+            `地形高程范围 = ${tmin === null ? '--' : tmin.toFixed(0)} ~ ${tmax === null ? '--' : tmax.toFixed(0)} m\n` +
+            `分析区 ${deg.west}-${deg.east}°E / ${deg.south}-${deg.north}°N` +
+            (nPolys === 0 ? '\n（该水位下分析区无淹没区域）' : '');
+        } catch (err) {
+          if (ctrl.signal.aborted && String(err && err.name) === 'AbortError') return; // 已被新请求取代
+          console.warn('[79] 后台 submerge 失败，回退前端近似：', err.message);
+          applyFallback(levelM, err.message);
+        }
+      }
+
+      function fireBackend(levelM) {
+        clearTimeout(debounceTimer);
+        if (pendingCtrl) pendingCtrl.abort(); // 只保留最后一次请求
+        pendingCtrl = new AbortController();
+        runBackend(levelM, pendingCtrl);
+      }
+
+      function scheduleBackend(levelM, force) {
+        clearTimeout(debounceTimer);
+        if (force) { fireBackend(levelM); return; }
+        debounceTimer = setTimeout(() => fireBackend(levelM), 500); // 防抖 500ms
+      }
+
       function apply(levelM, force = false) {
         levelSlider.value = String(levelM);
         levelVal.textContent = String(levelM);
         waterLevel.textContent = `${levelM} m`;
-        setWaterLevel(levelM);
-        const now = performance.now();
-        if (force || now - lastStats > 120) { // 滑杆快速拖动时限频重算
-          lastStats = now;
-          const s = floodStats(levelM);
-          waterSub.textContent = `淹没 ${s.pct.toFixed(1)}%`;
-          result.textContent =
-            `水位 ${levelM} m：分析区内 ${s.pct.toFixed(1)}% 陆地被淹没\n` +
-            `估算淹没面积 ≈ ${Math.round(s.areaKm2).toLocaleString()} km²` +
-            (terrainOk ? '' : '\n（地形离线，统计无效）');
-        }
+        scheduleBackend(levelM, force);
       }
       levelSlider.addEventListener('input', () => apply(levelSlider.valueAsNumber));
       levelSlider.addEventListener('change', () => apply(levelSlider.valueAsNumber, true));
@@ -157,12 +267,15 @@
       document.getElementById('btnFloodAll').addEventListener('click', () => apply(3000, true));
 
       // ── 5. 初始：抬升视角俯瞰分析区 ─────────────────────────────────
+      // ── 5. 初始：抬升视角俯瞰分析区 ─────────────────────────────────
       viewer.camera.flyTo({
         destination: { lon: (deg.west + deg.east) / 2, lat: (deg.south + deg.north) / 2 - 0.15, height: 90_000 },
         orientation: { heading: 0, pitch: -0.7 },
       });
+      result.textContent =
+        '默认分析区：神农架—兴山（110.35-111.05°E, 31.05-31.55°N，湖北 DEM 覆盖内）。\n' +
+        '拖动滑杆或点预设水位，触发后台 /submerge 分析，观察淹没区随水位扩张。';
       apply(800, true);
-      result.textContent += '\n拖动滑杆或点预设水位，观察水面抬升淹没山谷的过程。';
     }
 
     // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────

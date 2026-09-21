@@ -18,6 +18,7 @@
     .cg-panel #profile{display:block;margin-top:6px;background:rgba(6,12,22,.9);
       border:1px solid rgba(120,180,255,.2);border-radius:6px;}
     .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;margin-top:6px;}
+    .cg-panel .mode{font-size:11px;margin-top:6px;color:#8ecafc;}
     .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
   </style>
 </head>
@@ -25,15 +26,18 @@
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
     <h1>19 地形高程剖面</h1>
-    <p class="desc">沿两点连线按 128 个采样点调用 terrainLayer.sampleHeight，
-      canvas 2D 绘制高程剖面图（面积填充 + 最高/最低点标注），同时把剖
-      面线以贴地折线画到球面。对应 EV-Globe 02_DEM 的分析向用法
-      （服务端剖面分析的前端近似：仅采样已流式加载的地形瓦片）。</p>
+    <p class="desc">沿两点连线做高程剖面：「分析」优先 POST /api/v1/spatial/profile
+      （8891 后台 PostGIS + 湖北 ASTER GDEM 30m 真实 DEM），返回 points 直接绘制
+      剖面图并统计最高/最低/平均高程与总长；请求失败或超时（30s）自动回退为
+      terrainLayer.sampleHeight 前端近似（仅采样已流式加载的地形瓦片）。
+      剖面线以贴地折线画到球面，canvas 2D 绘制面积填充 + 最高/最低点标注。</p>
     <div id="controls"></div>
     <canvas id="profile" width="480" height="220"></canvas>
     <div id="result">初始化中…</div>
-    <p class="warn">⚠ 剖面精度取决于当前视角下已加载的地形瓦片层级；
-      若剖面平直，请等待瓦片流加载后点「重新采样」。</p>
+    <div id="mode" class="mode">模式: 初始化…</div>
+    <p class="warn">⚠ 分析优先请求后台 DEM 剖面 API（localhost:8892）；失败或超时
+      （30s）自动回退为前端近似。前端近似的精度取决于当前视角下已加载的
+      地形瓦片层级；若剖面平直，请等待瓦片流加载后点「重新采样」。</p>
   </div>
   <script src="./js/demo-utils.js"></script>
   <script type="module">
@@ -115,15 +119,104 @@
         return pts;
       }
 
-      function profile(route) {
-        drawChart(route, sampleProfile(route));
+      // ── 4b. 后台 DEM 剖面 API（8891，失败/超时回退前端近似）──────────
+      const PROFILE_API = 'http://localhost:8892/api/v1/spatial/profile';
+      const modeEl = document.getElementById('mode');
+      let profileMode = 'local'; // 'backend' | 'local'
+      let lastStats = null;      // { max, min, avg, lenKm }
+      let lastNote = '';
+      let profileSeq = 0;        // 丢弃过期响应
+
+      function setMode(mode) {
+        if (!modeEl) return;
+        if (mode === 'loading') {
+          modeEl.textContent = '模式: 后台 DEM 计算请求中…';
+          modeEl.style.color = '#ffd479';
+        } else if (mode === 'backend') {
+          modeEl.textContent = '模式: 后台 DEM 计算 | 后台 PostGIS/DEM:湖北 ASTER GDEM 30m';
+          modeEl.style.color = '#4ade80';
+        } else {
+          modeEl.textContent = '模式: 前端近似（离线）';
+          modeEl.style.color = '#ffd479';
+        }
+      }
+
+      async function fetchBackendProfile(route) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 30_000); // 30s 超时
+        try {
+          const resp = await fetch(PROFILE_API, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              line: { type: 'LineString', coordinates: [route.from, route.to] },
+              samples: SAMPLES,
+            }),
+            signal: ctrl.signal,
+          });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const data = await resp.json();
+          const points = data && data.result && data.result.points;
+          if (!Array.isArray(points) || points.length < 2) throw new Error('响应缺少 result.points');
+          return points;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      // 服务端 points → 图表 pts（elev_m=null 的覆盖范围外点记为缺口）
+      function backendProfile(points) {
+        const last = points[points.length - 1];
+        const total = Number.isFinite(last && last.dist_m) && last.dist_m > 0
+          ? last.dist_m : points.length - 1;
+        return points.map((p, i) => ({
+          k: Number.isFinite(p.dist_m) && total > 0 ? p.dist_m / total : i / (points.length - 1),
+          h: Number.isFinite(p.elev_m) ? p.elev_m : 0,
+          valid: Number.isFinite(p.elev_m),
+        }));
+      }
+
+      // 「分析」：先请求后台真实 DEM，失败再回退 sampleProfile 前端近似
+      async function profile(route) {
+        const seq = ++profileSeq;
+        setMode('loading');
+        try {
+          const points = await fetchBackendProfile(route);
+          if (seq !== profileSeq) return;
+          const pts = backendProfile(points);
+          const es = pts.filter((p) => p.valid).map((p) => p.h);
+          profileMode = 'backend';
+          lastStats = es.length ? {
+            max: Math.max(...es),
+            min: Math.min(...es),
+            avg: es.reduce((a, b) => a + b, 0) / es.length,
+            lenKm: points[points.length - 1].dist_m / 1000,
+          } : null;
+          lastNote = es.length
+            ? ''
+            : '⚠ 剖面线在 DEM 覆盖范围（108-116E/29-34N）外，elev_m 全为 null';
+          setMode('backend');
+          drawChart(route, pts);
+          refreshButtons();
+        } catch (err) {
+          if (seq !== profileSeq) return;
+          profileMode = 'local';
+          lastStats = null;
+          lastNote = '⚠ 后台剖面 API 不可用（' +
+            (err && err.name === 'AbortError' ? '超时 30s' : (err && err.message) || String(err)) +
+            '）→ 已回退前端近似';
+          setMode('local');
+          drawChart(route, sampleProfile(route)); // 前端近似回退
+          refreshButtons();
+        }
       }
 
       function drawChart(route, pts) {
         const W = canvas.width, H = canvas.height;
         const padL = 52, padR = 14, padT = 18, padB = 26;
-        // h=0 视为"该点无已加载瓦片"（缺口），不参与高程范围与绘图
-        const valid = pts.filter((p) => p.h > 0);
+        // 无值点（前端=未加载瓦片 h<=0；后台=elev_m=null → valid:false）
+        // 视为缺口，不参与高程范围与绘图
+        const valid = pts.filter((p) => (p.valid !== undefined ? p.valid : p.h > 0));
         const heights = valid.map((p) => p.h);
         let hMin = heights.length ? Math.min(...heights) : 0;
         let hMax = heights.length ? Math.max(...heights) : 100;
@@ -145,8 +238,9 @@
         // 按"连续有值段"分段绘制（缺口 = 未加载瓦片，断开不连线）
         const segs = [];
         let cur = [];
+        const ok = (p) => (p.valid !== undefined ? p.valid : p.h > 0);
         for (const p of pts) {
-          if (p.h > 0) cur.push(p);
+          if (ok(p)) cur.push(p);
           else if (cur.length) { segs.push(cur); cur = []; }
         }
         if (cur.length) segs.push(cur);
@@ -167,7 +261,9 @@
         }
         if (!heights.length) {
           ctx.fillStyle = '#ffd479';
-          ctx.fillText('剖面线暂无已加载瓦片覆盖：稍候点「重新采样」', padL + 60, H / 2);
+          ctx.fillText(profileMode === 'backend'
+            ? '剖面线在 DEM 覆盖范围（108-116E/29-34N）外'
+            : '剖面线暂无已加载瓦片覆盖：稍候点「重新采样」', padL + 40, H / 2);
         }
         // 最高 / 最低点标注
         const iMax = heights.indexOf(hMax), iMin = heights.indexOf(hMin);
@@ -258,7 +354,15 @@
         const from = toUnit(activeRoute.from[0], activeRoute.from[1]);
         const to = toUnit(activeRoute.to[0], activeRoute.to[1]);
         const distM = engine.Measure.distance([from, to], false); // 米
-        result.textContent = `剖面线: ${activeRoute.name}\n直线距离: ${(distM / 1000).toFixed(1)} km\n采样点: ${SAMPLES}（sampleHeight）`;
+        let text = `剖面线: ${activeRoute.name}\n直线距离: ${(distM / 1000).toFixed(1)} km\n采样点: ${SAMPLES}`;
+        if (profileMode === 'backend' && lastStats) {
+          text += `\n最高 ${lastStats.max.toFixed(0)} m / 最低 ${lastStats.min.toFixed(0)} m / 平均 ${lastStats.avg.toFixed(0)} m`
+            + `\nDEM 剖面总长 ${lastStats.lenKm.toFixed(2)} km`;
+        } else {
+          text += '（sampleHeight 前端近似）';
+        }
+        if (lastNote) text += `\n${lastNote}`;
+        result.textContent = text;
       }
 
       // ── 初始：第一条剖面线 ─────────────────────────────────────────

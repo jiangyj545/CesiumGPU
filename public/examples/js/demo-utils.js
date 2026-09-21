@@ -111,6 +111,10 @@
     'background:rgba(8,12,18,.94);border:1px solid rgba(92,207,255,.35);border-radius:8px;',
     'box-shadow:0 8px 32px rgba(0,0,0,.6);overflow:hidden;}',
     '.cg-code.hidden{display:none;}',
+    '.cg-code-toggle{position:fixed;top:12px;right:12px;z-index:9051;padding:6px 12px;',
+    'background:rgba(8,12,18,.9);border:1px solid rgba(92,207,255,.35);border-radius:6px;',
+    'color:#8ee6ff;font:12px/1.4 system-ui,sans-serif;cursor:pointer;}',
+    '.cg-code-toggle:hover{background:rgba(92,207,255,.18);}',
     '.cg-code-head{display:flex;align-items:center;gap:8px;padding:8px 12px;',
     'background:rgba(92,207,255,.12);border-bottom:1px solid rgba(92,207,255,.25);',
     'color:#8ee6ff;font:13px/1.4 system-ui,sans-serif;flex-shrink:0;}',
@@ -317,11 +321,23 @@
           }
         );
       });
+      // 面板默认收起（自动展开会盖住球面右侧、拦截 DrawHandler 等地图交互的
+      // canvas 点击）；右上角把手按钮负责展开/收起。
+      var toggle = document.querySelector('.cg-code-toggle');
+      if (!toggle) {
+        toggle = document.createElement('button');
+        toggle.className = 'cg-code-toggle';
+        toggle.type = 'button';
+        toggle.textContent = '代码';
+        document.body.appendChild(toggle);
+        toggle.addEventListener('click', function () {
+          panel.classList.toggle('hidden');
+        });
+      }
     }
 
     panel.querySelector('.cg-code-title').textContent = title || '示例源码';
     panel.querySelector('code').innerHTML = highlight(source);
-    panel.classList.remove('hidden');
     panel.querySelector('pre').scrollTop = 0;
   }
 

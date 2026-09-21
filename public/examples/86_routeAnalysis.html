@@ -10,22 +10,27 @@
       border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
     .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
     .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel .mode-tag{display:inline-block;font-size:11px;line-height:1.5;margin-bottom:8px;
+      padding:2px 8px;border-radius:4px;color:#b7f5c4;background:rgba(30,140,90,.25);
+      border:1px solid rgba(74,222,128,.4);}
     .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
     .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
       background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
     .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
     .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
     .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
-      white-space:pre-wrap;max-height:240px;overflow:auto;}
+      white-space:pre-wrap;max-height:280px;overflow:auto;}
   </style>
 </head>
 <body>
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
     <h1>86 路径分析</h1>
-    <p class="desc">迁移自 EV-Globe 13_routeAnalysis。
-      途经点经 CatmullRomSpline 生成平滑航线（巡航高度 20 km），
-      实时统计总长度；开启"添加途经点"后点击地图可追加航点重建航线。</p>
+    <p class="desc">途经点（≥2 个）<b>优先请求后台 PostGIS 路网 Dijkstra 最短路径</b>
+      （http://localhost:8892，路网覆盖武汉 114.20–114.40°E / 30.49–30.69°N）；
+      后台不可达/超范围时自动回退 CatmullRomSpline 平滑航线。
+      <b>绿色粗线 = 后台路网路径</b>，青色平滑线 = 前端近似(离线)。</p>
+    <span class="mode-tag">后台 PostGIS 路网 Dijkstra</span>
     <div id="controls"></div>
     <div id="result">初始化中…</div>
   </div>
@@ -35,7 +40,6 @@
 
     async function demo(viewer, engine) {
       const C3 = engine.Cartesian3;
-      const RE = C3.EARTH_RADIUS;
       const result = document.getElementById('result');
       const controls = document.getElementById('controls');
       function addBtn(label, onClick) {
@@ -46,22 +50,49 @@
         return btn;
       }
 
-      const lonLatH = (lon, lat, h = 0) => {
-        const p = C3.fromDegrees(lon, lat, h);
-        return new C3(p.x / RE, p.y / RE, p.z / RE);
-      };
+      // 归一化 ECEF（项目约定：Cartesian3.fromDegreesNormalized）
+      const norm = (lon, lat, h = 0) => C3.fromDegreesNormalized(lon, lat, h);
       const entities = viewer.scene.entities;
-      const CRUISE = 20_000;                      // 巡航高度 20 km
+      const CRUISE = 20_000;                      // 前端近似回退时的巡航高度 20 km
       const SAMPLES = 120;
 
-      // ── 预设航线：石家庄 → 烟台（沿途 6 个途经点）──────────────────────
+      // ── 后台 PostGIS 路网 Dijkstra API ───────────────────────────────
+      const API_ROUTE = 'http://localhost:8892/api/v1/spatial/route';
+      const FETCH_TIMEOUT_MS = 30_000;
+
+      /** POST JSON 并校验 {success, result|error} 包络；非 2xx/失败/超时均抛错 */
+      async function postSpatial(url, body) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+        try {
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+          });
+          const data = await resp.json().catch(() => null);
+          if (!resp.ok || !data || data.success !== true || !data.result) {
+            const msg = data && data.error && data.error.message
+              ? data.error.message : `HTTP ${resp.status}`;
+            throw new Error(msg);
+          }
+          return data.result;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      function errReason(err) {
+        return err && err.name === 'AbortError'
+          ? '请求超时(30s)' : (err && err.message) || String(err);
+      }
+
+      // ── 预设途经点：武汉路网内（114.20–114.40°E / 30.49–30.69°N）─────
       const PRESET = [
-        { name: '石家庄', lon: 114.51, lat: 38.04 },
-        { name: '衡水', lon: 115.67, lat: 37.73 },
-        { name: '济南', lon: 117.12, lat: 36.65 },
-        { name: '淄博', lon: 118.05, lat: 36.81 },
-        { name: '潍坊', lon: 119.16, lat: 36.70 },
-        { name: '烟台', lon: 121.39, lat: 37.52 },
+        { name: '汉口江滩', lon: 114.29, lat: 30.58 },
+        { name: '江汉路', lon: 114.30, lat: 30.59 },
+        { name: '武昌', lon: 114.31, lat: 30.60 },
       ];
       let waypoints = PRESET.map((p) => ({ ...p }));
       let routeEnts = [];
@@ -77,44 +108,18 @@
         };
       }
 
-      // ── 重建航线：CatmullRom 样条采样 + 途经点标记 + 长度统计 ──────────
-      function rebuild() {
+      function clearRoute() {
         for (const e of routeEnts) entities.remove(e);
         routeEnts = [];
-        if (waypoints.length < 2) {
-          refresh('至少需要 2 个途经点');
-          return;
-        }
+      }
 
-        const ctrl = waypoints.map((p) => lonLatH(p.lon, p.lat, CRUISE));
-        const times = waypoints.map((_, i) => i);
-        const spline = new engine.CatmullRomSpline({ times, points: ctrl });
-
-        // 采样曲线 + 累加弧长（归一化距离 × RE → 米）
-        const pts = [];
-        let totalM = 0;
-        let prev = null;
-        for (let i = 0; i <= SAMPLES; i++) {
-          const t = (i / SAMPLES) * (waypoints.length - 1);
-          const cur = spline.evaluate(t, new C3());
-          if (prev) totalM += C3.distance(prev, cur) * RE;
-          pts.push(cur);
-          prev = cur;
-        }
-
-        routeEnts.push(entities.add(new engine.Entity({
-          polyline: {
-            positions: pts,
-            width: 3,
-            color: new engine.Color(0.25, 0.9, 1.0, 0.9),
-          },
-        })));
-
-        waypoints.forEach((p, i) => {
+      /** 途经点标牌 + 到地面垂线（heightM 为 0 时省略垂线） */
+      function drawWaypointMarkers(wps, heightM) {
+        wps.forEach((p, i) => {
           routeEnts.push(entities.add(new engine.Entity({
-            position: lonLatH(p.lon, p.lat, CRUISE),
+            position: norm(p.lon, p.lat, heightM),
             point: {
-              color: i === 0 || i === waypoints.length - 1
+              color: i === 0 || i === wps.length - 1
                 ? engine.Color.RED : engine.Color.YELLOW,
               pixelSize: 9,
             },
@@ -124,17 +129,106 @@
               fillColor: engine.Color.WHITE,
             },
           })));
-          // 途经点到地面的垂线，强化高度感
-          routeEnts.push(entities.add(new engine.Entity({
-            polyline: {
-              positions: [lonLatH(p.lon, p.lat, CRUISE), lonLatH(p.lon, p.lat, 0)],
-              width: 1,
-              color: new engine.Color(0.5, 0.8, 1.0, 0.35),
-            },
-          })));
+          if (heightM > 0) {
+            // 途经点到地面的垂线，强化高度感
+            routeEnts.push(entities.add(new engine.Entity({
+              polyline: {
+                positions: [norm(p.lon, p.lat, heightM), norm(p.lon, p.lat, 0)],
+                width: 1,
+                color: new engine.Color(0.5, 0.8, 1.0, 0.35),
+              },
+            })));
+          }
         });
+      }
 
-        refresh(`总长: ${(totalM / 1000).toFixed(1)} km`);
+      /** 后台模式：渲染 PostGIS 路网路径（地表高亮绿线）+ 统计面板 */
+      function renderServerRoute(r, wps) {
+        const coords = r.path && Array.isArray(r.path.coordinates) ? r.path.coordinates : null;
+        if (!coords || coords.length < 2) throw new Error('后台返回路径无效');
+        const positions = coords.map((c) => norm(c[0], c[1], 0));
+        routeEnts.push(entities.add(new engine.Entity({
+          polyline: {
+            positions,
+            width: 5,
+            color: new engine.Color(0.35, 1.0, 0.55, 0.95), // 后台：绿色高亮
+          },
+        })));
+        drawWaypointMarkers(wps, 0);
+
+        const legs = Array.isArray(r.legs) ? r.legs : [];
+        const legLines = legs.map((leg, i) => {
+          const from = leg && leg.from ? leg.from : {};
+          const to = leg && leg.to ? leg.to : {};
+          return ` ${i + 1}→${i + 2}  ${Number(from.lon).toFixed(4)},${Number(from.lat).toFixed(4)}` +
+            ` → ${Number(to.lon).toFixed(4)},${Number(to.lat).toFixed(4)}` +
+            `   ${(leg && Number(leg.length_km) || 0).toFixed(2)} km`;
+        }).join('\n');
+        result.textContent =
+          `途经点: ${wps.length} 个   ${wps.map((p) => p.name).join(' → ')}\n` +
+          `[后台 PostGIS 路网 Dijkstra]\n` +
+          `总长: ${Number(r.length_km).toFixed(2)} km   路网节点: ${r.node_count} 个   分段: ${legs.length} 段\n` +
+          (legLines ? `分段明细:\n${legLines}\n` : '') +
+          `(路网覆盖武汉 114.20–114.40°E / 30.49–30.69°N)`;
+      }
+
+      /** 回退模式：CatmullRomSpline 平滑航线（原前端近似算法，巡航 20 km） */
+      function renderFallbackRoute(wps, err) {
+        const ctrlPts = wps.map((p) => norm(p.lon, p.lat, CRUISE));
+        const times = wps.map((_, i) => i);
+        const spline = new engine.CatmullRomSpline({ times, points: ctrlPts });
+
+        // 采样曲线 + 累加弧长（归一化距离 × EARTH_RADIUS → 米）
+        const pts = [];
+        let totalM = 0;
+        let prev = null;
+        for (let i = 0; i <= SAMPLES; i++) {
+          const t = (i / SAMPLES) * (wps.length - 1);
+          const cur = spline.evaluate(t, new C3());
+          if (prev) totalM += C3.distance(prev, cur) * C3.EARTH_RADIUS;
+          pts.push(cur);
+          prev = cur;
+        }
+
+        routeEnts.push(entities.add(new engine.Entity({
+          polyline: {
+            positions: pts,
+            width: 3,
+            color: new engine.Color(0.25, 0.9, 1.0, 0.9), // 前端近似：青
+          },
+        })));
+        drawWaypointMarkers(wps, CRUISE);
+
+        result.textContent =
+          `途经点: ${wps.length} 个   ${wps.map((p) => p.name).join(' → ')}\n` +
+          `[前端近似(离线)]   后台不可用：${errReason(err)}\n` +
+          `CatmullRom 样条（${SAMPLES} 采样）巡航高度 20 km\n` +
+          `航线长: ${(totalM / 1000).toFixed(1)} km（直线平滑，非路网路径）\n` +
+          `(后台路网仅覆盖武汉 114.20–114.40°E / 30.49–30.69°N，途经点须落在网内)`;
+      }
+
+      // ── 重建路径：优先后台路网 Dijkstra，失败回退样条 ─────────────────
+      let reqSeq = 0;
+      async function rebuild() {
+        const seq = ++reqSeq;
+        clearRoute();
+        if (waypoints.length < 2) {
+          result.textContent = '至少需要 2 个途经点';
+          return;
+        }
+        const wps = waypoints.map((p) => ({ name: p.name, lon: p.lon, lat: p.lat }));
+        result.textContent = '路径分析：请求后台 PostGIS 路网 Dijkstra …';
+        try {
+          const r = await postSpatial(API_ROUTE, {
+            waypoints: wps.map((p) => ({ lon: p.lon, lat: p.lat })),
+          });
+          if (seq !== reqSeq) return; // 过期结果，丢弃
+          renderServerRoute(r, wps);
+        } catch (err) {
+          if (seq !== reqSeq) return;
+          console.error('[86] 后台 route 失败，回退前端样条', err);
+          renderFallbackRoute(wps, err);
+        }
       }
 
       // ── 交互 ──────────────────────────────────────────────────────────
@@ -142,7 +236,9 @@
       const addModeBtn = addBtn('添加途经点（点击地图）', () => {
         adding = !adding;
         addModeBtn.classList.toggle('active', adding);
-        refresh(adding ? '添加模式：点击地图追加航点' : null);
+        if (adding) {
+          result.textContent = '添加模式：点击地图追加航点（后台路网需落在武汉网格内）';
+        }
       });
       addBtn('撤销最后航点', () => {
         if (waypoints.length > 2) { waypoints.pop(); rebuild(); }
@@ -172,18 +268,10 @@
         rebuild();
       }, 'LEFT_CLICK');
 
-      function refresh(note) {
-        result.textContent =
-          `途经点: ${waypoints.length} 个   ` +
-          `航线: ${waypoints.map((p) => p.name).join(' → ')}\n` +
-          `巡航高度: 20 km   样条: CatmullRom（${SAMPLES} 采样）\n` +
-          (note || '');
-      }
-
       rebuild();
 
       viewer.camera.setView({
-        destination: C3.fromDegrees(118.0, 34.2, 1_800_000),
+        destination: C3.fromDegrees(114.30, 30.59, 50_000),
       });
     }
 
@@ -193,7 +281,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [118.0, 34.2, 1_800_000],
+          view: [114.30, 30.59, 50_000],
           imagery: 'gaode-sat',
           title: '86 · 路径分析',
         }));

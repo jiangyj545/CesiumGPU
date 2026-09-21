@@ -5,27 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>示例 33：雷达探测 Probing - CesiumGPU</title>
   <style>
-    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:280px;max-width:380px;
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:290px;max-width:390px;
       padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
       border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
     .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
     .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
-    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;margin-bottom:8px;}
     .cg-panel #controls button{padding:5px 12px;font-size:12px;cursor:pointer;color:#cfe4ff;
       background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
     .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
     .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
-      white-space:pre-wrap;max-height:180px;overflow:auto;}
+      white-space:pre-wrap;max-height:200px;overflow:auto;}
   </style>
 </head>
 <body>
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
     <h1>33 雷达探测 Probing</h1>
-    <p class="desc">EV 探测雷达近似：CircleScan 同心波纹特效（引擎原生）+
-      旋转扇形视域 polygon（60° 张角，每 120ms 步进扫描）+ 目标点。
-      EV 私有探测服务的服务端计算无对应引擎，按规范做前端近似（诚实注明）。</p>
-    <div id="controls"></div>
+    <p class="desc">优先调用后台空间分析服务：雷达参数 → <code>POST /api/v1/spatial/probing</code>，
+      后台用湖北 ASTER GDEM 对 180 条方位 × 波束上下沿做地形求交，返回可见覆盖区
+      MultiPolygon（footprint）；前端渲染半透明橙红覆盖面 + 雷达标牌。
+      后台不可达时回退为 CircleScan 波纹 + 旋转扇形的前端视觉近似（诚实注明）。</p>
+    <label>探测距离 range：<span id="rangeVal">10.0</span> km</label>
+    <input id="rangeSlider" type="range" min="2000" max="30000" step="500" value="10000" />
+    <label>波束仰角 elevation：<span id="elevVal">-5.0</span>°（负 = 向下）</label>
+    <input id="elevSlider" type="range" min="-15" max="30" step="0.5" value="-5" />
+    <label>雷达天线高 height：<span id="heightVal">500</span> m（高于地面）</label>
+    <input id="heightSlider" type="range" min="100" max="3000" step="50" value="500" />
+    <div id="controls">
+      <button id="btnClickRadar">点选雷达位置：关</button>
+      <button id="btnNear">雷达近景</button>
+      <button id="btnWide">全域视角</button>
+    </div>
     <div id="result">初始化中…</div>
   </div>
   <script src="./js/demo-utils.js"></script>
@@ -44,10 +58,160 @@
         return btn;
       }
 
-      const RADAR = { lon: 115.8, lat: 40.4 };
-      const RANGE_M = 150_000;
+      // ── 后台空间分析服务（湖北 ASTER GDEM 30m，108-116°E / 29-34°N）──
+      const SPATIAL_API = 'http://localhost:8892/api/v1/spatial';
 
-      // ── 扇形顶点：中心 + 张角弧 ───────────────────────────────────
+      // 雷达状态（默认在湖北 DEM 内）
+      const radar = { lon: 112.0, lat: 30.5, height: 500 };
+      let rangeM = 10_000;
+      let elevDeg = -5;
+
+      const rangeSlider = document.getElementById('rangeSlider');
+      const elevSlider = document.getElementById('elevSlider');
+      const heightSlider = document.getElementById('heightSlider');
+      const rangeVal = document.getElementById('rangeVal');
+      const elevVal = document.getElementById('elevVal');
+      const heightVal = document.getElementById('heightVal');
+      const btnClickRadar = document.getElementById('btnClickRadar');
+
+      // ── 归一化 ECEF → 经纬度（点选取点用）──────────────────────────
+      const RATIO = 6356752.3142 / 6378137;
+      function toLonLat(p) {
+        const mag = Math.hypot(p.x, p.y, p.z);
+        const ux = p.x / mag, uy = (p.y / mag) / RATIO, uz = (p.z / mag) / RATIO;
+        return { lon: Math.atan2(uy, ux) * 180 / Math.PI,
+                 lat: Math.atan2(uz, Math.hypot(ux, uy)) * 180 / Math.PI };
+      }
+
+      // ── 雷达位置标牌 ───────────────────────────────────────────────
+      let radarMarker = null;
+      function drawRadarMarker() {
+        if (radarMarker) scene.entities.remove(radarMarker);
+        radarMarker = scene.entities.add(new engine.Entity({
+          name: '雷达站',
+          position: engine.Cartesian3.fromDegreesNormalized(radar.lon, radar.lat, 0),
+          point: { pixelSize: 14, color: new engine.Color(0.2, 1, 0.6, 1) },
+          label: {
+            text: `雷达站 ${radar.lon.toFixed(3)}°E ${radar.lat.toFixed(3)}°N\n天线 ${radar.height} m`,
+            font: 'bold 13px sans-serif',
+            fillColor: engine.Color.WHITE,
+            show: true,
+          },
+        }));
+      }
+      drawRadarMarker();
+
+      // CircleScan 波纹（引擎原生特效，跟随雷达位置，两种模式常驻）
+      let fxRipple = null;
+      function ensureRipple() {
+        if (fxRipple) scene.effects.remove(fxRipple);
+        fxRipple = scene.effects.add(new engine.CircleScan(viewer.context, {
+          center: { lon: radar.lon, lat: radar.lat },
+          radius: rangeM,
+          color: [1.0, 0.25, 0.15, 0.5],
+          speed: 2.4,
+          rings: 3,
+        }));
+      }
+      ensureRipple();
+
+      // ── footprint 渲染（后台模式）：MultiPolygon → 半透明橙红面 ─────
+      let footEntities = [];
+      function clearFootprint() {
+        for (const e of footEntities) scene.entities.remove(e);
+        footEntities = [];
+      }
+      function renderFootprint(mp) {
+        clearFootprint();
+        if (!mp || mp.type !== 'MultiPolygon' || !Array.isArray(mp.coordinates)) return 0;
+        let n = 0;
+        for (const poly of mp.coordinates) {
+          if (!Array.isArray(poly) || poly.length === 0) continue;
+          const outer = poly[0].map((c) => engine.Cartesian3.fromDegreesNormalized(c[0], c[1], 0));
+          if (outer.length < 3) continue;
+          const hierarchy = { positions: outer };
+          if (poly.length > 1) {
+            hierarchy.holes = poly.slice(1)
+              .map((ring) => ring.map((c) => engine.Cartesian3.fromDegreesNormalized(c[0], c[1], 0)))
+              .filter((h) => h.length >= 3);
+            if (hierarchy.holes.length === 0) delete hierarchy.holes;
+          }
+          // 半透明橙红覆盖面
+          footEntities.push(scene.entities.add(new engine.Entity({
+            name: 'probing-footprint-' + n,
+            polygon: {
+              hierarchy,
+              height: 0,
+              color: new engine.Color(1, 0.30, 0.12, 0.28),
+            },
+          })));
+          // 亮橙描边
+          footEntities.push(scene.entities.add(new engine.Entity({
+            name: 'probing-footprint-edge-' + n,
+            polyline: {
+              positions: outer,
+              width: 2,
+              color: new engine.Color(1, 0.55, 0.3, 0.9),
+            },
+          })));
+          n++;
+        }
+        return n;
+      }
+
+      // ── 后台探测请求（AbortController 30s，新请求取消旧请求）────────
+      let probingCtrl = null;
+      let firstFlight = true;
+      async function fetchProbing() {
+        if (probingCtrl) probingCtrl.abort();
+        const ctrl = new AbortController();
+        probingCtrl = ctrl;
+        const timer = setTimeout(() => ctrl.abort(), 30_000);
+        clearFootprint();
+        result.textContent = '正在请求后台 DEM 波束求交…';
+        try {
+          const r = await fetch(SPATIAL_API + '/probing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              radar: { lon: radar.lon, lat: radar.lat, height: radar.height },
+              range: rangeM,
+              elevation: elevDeg,
+            }),
+            signal: ctrl.signal,
+          });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const json = await r.json();
+          const res = json && json.result;
+          if (!res || !res.footprint) throw new Error('响应缺少 footprint');
+          if (ctrl !== probingCtrl) return; // 已被更新的请求取代
+          clearTimeout(timer);
+
+          const nPoly = renderFootprint(res.footprint);
+          ensureRipple();
+          clearLocalDeco(); // 后台成功：移除前端近似扇形/目标点
+          const hit = Number(res.hit_azimuths), total = Number(res.total_azimuths);
+          const cov = Number(res.coverage_km2);
+          const alt = Number(res.radar_alt_m);
+          result.textContent =
+            `模式：后台 DEM 波束求交 ✓\n` +
+            `覆盖面积 ${Number.isFinite(cov) ? cov.toFixed(2) : '--'} km² · 命中方位 ${hit}/${total}\n` +
+            `雷达海拔 ${Number.isFinite(alt) ? alt.toFixed(0) : '--'} m（天线 ${radar.height} m）· ` +
+            `波束仰角 ${elevDeg}°（半功率 3°）\n` +
+            `footprint ${nPoly} 个面 · range ${(rangeM / 1000).toFixed(1)} km` +
+            (nPoly === 0 ? '\n⚠ 0 个可见波束面：仰角过高或波束全部被地形遮挡' : '');
+          if (firstFlight && nPoly > 0) {
+            firstFlight = false;
+            flyNear();
+          }
+        } catch (err) {
+          clearTimeout(timer);
+          if (err && err.name === 'AbortError') return; // 被新请求/超时取消
+          renderLocalFallback(`后台探测服务不可用（${err && err.message ? err.message : err}）`);
+        }
+      }
+
+      // ── 回退：CircleScan + 旋转扇形 + 目标点（前端视觉近似）─────────
       function sectorPositions(centerLon, centerLat, radiusM, headingDeg, sweepDeg, segs = 24) {
         const mPerDegLat = 111_320;
         const mPerDegLon = 111_320 * Math.cos((centerLat * Math.PI) / 180);
@@ -60,68 +224,71 @@
         }
         return positions;
       }
-
-      // CircleScan 同心波纹（引擎原生特效）
-      scene.effects.add(new engine.CircleScan(viewer.context, {
-        center: { lon: RADAR.lon, lat: RADAR.lat },
-        radius: RANGE_M,
-        color: [1.0, 0.25, 0.15, 0.5],
-        speed: 2.4,
-        rings: 3,
-      }));
-
-      // 旋转扇形视域
-      const sector = scene.entities.add(new engine.Entity({
-        name: '雷达扇形视域',
-        polygon: {
-          hierarchy: { positions: sectorPositions(RADAR.lon, RADAR.lat, RANGE_M, 0, 60) },
-          height: 3000 / engine.Camera.EARTH_SCALE,
-          color: new engine.Color(1, 0.35, 0.15, 0.30),
-        },
-      }));
-      const sectorEdge = scene.entities.add(new engine.Entity({
-        name: '扇形边线',
-        polyline: {
-          positions: sectorPositions(RADAR.lon, RADAR.lat, RANGE_M, 0, 60),
-          width: 2,
-          color: new engine.Color(1, 0.55, 0.3, 0.9),
-        },
-      }));
-
-      // 目标点（分布在扫描半径内）
-      const TARGETS = [
-        { name: '目标 A（大型）', lon: 116.4, lat: 40.7, size: 18 },
-        { name: '目标 B（中型）', lon: 116.9, lat: 40.1, size: 14 },
-        { name: '目标 C（小型）', lon: 115.4, lat: 41.0, size: 11 },
-        { name: '目标 D（民航）', lon: 116.15, lat: 39.9, size: 12 },
-      ];
-      for (const t of TARGETS) {
-        scene.entities.add(new engine.Entity({
-          name: t.name,
-          position: engine.Cartesian3.fromDegreesNormalized(t.lon, t.lat, 0),
-          point: { pixelSize: t.size, color: new engine.Color(1, 0.2, 0.15, 0.95) },
-          label: { text: t.name, font: '13px sans-serif', fillColor: engine.Color.WHITE, show: true },
-        }));
-      }
-      // 雷达站
-      scene.entities.add(new engine.Entity({
-        name: '雷达站',
-        position: engine.Cartesian3.fromDegreesNormalized(RADAR.lon, RADAR.lat, 0),
-        point: { pixelSize: 16, color: new engine.Color(0.2, 1, 0.6, 1) },
-        label: { text: '雷达站', font: 'bold 14px sans-serif', fillColor: engine.Color.WHITE, show: true },
-      }));
-
-      // 扇形旋转扫描
+      let sector = null;
+      let sectorEdge = null;
+      let targetEntities = [];
+      let scanning = false;
       let heading = 0;
-      let scanning = true;
       let lastStep = 0;
+
+      function clearLocalDeco() {
+        if (sector) { scene.entities.remove(sector); sector = null; }
+        if (sectorEdge) { scene.entities.remove(sectorEdge); sectorEdge = null; }
+        for (const e of targetEntities) scene.entities.remove(e);
+        targetEntities = [];
+        scanning = false;
+      }
+
+      function renderLocalFallback(headline) {
+        ensureRipple();
+        if (!sector) {
+          sector = scene.entities.add(new engine.Entity({
+            name: '雷达扇形视域',
+            polygon: {
+              hierarchy: { positions: sectorPositions(radar.lon, radar.lat, rangeM, 0, 60) },
+              height: 3000 / engine.Camera.EARTH_SCALE,
+              color: new engine.Color(1, 0.35, 0.15, 0.30),
+            },
+          }));
+          sectorEdge = scene.entities.add(new engine.Entity({
+            name: '扇形边线',
+            polyline: {
+              positions: sectorPositions(radar.lon, radar.lat, rangeM, 0, 60),
+              width: 2,
+              color: new engine.Color(1, 0.55, 0.3, 0.9),
+            },
+          }));
+          // 目标点（分布在回退扇形半径内）
+          const TARGETS = [
+            { name: '目标 A（大型）', dLon: 0.12, dLat: 0.09, size: 18 },
+            { name: '目标 B（中型）', dLon: -0.10, dLat: 0.06, size: 14 },
+            { name: '目标 C（小型）', dLon: 0.05, dLat: -0.08, size: 11 },
+            { name: '目标 D（民航）', dLon: -0.06, dLat: -0.05, size: 12 },
+          ];
+          for (const t of TARGETS) {
+            targetEntities.push(scene.entities.add(new engine.Entity({
+              name: t.name,
+              position: engine.Cartesian3.fromDegreesNormalized(radar.lon + t.dLon, radar.lat + t.dLat, 0),
+              point: { pixelSize: t.size, color: new engine.Color(1, 0.2, 0.15, 0.95) },
+              label: { text: t.name, font: '13px sans-serif', fillColor: engine.Color.WHITE, show: true },
+            })));
+          }
+        }
+        scanning = true;
+        result.textContent =
+          `模式：${headline} → 前端近似(无 DEM 求交)\n` +
+          `CircleScan 波纹 ×3 环（${(rangeM / 1000).toFixed(0)} km）· 旋转扇形 60° × ${(rangeM / 1000).toFixed(0)} km\n` +
+          `雷达 ${radar.lon.toFixed(3)}°E ${radar.lat.toFixed(3)}°N 天线 ${radar.height} m · 仰角 ${elevDeg}°`;
+      }
+
+      // 扇形旋转扫描（仅回退模式激活）
       viewer.preRender = () => {
-        if (!scanning) return;
+        if (!scanning || !sector) return;
         const now = performance.now();
         if (now - lastStep < 120) return;
         lastStep = now;
         heading = (heading + 2.4) % 360;
-        const positions = sectorPositions(RADAR.lon, RADAR.lat, RANGE_M, heading, 60);
+        const positions = sectorPositions(radar.lon, radar.lat, rangeM, heading, 60);
         sector.polygon = {
           hierarchy: { positions },
           height: 3000 / engine.Camera.EARTH_SCALE,
@@ -134,20 +301,70 @@
         };
       };
 
-      addBtn('扫描开 / 关', () => { scanning = !scanning; });
-      addBtn('雷达近景', () => viewer.camera.flyTo({
-        destination: { lon: RADAR.lon, lat: RADAR.lat - 0.5, height: 500_000 },
-        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-40) },
-        duration: 2.5,
-      }));
+      // ── 交互：滑杆（500ms 防抖）+ 点选雷达 + 视角 ──────────────────
+      let debounceTimer = 0;
+      function debounceFetch() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => { fetchProbing(); }, 500);
+      }
+      rangeSlider.addEventListener('input', () => {
+        rangeM = Number(rangeSlider.value);
+        rangeVal.textContent = (rangeM / 1000).toFixed(1);
+        ensureRipple(); // 波纹半径即时跟随
+        debounceFetch();
+      });
+      elevSlider.addEventListener('input', () => {
+        elevDeg = Number(elevSlider.value);
+        elevVal.textContent = elevDeg.toFixed(1);
+        debounceFetch();
+      });
+      heightSlider.addEventListener('input', () => {
+        radar.height = Number(heightSlider.value);
+        heightVal.textContent = radar.height;
+        drawRadarMarker();
+        debounceFetch();
+      });
+
+      let clickMode = false;
+      const clickHandler = new engine.ScreenSpaceEventHandler(viewer.canvas);
+      clickHandler.setInputAction((pos) => {
+        if (!clickMode) return;
+        const ndcX = (pos.x / viewer.canvas.clientWidth) * 2 - 1;
+        const ndcY = 1 - (pos.y / viewer.canvas.clientHeight) * 2;
+        const hit = viewer.camera.pickGlobe(ndcX, ndcY);
+        if (!hit) return;
+        const ll = toLonLat(hit);
+        const inDem = ll.lon >= 108 && ll.lon <= 116 && ll.lat >= 29 && ll.lat <= 34;
+        radar.lon = ll.lon;
+        radar.lat = ll.lat;
+        drawRadarMarker();
+        if (!inDem) {
+          result.textContent = `雷达已移至 ${ll.lon.toFixed(4)}°E, ${ll.lat.toFixed(4)}°N` +
+            '（超出湖北 DEM 108-116°E/29-34°N，后台将返回空/回退）';
+        }
+        fetchProbing();
+      }, 'LEFT_CLICK');
+      btnClickRadar.addEventListener('click', () => {
+        clickMode = !clickMode;
+        btnClickRadar.textContent = `点选雷达位置：${clickMode ? '开（点球面取点）' : '关'}`;
+        btnClickRadar.classList.toggle('active', clickMode);
+      });
+
+      function flyNear() {
+        viewer.camera.flyTo({
+          destination: { lon: radar.lon, lat: radar.lat - 0.12, height: 30_000 },
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-40) },
+          duration: 2.5,
+        });
+      }
+      addBtn('扫描开 / 关', () => { scanning = !scanning; }); // 仅回退模式生效
+      addBtn('雷达近景', flyNear);
       addBtn('全域视角', () => viewer.camera.flyTo({
-        destination: { lon: RADAR.lon, lat: RADAR.lat, height: 1_200_000 }, duration: 2,
+        destination: { lon: radar.lon, lat: radar.lat, height: 120_000 }, duration: 2,
       }));
 
-      result.textContent =
-        `CircleScan 波纹 ×3 环（150 km，周期 2.4s）\n` +
-        `旋转扇形 60° × 150 km（每 120ms 步进 2.4°）· 目标 ${TARGETS.length} 个\n` +
-        `诚实注明：EV 服务端探测分析无引擎对应，此处为前端视觉近似`;
+      // 启动：直接请求后台探测
+      fetchProbing();
     }
 
     // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
@@ -156,9 +373,9 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [115.8, 39.9, 1_200_000],
+          view: [112.0, 30.32, 120_000],
           imagery: 'gaode-sat',
-          title: '33 · 雷达探测',
+          title: '33 · 雷达探测 Probing',
         }));
       } catch (err) {
         window.__DEMO_OK = false;
