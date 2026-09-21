@@ -281,6 +281,76 @@
       ];
     }
 
+    // ── F7 域随机化·视觉轴（?dr=<encodeURIComponent(JSON)>，未传则行为完全不变）──
+    // DrParams 视觉子集（派生唯一真源 = dataset-tools/dr-params.mjs，farm --randomize 生成）：
+    //   { timeOfDay: {hour}|null, weather: {mode,intensity}|null,
+    //     lighting: {sunIntensity,ambient}|null, exposure: {ev}|null }
+    const DR = (() => {
+      const raw = urlQ.get('dr');
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch (e) {
+        console.warn('[90] dr 参数解析失败，忽略（保持缺省渲染）:', e.message);
+        return null;
+      }
+    })();
+    window.__DR_VISUAL = DR;   // 诊断出口（联调/farm 核对）
+
+    /**
+     * 应用 DR 视觉轴（viewer 就绪后调用一次；返回实际生效快照，null = 未启用）。
+     * - timeOfDay：当地时（UTC+8）→ UTC → SunPosition 太阳方向（ECEF）+
+     *   色温近似（太阳高度角越低越暖：elev<60° 线性混入暖橙）。
+     * - lighting：DirectionalLight.intensity / ambientIntensity。
+     * - exposure：引擎无 tone-mapping/exposure pass（Scene 管线 G-Buffer→Lighting→
+     *   Transparent→Overlay，无曝光节点）——近似手段：Lambert 漫反射输出对光强
+     *   线性，故在光照输入端乘 2^ev，与输出端线性曝光增益数值等价。
+     * - weather：Weather（IPass）经 scene.effects 合成；传 scene 以逐帧取
+     *   G-Buffer 深度做地形遮挡。
+     */
+    function applyDrVisual(viewer, engineApi) {
+      if (!DR) return null;
+      const applied = {};
+      const light = viewer.scene.lights[0];
+      if (DR.timeOfDay) {
+        const hour = DR.timeOfDay.hour;
+        const d = new Date();
+        d.setUTCHours(((Math.floor(hour) - 8) + 48) % 24,
+          Math.round((hour - Math.floor(hour)) * 60), 0, 0);
+        light.direction = engineApi.SunPosition.computeSunDirection(engineApi.JulianDate.fromDate(d));
+        // 色温：direction 为光传播方向（指向地面），太阳高度 elev = asin(-dz)
+        const elev = Math.asin(Math.max(-1, Math.min(1, -light.direction[2])));
+        const dayness = Math.max(0, Math.min(1, elev / (Math.PI / 3)));  // ≥60° 视为正午白光
+        const mix = (warm, noon) => warm + (noon - warm) * dayness;
+        light.color = [mix(1.0, 1.0), mix(0.62, 0.97), mix(0.38, 0.92)];
+        applied.timeOfDay = { hour, sunElevDeg: Number(((elev * 180) / Math.PI).toFixed(2)) };
+      }
+      if (DR.lighting) {
+        light.intensity = DR.lighting.sunIntensity;
+        light.ambientIntensity = DR.lighting.ambient;
+        applied.lighting = { ...DR.lighting };
+      }
+      if (DR.exposure) {
+        const gain = 2 ** DR.exposure.ev;
+        light.intensity *= gain;
+        light.ambientIntensity *= gain;
+        applied.exposure = { ev: DR.exposure.ev, approx: 'lights *= 2^ev（无 tone-mapping 的线性等价）' };
+      }
+      if (DR.weather && DR.weather.mode !== 'none' && DR.weather.intensity > 0) {
+        const w = new engineApi.Weather(viewer.context, {
+          type: DR.weather.mode,
+          intensity: DR.weather.intensity,
+          sizeScale: 8,
+          scene: viewer.scene,
+        });
+        w.setCamera(viewer.camera);
+        viewer.scene.effects.add(w);
+        w.show = true;
+        applied.weather = { ...DR.weather };
+      }
+      return applied;
+    }
+
     async function demo(viewer, engineApi) {
       const result = document.getElementById('result');
       const { CityBlockBuilder, CesiumMath, SensorCam, SensorRecorder } = engineApi;
@@ -321,6 +391,8 @@
         }
       }
       const primitives = builder.build(viewer.context);
+      // ── F7 DR 视觉轴应用（?dr= 未传返回 null，渲染行为与 F5 批量完全一致）──
+      const drApplied = applyDrVisual(viewer, engineApi);
       // pickId → 语义：城市 chunk = building(1)，其余（globe/瓦片）= ground(3)
       const buildingPickIds = new Set(primitives.map((p) => p.pickId));
       for (const p of primitives) viewer.scene.addPrimitive(p);
@@ -529,9 +601,11 @@
           // 手动导出走「下载 JSON」按钮，episode 在页面内存中）。
           return {
             frames: [],
+            // F7：episode 级 stats 携带 dr 快照（未启用 DR 时为 undefined，
+            // JSON.stringify 自动省略 → 与既有契约逐字节兼容）
             stats: episode
-              ? { ...episode.stats }
-              : { nFrames: 0, droppedMs: 0 },
+              ? { ...episode.stats, drParams: DR ?? undefined }
+              : { nFrames: 0, droppedMs: 0, drParams: DR ?? undefined },
           };
         },
         status() {
@@ -589,6 +663,7 @@
           : `航线:     矩形 500m×200m @ ${ALT_M}m，5 航点，${SPEED_MS}m/s\n`) +
         `传感器:   fovY 45°，canvas ${viewer.context.drawingBufferWidth}×` +
         `${viewer.context.drawingBufferHeight}\n` +
+        (drApplied ? `DR:       ${JSON.stringify(drApplied)}\n` : '') +
         `API:      window.__SENSOR_RECORD.{start,stop,status}`;
     }
 
