@@ -98,6 +98,11 @@ export class Camera {
   /** Minimum dot product of camera direction with nadir before pitch is rejected (~85° max tilt). */
   private static readonly _MAX_TILT_NADIR_DOT = Math.cos(CesiumMath.toRadians(85));
 
+  /** Scratch for the geodetic-altitude conversion in `_updateProjMatrix` (metres ECEF). */
+  private static readonly _scratchEcefM = new Cartesian3();
+  /** Scratch cartographic result for `_updateProjMatrix` (height in normalised units). */
+  private static readonly _scratchCarto = new Cartographic();
+
   /** Scale factor: 1 internal unit = EARTH_SCALE metres */
   static readonly EARTH_SCALE = 6378137.0;
 
@@ -598,8 +603,28 @@ export class Camera {
     // front of the camera. far is tightened alongside to keep the near/far
     // ratio ≲ 2000 for depth-buffer precision. frustum.near/far are kept in
     // sync so effect/pick passes reading them stay consistent with the matrix.
-    const altitude = Math.max(Cartesian3.magnitude(this.position) - 1.0, 0.0);
-    this.frustum.near = Math.min(0.005, Math.max(altitude * 0.1, 1e-5));
+    //
+    // Altitude is the GEODETIC height above the WGS84 ellipsoid (normalised),
+    // not `|position| - 1.0`: that shortcut equals the height only at the
+    // equator. At mid-latitude the ellipsoid surface itself has |p| < 1
+    // (0.99914 at lat 30.5°), so every low-altitude camera clamped to
+    // altitude 0 and got stuck at the near floor (1e-5 = 63.8 m) — the near
+    // plane then sat ABOVE a drone flying at 4-40 m AGL and near-clipped the
+    // entire ground in sensor views; the clipped ground exposed the
+    // 31.9 km-deep tile-skirt curtains, whose interior fragments surfaced as
+    // the constant ~13 km "ground" depth band (SensorCam W4 defect).
+    Cartesian3.multiplyByScalar(this.position, Camera.EARTH_SCALE, Camera._scratchEcefM);
+    const altitude = Math.max(
+      Cartographic.fromCartesian(Camera._scratchEcefM, Camera._scratchCarto).height,
+      0.0,
+    );
+    // Near floor 1e-6 (≈6.4 m): keeps the ground unclipped for nadir/oblique
+    // sensors at 6-40 m AGL. The historical 1e-5 floor (63.8 m) sat ABOVE such
+    // flights — every ground pixel nearer than 63.8 m view-z was near-clipped,
+    // the clipped rays continued underground and pierced the 31.9 km-deep tile
+    // skirt curtains, which surfaced as the constant ~13 km "ground" depth band
+    // (depth32float keeps <1 m linearised error at 300 m+ with n=1e-6, f=0.02).
+    this.frustum.near = Math.min(0.005, Math.max(altitude * 0.1, 1e-6));
     this.frustum.far = Math.max(this.frustum.near * 2000, Math.min(100.0, altitude * 150 + 0.02));
     Matrix4.perspective(
       this.frustum.fov,

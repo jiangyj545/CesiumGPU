@@ -5,6 +5,7 @@ import { analyseTopRows, readBitmapRowMeans, cropTopRows, MIN_CROP_LEAD_ROWS, Ca
 import { MipmapGenerator } from '../renderer/MipmapGenerator';
 import { Camera } from '../scene/Camera';
 import { Cartesian3 } from '../math/Cartesian3';
+import { Cartographic } from '../math/Cartographic';
 
 /**
  * ImageryLayer - One imagery source composited onto the globe, owning the
@@ -205,8 +206,19 @@ export class ImageryLayer {
     const camDist = Cartesian3.magnitude(camPos);
 
     // Horizon cone: surface points P stay visible while
-    // dot(normalize(P), camDir) >= cos(θh), with cos(θh) = R / |cam|, R = 1.
-    const horizonCos = Math.min(1.0, 1.0 / Math.max(camDist, 1.000001));
+    // dot(normalize(P), camDir) >= cos(θh), with cos(θh) = R / |cam|.
+    // R is the LOCAL ellipsoid-surface radius at the camera's latitude, not
+    // the equatorial 1.0: at mid-latitude the WGS84 surface norm is < 1
+    // (0.99914 at lat 30.5°), so with R = 1 a low-altitude camera (|cam|
+    // below 1.0 + ε) collapsed the cone to a razor sliver and culled every
+    // tile beyond ~one tile width of the camera's nadir — the entire ground
+    // vanished from low-altitude oblique views (W4 SensorCam depth defect:
+    // ground pixels read the depth clear value / skirt walls).
+    Cartesian3.multiplyByScalar(camPos, Cartographic.EARTH_SCALE, _scratchEcefM);
+    const camHeight = Cartographic.fromCartesian(_scratchEcefM, _scratchCarto).height;
+    const heightEff = Math.max(camHeight, 1e-7);
+    const surfaceR = Math.max(camDist - heightEff, 0.9);
+    const horizonCos = Math.min(1.0, surfaceR / Math.max(camDist, surfaceR));
     const horizonSin = Math.sqrt(Math.max(0.0, 1.0 - horizonCos * horizonCos));
 
     const maxLevel   = Math.min(this._maximumLevel, this.provider.maximumLevel);
@@ -624,6 +636,11 @@ const DEFAULT_MAXIMUM_SSE = 1.0;
 
 /** Safety cap on the selected set (guards against SSE blowups). */
 const MAX_SELECTED_TILES = 512;
+
+/** Scratch ECEF (metres) for the geodetic-height read in `_selectTiles`. */
+const _scratchEcefM = new Cartesian3();
+/** Scratch cartographic result for `_selectTiles` (height normalised). */
+const _scratchCarto = new Cartographic();
 
 /** Cap on the CPU bounding-volume cache. */
 const MAX_VOLUMES = 8192;
