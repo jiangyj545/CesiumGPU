@@ -23,6 +23,14 @@ export interface PickPassGlobe {
   /** Live per-tile imagery primitives. */
   readonly tilePrimitives: Primitive[];
   readonly tilePrimitiveCount: number;
+  /**
+   * Quadtree surface mode: tiles ARE the globe (CesiumJS architecture) —
+   * the base sphere must be skipped in the pick view just like the G-Buffer
+   * pass does, otherwise both sit at r=1.0 and the finer-tessellated sphere
+   * z-fight-wins every tile pixel, collapsing all globe picks onto the
+   * sphere's id.
+   */
+  readonly surfaceIsQuadtree: boolean;
 }
 
 /**
@@ -160,6 +168,12 @@ export class PickPass {
 
   /** Diagnostics: how often each pipeline stage ran. */
   readonly debug = { hookCalls: 0, encodes: 0, flushes: 0, gpuErrors: 0 };
+
+  /**
+   * Debug: render the pick view without the 1×1 scissor so the whole id
+   * plane can be dumped via `debugDumpPickTexture`.
+   */
+  debugFullViewport = false;
 
   /** Registered once via `deps.addFrameHook`; encodes the pick view. */
   private readonly _frameHook: (encoder: GPUCommandEncoder) => void;
@@ -361,6 +375,37 @@ export class PickPass {
     return decoded;
   }
 
+  /**
+   * Debug: dump the whole pick-texture id plane as tightly packed RGBA bytes.
+   * Must be called after a pick resolved (the texture holds that pick's
+   * render). Returns null when the pick target does not exist yet.
+   */
+  async debugDumpPickTexture(): Promise<{ w: number; h: number; data: Uint8Array } | null> {
+    const tex = this._pickTexture;
+    if (!tex) return null;
+    const device = this._deps.context.device;
+    const w = this._targetWidth;
+    const h = this._targetHeight;
+    const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
+    const buf = device.createBuffer({
+      label:  'PickPass.DebugDump',
+      size:   bytesPerRow * h,
+      usage:  GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const enc = device.createCommandEncoder({ label: 'PickPass.DebugDump' });
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow }, { width: w, height: h });
+    this._deps.context.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(buf.getMappedRange());
+    const out = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      out.set(src.subarray(y * bytesPerRow, y * bytesPerRow + w * 4), y * w * 4);
+    }
+    buf.unmap();
+    buf.destroy();
+    return { w, h, data: out };
+  }
+
   destroy(): void {
     this._deps.removeFrameHook(this._frameHook);
 
@@ -408,12 +453,18 @@ export class PickPass {
     return h;
   }
 
-  /** Change-detector for the cached pick: pickable content. */
+  /** Change-detector for the cached pick: pickable content + visibility. */
   private _sceneFingerprint(): number {
+    // Visibility must participate: toggling prim/globe `.show` without adding
+    // or removing anything otherwise keeps serving stale cached picks.
+    let visible = this._deps.globe.show ? 1 : 0;
+    for (const p of this._deps.primitives) if (p.show) visible += 1;
+    for (const p of this._registered) if (p.show) visible += 1;
     return (
       this._deps.primitives.length * 2654435761 +
       this._deps.globe.tilePrimitiveCount * 40503 +
-      this._registered.size * 104729
+      this._registered.size * 104729 +
+      visible * 31337
     );
   }
 
@@ -573,10 +624,10 @@ export class PickPass {
     const globe = this._deps.globe;
     if (globe.show) {
       const base = globe.primitive;
-      if (base) {
+      if (base && !globe.surfaceIsQuadtree) {
         drawWithId(base);
-        for (const tile of globe.tilePrimitives) drawWithId(tile);
       }
+      for (const tile of globe.tilePrimitives) drawWithId(tile);
     }
 
     for (const prim of this._deps.primitives.opaque) drawWithId(prim);
@@ -615,17 +666,19 @@ export class PickPass {
         },
       });
       pass.setPipeline(this._pipeline);
-      // Rasterize only the texel that is read back below. The 1×1 viewport
-      // keeps the NDC→framebuffer mapping of the full-size pass consistent
-      // at that texel (NDC origin lands exactly on texel (job.x, job.y)'s
-      // centre = the copyTextureToBuffer origin), and the scissor rect —
-      // always active in WebGPU, no pipeline state needed — skips fragment
-      // work for every other pixel of the canvas-sized target. job.x/y are
-      // already clamped integers within [0, size-1], so the 1×1 scissor is
-      // always inside the render target. This pass is encoded independently
-      // from the main render, so per-pass state cannot leak into it.
-      pass.setViewport(job.x, job.y, 1, 1, 0, 1);
-      pass.setScissorRect(job.x, job.y, 1, 1);
+      // 采样单一 texel 的正确方式：全尺寸 viewport（保持 NDC→framebuffer
+      // 映射，图元只光栅化到自己的屏幕位置）+ 1×1 scissor（片段写入限制到
+      // 被 copyTextureToBuffer 读取的那个 texel；WebGPU scissor 恒启用，
+      // 无需管线状态；job.x/y 已钳制到 [0, size-1]）。
+      //
+      // 历史教训（2026-09-21 GPU 实测定案）：曾用 setViewport(x, y, 1, 1)
+      // 代替 scissor —— 1×1 viewport 把整个 NDC 平面 [-1,1]² 压缩进那一个
+      // texel，任何与视锥相交的图元（无论投影在屏幕何处）都变换到该 texel
+      // 内光栅化，深度竞争后恒返回同一图元的 id（含 GLB Model 的场景点哪
+      // 里都返回模型 id）。本 pass 独立编码，per-pass 状态不会泄漏到主渲染。
+      if (!this.debugFullViewport) {
+        pass.setScissorRect(job.x, job.y, 1, 1);
+      }
       this._drawPickSet(pass, this._cameraBindGroup);
       pass.end();
 
