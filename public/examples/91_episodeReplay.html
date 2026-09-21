@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 91：Episode 轨迹回放器 - CesiumGPU</title>
+  <link rel="icon" href="data:," /><!-- 抑制 favicon.ico 404（保持 console 零错误） -->
+
+  <style>
+    /* 面板样式与 89 页同约定 */
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:430px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:220px;overflow:auto;}
+    .cg-panel .row{display:flex;gap:6px;align-items:center;margin:6px 0;flex-wrap:wrap;}
+    .cg-panel input[type=file]{font-size:12px;color:#d8e8ff;max-width:230px;}
+    .cg-panel select{font-size:12px;background:#0a1220;color:#d8e8ff;border:1px solid rgba(120,180,255,.35);border-radius:4px;padding:2px 4px;}
+
+    /* 帧四宫格（右上）：RGB | 深度伪彩 / 分割 | 参数 */
+    #quad{position:absolute;top:12px;right:12px;z-index:9000;display:grid;
+      grid-template-columns:220px 220px;gap:6px;padding:8px;
+      background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);border-radius:8px;}
+    #quad .cell{position:relative;width:220px;height:152px;background:#0a1220;
+      border:1px solid rgba(120,180,255,.2);border-radius:4px;overflow:hidden;}
+    #quad canvas{width:100%;height:100%;display:block;}
+    #quad .tag{position:absolute;left:5px;top:3px;z-index:2;font:11px Consolas,Monaco,monospace;
+      color:#8ecafc;text-shadow:0 1px 3px #000;pointer-events:none;}
+    #quad .cell.txt pre{margin:0;padding:5px 6px;font:11px/1.55 Consolas,Monaco,monospace;
+      color:#b5e3a8;white-space:pre-wrap;overflow:auto;max-height:152px;box-sizing:border-box;}
+
+    /* 时间轴（底部居中） */
+    #timeline{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;z-index:9000;
+      display:flex;gap:8px;align-items:center;padding:8px 12px;
+      background:rgba(10,18,30,.85);border:1px solid rgba(120,180,255,.25);border-radius:8px;color:#d8e8ff;
+      font:12px Consolas,Monaco,monospace;}
+    #timeline button{background:#16233a;color:#d8e8ff;border:1px solid rgba(120,180,255,.35);
+      border-radius:4px;padding:3px 9px;cursor:pointer;font:12px Consolas,Monaco,monospace;}
+    #timeline button:hover{background:#1f3152;}
+    #timeline button.active{background:#2c4f8a;border-color:#8ecafc;}
+    #timeline input[type=range]{width:340px;accent-color:#4a90e2;}
+    #tLabel{min-width:118px;text-align:center;color:#b5e3a8;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <div class="cg-panel">
+    <h1>91 Episode 轨迹回放器（F6 v0）</h1>
+    <p class="desc">
+      低空飞行器训练平台数据检查/演示工具：FrameRecord 帧序列在三维地球上重放 +
+      帧四宫格对照（RGB | 深度 turbo 伪彩 | 分割 palette-v0.1 色块 | 参数/事件）。
+      数据契约 dataset-tools/schema/frame-record.ts。默认加载 demo-episode.json
+      （200 帧 @5Hz，guanggu-500m 航线），也可选择本地 episode json。
+    </p>
+    <div class="row">
+      <span style="font-size:12px;color:#9db4d0">底图</span>
+      <select id="imagerySel">
+        <option value="proc" selected>程序纹理（离线默认）</option>
+        <option value="local">8890 离线瓦片（探测失败自动回退）</option>
+        <option value="gaode">gaode 在线卫星</option>
+      </select>
+    </div>
+    <div class="row">
+      <input type="file" id="fileIn" accept=".json,application/json" />
+    </div>
+    <div id="result">初始化中…</div>
+  </div>
+
+  <div id="quad">
+    <div class="cell"><span class="tag">RGB</span><canvas id="cRgb" width="220" height="152"></canvas></div>
+    <div class="cell"><span class="tag">DEPTH · turbo</span><canvas id="cDepth" width="220" height="152"></canvas></div>
+    <div class="cell"><span class="tag">SEG · palette-v0.1</span><canvas id="cSeg" width="220" height="152"></canvas></div>
+    <div class="cell txt"><span class="tag">PARAMS / EVENTS</span><pre id="params"></pre></div>
+  </div>
+
+  <div id="timeline">
+    <button id="btnPlay">暂停</button>
+    <input id="seek" type="range" min="0" max="39.8" step="0.2" value="0" />
+    <span id="tLabel">0.0s / 0.0s</span>
+    <button data-speed="0.5">0.5x</button>
+    <button data-speed="1" class="active">1x</button>
+    <button data-speed="2">2x</button>
+  </div>
+
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const EARTH_SCALE = 6378137.0;               // 引擎约定：1 归一化单位 = 6378137 m（见 src/math/Cartographic.ts）
+    const R2D = 180 / Math.PI;
+    const D2R = Math.PI / 180;
+
+    // palette-v0.1 类别 id → RGB（与生成器注释一致：0天空/1建筑/2道路/3植被/4车辆/其他）
+    const PALETTE_V01 = [
+      [0.53, 0.81, 0.92], // 0 sky
+      [0.69, 0.69, 0.69], // 1 building
+      [0.33, 0.33, 0.33], // 2 road
+      [0.13, 0.55, 0.13], // 3 vegetation
+      [0.88, 0.25, 0.25], // 4 car
+      [0.50, 0.25, 0.00], // 5 other
+    ];
+
+    // turbo 伪彩（多项式近似，Google Turbo）
+    const TURBO_R = [0.13572138, 4.6153926, -42.66032258, 132.13108234, -152.94239396, 59.28637943];
+    const TURBO_G = [0.09140261, 2.19418839, 4.84296658, -14.18503333, 4.27729857, 2.82956604];
+    const TURBO_B = [0.1066733, 12.64194608, -60.58204836, 110.36276771, -89.90310912, 27.34824973];
+    function turbo(x) {
+      x = Math.min(1, Math.max(0, x));
+      const poly = (k) => k[0] + x * (k[1] + x * (k[2] + x * (k[3] + x * (k[4] + x * k[5]))));
+      return [poly(TURBO_R), poly(TURBO_G), poly(TURBO_B)].map((v) => Math.min(255, Math.max(0, Math.round(v * 255))));
+    }
+
+    // ── 回放状态 ──
+    let ep = null;                // episode json 对象
+    let hz = 5, duration = 0;
+    let playing = false, speed = 1, simT = 0;
+    let lastTs = performance.now();
+    let drawnFi = -1;             // 四宫格/高亮线节流标记
+    let trajEntities = [];        // 可重建实体（轨迹/航点/飞行器）
+    let head = null, headTick = null, flownEntity = null;
+    const rgbImg = new Image();   // dataURL 缓存（同一 uri 不重复解码）
+    let rgbUriLoaded = '';
+    const state = { posList: [] };
+
+    const cRgb = document.getElementById('cRgb');
+    const cDepth = document.getElementById('cDepth');
+    const cSeg = document.getElementById('cSeg');
+    const result = document.getElementById('result');
+    const params = document.getElementById('params');
+    const seek = document.getElementById('seek');
+    const tLabel = document.getElementById('tLabel');
+    const btnPlay = document.getElementById('btnPlay');
+
+    /** ECEF(米) → 引擎归一化 ECEF（经引擎 Cartographic 反解经纬高；Cartographic.fromCartesian 入参为米，
+     *  再用 fromDegreesNormalized（内部按 EARTH_SCALE=6378137 归一）得到 Entity.position 约定单位 */
+    function ecefToPos(x, y, z) {
+      const c = engine.Cartographic.fromCartesian(new engine.Cartesian3(x, y, z));
+      return engine.Cartesian3.fromDegreesNormalized(c.longitude * R2D, c.latitude * R2D, c.height * EARTH_SCALE);
+    }
+
+    /** quat [w,x,y,z] body→ENU 近似反解航向（北顺时针）。
+     *  简化说明：仅取 z 轴偏航分量（忽略 pitch/roll），与引擎 Camera orientation 的
+     *  heading/pitch/roll 语义不同；仅用于回放显示，不作控制真值。 */
+    function quatToHeading(q) {
+      const [w, x, y, z] = q;
+      const yaw = Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
+      return isFinite(yaw) ? yaw : 0;
+    }
+
+    /** 航向(北顺时针)在 ECEF 中的单位方向（east*sinψ + north*cosψ） */
+    function headingDirEcef(lonRad, latRad, psi) {
+      const sl = Math.sin(latRad), cl = Math.cos(latRad);
+      const so = Math.sin(lonRad), co = Math.cos(lonRad);
+      const e = [-so, co, 0];
+      const n = [-sl * co, -sl * so, cl];
+      const s = Math.sin(psi), c = Math.cos(psi);
+      return [e[0] * s + n[0] * c, e[1] * s + n[1] * c, e[2] * s + n[2] * c];
+    }
+
+    /** ENU(米,相对 origin) → ECEF(米)：事件推断航点时使用 */
+    function ecefOfEnu(origin, enu) {
+      const sl = Math.sin(origin.lat * D2R), cl = Math.cos(origin.lat * D2R);
+      const so = Math.sin(origin.lon * D2R), co = Math.cos(origin.lon * D2R);
+      const o = engine.Cartesian3.fromDegrees(origin.lon, origin.lat, origin.alt_m);
+      const [E, N, U] = enu;
+      return new engine.Cartesian3(
+        o.x - so * E - sl * co * N + cl * co * U,
+        o.y + co * E - sl * so * N + cl * so * U,
+        o.z + cl * N + sl * U,
+      );
+    }
+
+    function addEntity(opts) {
+      const e = viewer.scene.entities.add(opts);
+      trajEntities.push(e);
+      return e;
+    }
+
+    function clearEpisodeEntities() {
+      for (const e of trajEntities) viewer.scene.entities.remove(e);
+      trajEntities = [];
+      head = headTick = flownEntity = null;
+      drawnFi = -1;
+    }
+
+    // 已播放高亮线（帧号推进时整体重建一次，同 51 页做法）
+    function rebuildFlown(fi) {
+      if (flownEntity && drawnFi === fi) return;
+      drawnFi = fi;
+      if (flownEntity) viewer.scene.entities.remove(flownEntity);
+      const n = Math.max(2, fi + 1);
+      flownEntity = addEntity({
+        name: '已飞航迹',
+        polyline: { positions: state.posList.slice(0, n), width: 2.5, color: new engine.Color(1.0, 0.55, 0.1, 0.95) },
+      });
+    }
+
+    /** 加载 episode（file input 或默认 demo 数据），装配三维 + 时间轴 */
+    function loadEpisode(obj) {
+      if (!obj || !Array.isArray(obj.frames) || obj.frames.length < 2) {
+        throw new Error('episode 数据无效：缺少 frames[]（≥2 帧）');
+      }
+      clearEpisodeEntities();
+      ep = obj;
+      const frames = ep.frames;
+      hz = ep.frame_rate_hz || 5;
+      duration = frames[frames.length - 1].sim_time_s;
+      simT = 0;
+      playing = true;
+      syncPlayBtn();
+      seek.max = String(duration);
+      seek.step = String(1 / hz);
+      seek.value = '0';
+
+      // 1) 全轨迹淡显 polyline（全帧 pos_ecef → 归一化）
+      state.posList = frames.map((f) => ecefToPos(f.action.pos_ecef[0], f.action.pos_ecef[1], f.action.pos_ecef[2]));
+      addEntity({
+        name: '全轨迹',
+        // 线宽说明：引擎 polyline 宽度按世界尺度（米制带）渲染，视距 ~1.6km 下取小值
+        polyline: { positions: state.posList, width: 1.5, color: new engine.Color(0.3, 0.7, 1.0, 0.4) },
+      });
+
+      // 2) 航点标记：优先 manifest.scenario.waypoints（ScenarioSpec 快照），
+      //    否则从 waypoint_reached 事件 payload.target_enu + scenario.origin 推断
+      const wps = [];
+      const scn = ep.scenario;
+      if (scn && Array.isArray(scn.waypoints) && scn.origin) {
+        for (const w of scn.waypoints) {
+          wps.push({ lon: w.lon, lat: w.lat, altAbs: scn.origin.alt_m + w.alt_m });
+        }
+      } else if (scn && scn.origin) {
+        const ev = (frames[0].events || []).find((e) => e.type === 'waypoint_reached');
+        if (ev && Array.isArray(ev.payload && ev.payload.target_enu)) {
+          const c = engine.Cartographic.fromCartesian(ecefOfEnu(scn.origin, ev.payload.target_enu));
+          wps.push({ lon: c.longitude * R2D, lat: c.latitude * R2D, altAbs: c.height * EARTH_SCALE });
+        }
+      }
+      wps.forEach((w, i) => {
+        const p = engine.Cartesian3.fromDegreesNormalized(w.lon, w.lat, w.altAbs);
+        addEntity({
+          name: 'WP' + (i + 1), position: p,
+          point: { color: new engine.Color(1.0, 0.85, 0.2, 1.0), pixelSize: 8 },
+          label: { text: 'WP' + (i + 1), font: '12px sans-serif', fillColor: new engine.Color(1, 0.92, 0.6, 1) },
+        });
+      });
+
+      // 3) 飞行器当前位置（红点）+ 航向指示短线
+      head = addEntity({
+        name: '飞行器', position: state.posList[0],
+        point: { color: new engine.Color(1.0, 0.3, 0.2, 1.0), pixelSize: 11 },
+      });
+      headTick = addEntity({
+        name: '航向指示',
+        polyline: { positions: [state.posList[0], state.posList[0]], width: 3, color: new engine.Color(1.0, 0.6, 0.1, 0.9) },
+      });
+      rebuildFlown(0);
+      render();
+    }
+
+    // ── 帧四宫格绘制 ─────────────────────────────────────────────
+    function clearCanvas(canvas) {
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#0a1220';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      return ctx;
+    }
+
+    function drawImageTo(canvas, src) {
+      const ctx = clearCanvas(canvas);
+      const s = Math.max(canvas.width / src.width, canvas.height / src.height); // cover
+      const w = src.width * s, h = src.height * s;
+      ctx.imageSmoothingEnabled = false; // 4x4 占位图保持色块观感
+      ctx.drawImage(src, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+    }
+
+    function drawGridTo(canvas, side, colorAt) {
+      const off = document.createElement('canvas');
+      off.width = side; off.height = side;
+      const octx = off.getContext('2d');
+      const img = octx.createImageData(side, side);
+      for (let i = 0; i < side * side; i++) {
+        const [r, g, b] = colorAt(i);
+        img.data[i * 4] = r; img.data[i * 4 + 1] = g; img.data[i * 4 + 2] = b; img.data[i * 4 + 3] = 255;
+      }
+      octx.putImageData(img, 0, 0);
+      const ctx = clearCanvas(canvas);
+      ctx.imageSmoothingEnabled = true; // 32x32 放大平滑
+      const s = Math.max(canvas.width / side, canvas.height / side);
+      const w = side * s, h = side * s;
+      ctx.drawImage(off, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+    }
+
+    function drawQuad(frame) {
+      // RGB（dataURL 占位图）
+      const uri = frame.vision && frame.vision.rgb && frame.vision.rgb.uri;
+      if (uri && uri.startsWith('data:')) {
+        if (uri === rgbUriLoaded) {
+          drawImageTo(cRgb, rgbImg);
+        } else {
+          rgbImg.onload = () => { rgbUriLoaded = uri; drawImageTo(cRgb, rgbImg); };
+          rgbImg.src = uri;
+        }
+      } else {
+        clearCanvas(cRgb);
+      }
+
+      // 深度 turbo 伪彩（Phase 0 内联数组优先：vision.depth.data；缺失时按 far 上限归一）
+      const depth = (frame.vision && frame.vision.depth) || {};
+      if (Array.isArray(depth.data) && depth.data.length > 0) {
+        const near = Number.isFinite(depth.near_m) ? depth.near_m : 0;
+        const far = Number.isFinite(depth.far_m) && depth.far_m > near ? depth.far_m : Math.max(...depth.data);
+        drawGridTo(cDepth, 32, (i) => turbo((depth.data[i] - near) / (far - near)));
+      } else {
+        const ctx = clearCanvas(cDepth);
+        ctx.fillStyle = '#9db4d0'; ctx.font = '11px Consolas'; ctx.fillText('无内联深度数据', 10, 20);
+      }
+
+      // 分割色块（id → palette-v0.1）
+      const seg = (frame.vision && frame.vision.seg) || {};
+      if (Array.isArray(seg.data) && seg.data.length > 0) {
+        drawGridTo(cSeg, 32, (i) => {
+          const c = PALETTE_V01[Math.abs(seg.data[i] | 0) % PALETTE_V01.length];
+          return [Math.round(c[0] * 255), Math.round(c[1] * 255), Math.round(c[2] * 255)];
+        });
+      } else {
+        const ctx = clearCanvas(cSeg);
+        ctx.fillStyle = '#9db4d0'; ctx.font = '11px Consolas'; ctx.fillText('无内联分割数据', 10, 20);
+      }
+
+      // 参数/事件文本
+      const a = frame.action || {};
+      const fmtV = (v) => Array.isArray(v) ? v.map((x) => (+x).toFixed(1)).join(', ') : '-';
+      const evText = (frame.events || []).map((e) => `${e.t.toFixed(2)}s ${e.type}`).join(' | ') || '无';
+      params.textContent =
+        `step ${String(frame.step_index).padStart(6, '0')}  t=${frame.sim_time_s.toFixed(2)}s\n` +
+        `pos_enu[m]  ${fmtV(a.pos_enu)}\n` +
+        `vel_e[m/s]  ${fmtV(a.vel_e)}\n` +
+        `motor[rpm]  ${fmtV(a.motor_rpm)}\n` +
+        `events      ${evText}`;
+    }
+
+    // ── 主渲染：帧间插值 + 实体更新 + 四宫格节流 ──────────────────
+    function render() {
+      if (!ep) return;
+      const frames = ep.frames;
+      const fi = Math.min(frames.length - 1, Math.max(0, Math.floor(simT * hz)));
+      const f0 = frames[fi];
+      const f1 = frames[Math.min(fi + 1, frames.length - 1)];
+      const span = (f1.sim_time_s - f0.sim_time_s) || 1 / hz;
+      const u = Math.min(1, Math.max(0, (simT - f0.sim_time_s) / span));
+
+      // 位置：相邻帧 pos_ecef 线性插值（preRender 驱动，逐帧平滑）
+      const ex = f0.action.pos_ecef[0] + (f1.action.pos_ecef[0] - f0.action.pos_ecef[0]) * u;
+      const ey = f0.action.pos_ecef[1] + (f1.action.pos_ecef[1] - f0.action.pos_ecef[1]) * u;
+      const ez = f0.action.pos_ecef[2] + (f1.action.pos_ecef[2] - f0.action.pos_ecef[2]) * u;
+      head.position = ecefToPos(ex, ey, ez);
+
+      if (drawnFi !== fi) {
+        rebuildFlown(fi);
+
+        // 航向指示：quat 反解航向（近似，见 quatToHeading 注释）；无 quat 回退速度方向
+        let psi = null;
+        if (Array.isArray(f0.action.quat) && f0.action.quat.length === 4) psi = quatToHeading(f0.action.quat);
+        else if (Array.isArray(f0.action.vel_e)) psi = Math.atan2(f0.action.vel_e[0], f0.action.vel_e[1]);
+        if (psi !== null && Number.isFinite(psi)) {
+          const c = engine.Cartographic.fromCartesian(new engine.Cartesian3(ex, ey, ez));
+          const dir = headingDirEcef(c.longitude, c.latitude, psi);
+          viewer.scene.entities.remove(headTick);
+          headTick = addEntity({
+            name: '航向指示',
+            polyline: {
+              positions: [
+                head.position,
+                ecefToPos(ex + dir[0] * 40, ey + dir[1] * 40, ez + dir[2] * 40),
+              ],
+              width: 2, color: new engine.Color(1.0, 0.6, 0.1, 0.9),
+            },
+          });
+        }
+        drawQuad(f0);
+      }
+
+      seek.value = String(Math.min(simT, duration));
+      tLabel.textContent = `${simT.toFixed(1)}s / ${duration.toFixed(1)}s`;
+    }
+
+    function syncPlayBtn() {
+      btnPlay.textContent = playing ? '暂停' : '播放';
+    }
+
+    // ── 控件 ──
+    btnPlay.addEventListener('click', () => {
+      if (!ep) return;
+      if (!playing && simT >= duration) simT = 0; // 播完重播
+      playing = !playing;
+      syncPlayBtn();
+    });
+    seek.addEventListener('input', () => {
+      simT = parseFloat(seek.value) || 0;
+      if (ep) { drawnFi = -1; render(); } // 强制四宫格/高亮线刷新
+    });
+    document.querySelectorAll('#timeline button[data-speed]').forEach((b) => {
+      b.addEventListener('click', () => {
+        speed = parseFloat(b.dataset.speed) || 1;
+        document.querySelectorAll('#timeline button[data-speed]').forEach((x) => x.classList.toggle('active', x === b));
+      });
+    });
+    document.getElementById('fileIn').addEventListener('change', async (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      try {
+        loadEpisode(JSON.parse(await f.text()));
+        DemoUtils.toast(`已加载 ${f.name}（${ep.frames.length} 帧）`);
+        updateResult(`数据源:     ${f.name}（用户文件）`);
+      } catch (err) {
+        DemoUtils.showError('episode 解析/加载失败', err);
+      }
+    });
+
+    // ── 底图：默认程序纹理（零网络请求，确定性渲染）。
+    //    8890 离线瓦片：选择时先探测，不可达 → toast 提示并回退程序纹理；
+    //    gaode：在线卫星瓦片（需要外网）。
+    async function tryLocalTiles() {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 1500);
+      try {
+        const res = await fetch('http://localhost:8890/0/0/0.png', { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        viewer.globe.layers.addImageryProvider(new engine.XyzImageryProvider({
+          url: 'http://localhost:8890/{z}/{x}/{y}.png', maximumLevel: 19, tileSize: 256,
+        }));
+        return '8890 离线瓦片';
+      } catch (err) {
+        clearTimeout(timer);
+        DemoUtils.toast(`8890 离线瓦片不可达（${err.name === 'AbortError' ? '超时' : '连接失败'}），已回退程序纹理`);
+        return null;
+      }
+    }
+    document.getElementById('imagerySel').addEventListener('change', async (ev) => {
+      const mode = ev.target.value;
+      if (mode === 'gaode') {
+        viewer.globe.layers.addImageryProvider(new engine.XyzImageryProvider(DemoUtils.IMAGERY_PRESETS['gaode-sat']));
+        updateResult('底图:       gaode 在线卫星');
+      } else if (mode === 'local') {
+        const ok = await tryLocalTiles();
+        if (!ok) ev.target.value = 'proc'; // 回退程序纹理
+        updateResult(`底图:       ${ok || '程序纹理（8890 不可达回退）'}`);
+      } else {
+        viewer.globe.generateProceduralTexture();
+        updateResult('底图:       程序纹理（离线）');
+      }
+    });
+
+    function updateResult(line) {
+      const lines = result.textContent.split('\n');
+      const key = line.split(':')[0];
+      const idx = lines.findIndex((l) => l.startsWith(key + ':'));
+      if (idx >= 0) lines[idx] = line; else lines.push(line);
+      result.textContent = lines.join('\n');
+    }
+
+    // ── 示例主逻辑：引擎启动后加载默认 demo episode ──
+    async function demo(viewer) {
+      // 默认离线程序纹理底图（无任何网络请求；在线/离线瓦片可下拉切换）
+      viewer.globe.generateProceduralTexture();
+
+      // 俯瞰航线（guanggu-500m 矩形 ~400m×200m）：近垂直俯瞰；相机南偏使视线中心
+      // （pitch -75° 落点在相机以北约 h/tan75）对准航线中心 30.5（同 89 页构图做法）
+      viewer.camera.setView({
+        destination: { lon: 114.39, lat: 30.4975, height: 1600 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-75) },
+      });
+
+      // 默认数据：fetch demo-episode.json（由 make-demo-episode.mjs 生成并 cp 到 data/）
+      const resp = await fetch('./data/demo-episode.json');
+      if (!resp.ok) throw new Error(`demo-episode.json 加载失败: HTTP ${resp.status}`);
+      loadEpisode(await resp.json());
+
+      // preRender 驱动回放（viewer.preRender 每帧回调，见 src/core/Viewer.ts:51,230）
+      viewer.preRender = () => {
+        const now = performance.now();
+        const dt = (now - lastTs) / 1000;
+        lastTs = now;
+        if (ep && playing) {
+          simT += dt * speed;
+          if (simT >= duration) { simT = duration; playing = false; syncPlayBtn(); }
+          render();
+        }
+      };
+
+      result.textContent = ''; // 清掉"初始化中…"占位行
+      updateResult(`episode:    ${ep.episode_id} / ${ep.scenario_id}`);
+      updateResult('底图:       程序纹理（离线）');
+      updateResult(`帧数:       ${ep.frames.length} @ ${hz}Hz（时长 ${duration.toFixed(1)}s）`);
+      updateResult(`航点:       ${(ep.scenario && ep.scenario.waypoints || []).length} 个（WP 标记）`);
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [114.39, 30.5, 1500],    // 光谷上空俯瞰
+          imagery: 'none',               // 底图由本页自管（默认程序纹理，零网络依赖）
+          title: '91 · Episode 轨迹回放器',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer);
+        DemoUtils.showCode(demo, '91 Episode 轨迹回放器 · 核心代码');
+        window.__DEMO_OK = true; // 默认 demo episode 加载 + 首帧渲染成功
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

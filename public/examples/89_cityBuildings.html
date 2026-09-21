@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 89：城市建筑白模 CityBuildings - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:420px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:260px;overflow:auto;}
+    .cg-modes{font-size:12px;color:#9db4d0;margin-bottom:6px;}
+    .cg-modes a{color:#8ecafc;text-decoration:none;margin-right:8px;padding:1px 8px;
+      border:1px solid rgba(120,180,255,.35);border-radius:4px;}
+    .cg-modes a.on{background:rgba(120,180,255,.25);color:#fff;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>89 城市建筑白模（批量合批）</h1>
+    <p class="desc">
+      ExtrudedGeometry 经纬度 footprint + 高度拉伸成白模；CityBlockBuilder
+      把数千栋楼拼进大 vertex/index buffer，每块一次 drawIndexed。
+      <b>?mode=full</b>：PostGIS 全量 10 万+ 栋分块数据（index.json 并发拉取、
+      分批构建）。默认/?mode=demo：8892 优先，未启动回退内嵌程序化城市。
+    </p>
+    <div class="cg-modes">
+      <a id="m-demo" href="?mode=demo">demo</a>
+      <a id="m-full" href="?mode=full">full 全量</a>
+    </div>
+    <div id="result">加载中…</div>
+  </div>
+
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const LON = 114.393, LAT = 30.50; // 武汉光谷
+    const QP = new URLSearchParams(location.search);
+    const MODE = QP.get('mode') === 'full' ? 'full' : 'demo';
+    const LIMIT = parseInt(QP.get('limit') || '0', 10) || 0; // 基准用: 只加载 N 块(均匀抽样)
+    const DATA_BASE = '/examples/data/buildings/';
+    const FETCH_CONCURRENCY = 8;   // 并发拉块上限
+    const BLOCKS_PER_BATCH = 25;   // 每 N 块 build+addPrimitive 并 yield 一次
+
+    document.getElementById('m-' + MODE)?.classList.add('on');
+
+    // ── 数据源 A：8892 空间分析后台（服务未启动/超时/CORS 失败 → 回退）──
+    async function fetchBuildingsFrom8892() {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 1500);
+      try {
+        const res = await fetch('http://127.0.0.1:8892/api/v1/spatial/buildings?limit=20000', {
+          signal: ctrl.signal,
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return parseBuildingPayload(await res.json());
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    /** 兼容 GeoJSON FeatureCollection（Polygon/MultiPolygon + height 类属性）。 */
+    function parseBuildingPayload(data) {
+      const out = [];
+      const features = Array.isArray(data) ? data : (data.features ?? []);
+      for (const f of features) {
+        const geom = f.geometry ?? f;
+        let ringsCoord = null;
+        if (geom.type === 'Polygon') ringsCoord = geom.coordinates[0];
+        else if (geom.type === 'MultiPolygon') ringsCoord = geom.coordinates[0][0];
+        else if (geom.ring) ringsCoord = geom.ring;
+        if (!ringsCoord || ringsCoord.length < 3) continue;
+        const p = f.properties ?? f;
+        const heightM = p.height ?? p.heightM ?? p.height_m ?? (p.floors ? p.floors * 3 : 20);
+        out.push({
+          ring: ringsCoord.map(c => ({ lon: c[0] ?? c.lon, lat: c[1] ?? c.lat })),
+          heightM,
+        });
+      }
+      if (out.length === 0) throw new Error('响应中无可识别的建筑 footprint');
+      return out;
+    }
+
+    // ── 数据源 B：内嵌程序化城市（确定性 LCG 种子，~5000 栋网格摆放）──
+    function generateDemoBuildings() {
+      const COLS = 96, ROWS = 72, CELL = 45;   // 约 4.3km × 3.2km 街区
+      const M_PER_DEG_LON = 111320 * Math.cos(LAT * Math.PI / 180);
+      const M_PER_DEG_LAT = 110574;
+      let seed = 42;
+      const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+
+      const buildings = [];
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (c % 8 === 7 || r % 8 === 7) continue; // 街道
+          if (rnd() < 0.05) continue;               // 空地
+          const m = 8 + rnd() * 12;                 // 楼体边长（米），格内留缝
+          const cx = LON + (c + 0.5 + (rnd() - 0.5) * 0.4 - COLS / 2) * CELL / M_PER_DEG_LON;
+          const cy = LAT + (r + 0.5 + (rnd() - 0.5) * 0.4 - ROWS / 2) * CELL / M_PER_DEG_LAT;
+          const hl = m / 2 / M_PER_DEG_LON, hv = m / 2 / M_PER_DEG_LAT;
+          // 高度：多数 8~40m 裙楼，4% 为 80~180m 高层（光谷天际线）
+          const heightM = rnd() < 0.04 ? 80 + rnd() * 100 : 8 + rnd() * 32;
+          buildings.push({
+            ring: [
+              { lon: cx - hl, lat: cy - hv },
+              { lon: cx + hl, lat: cy - hv },
+              { lon: cx + hl, lat: cy + hv },
+              { lon: cx - hl, lat: cy + hv },
+            ],
+            heightM,
+          });
+        }
+      }
+      return buildings;
+    }
+
+    // ── 全量模式：PostGIS 分块数据（index.json → 并发拉块 → 增量构建）────
+    async function loadFull(viewer, engineApi, result) {
+      const { CityBlockBuilder, CesiumMath } = engineApi;
+      // 基准脚本需要控制视角 / 读指标
+      window.__CITY_VIEWER = viewer;
+      window.__CITY_MATH = CesiumMath;
+
+      const t0 = performance.now();
+      result.textContent = 'full: 拉取 index.json…';
+
+      const res = await fetch(DATA_BASE + 'index.json');
+      if (!res.ok) throw new Error('index.json HTTP ' + res.status);
+      const index = await res.json();
+
+      // 块清单（limit=N 时均匀抽样，保持空间分布）
+      let blocks = index.blocks;
+      if (LIMIT > 0 && LIMIT < blocks.length) {
+        const stride = Math.ceil(blocks.length / LIMIT);
+        blocks = blocks.filter((_, i) => i % stride === 0);
+      }
+      // 全域 bbox → 武汉全域俯瞰视角
+      const bb = [Infinity, Infinity, -Infinity, -Infinity];
+      for (const b of index.blocks) {
+        bb[0] = Math.min(bb[0], b.bbox[0]); bb[1] = Math.min(bb[1], b.bbox[1]);
+        bb[2] = Math.max(bb[2], b.bbox[2]); bb[3] = Math.max(bb[3], b.bbox[3]);
+      }
+      const extM = Math.max(
+        (bb[2] - bb[0]) * 111320 * Math.cos((bb[1] + bb[3]) / 2 * Math.PI / 180),
+        (bb[3] - bb[1]) * 110574);
+      // 全域俯瞰高度按 bbox 外推，但封顶 30km——影像瓦片金字塔在 ~60km 以上
+      // 不渲染（实测），30km 已能覆盖主城全域且白模/影像均清晰
+      viewer.camera.setView({
+        destination: {
+          lon: (bb[0] + bb[2]) / 2, lat: (bb[1] + bb[3]) / 2,
+          height: Math.min(extM * 1.15, 30000),
+        },
+        orientation: { heading: 0, pitch: CesiumMath.toRadians(-75) },
+      });
+
+      let fetched = 0, builtB = 0, tris = 0, draws = 0;
+      let fetchMs = 0, buildMs = 0, gpuMs = 0;
+      const bar = (done, total) => {
+        const w = 20, f = total ? Math.round(done * w / total) : 0;
+        return '█'.repeat(f) + '░'.repeat(w - f);
+      };
+      const render = (phase) => {
+        result.textContent =
+          `模式:   full（index 记录 ${index.totalBuildings} 栋/${index.totalBlocks} 块` +
+            (LIMIT ? `，本次抽 ${blocks.length} 块）` : '）') + '\n' +
+          `阶段:   ${phase}  ${bar(fetched, blocks.length)} ${fetched}/${blocks.length}\n` +
+          `建筑:   ${builtB}    三角形: ${Math.round(tris)}\n` +
+          `draw:   ${draws} 个 Primitive\n` +
+          `fetch:  ${(fetchMs / 1000).toFixed(2)}s\n` +
+          `build:  ${(buildMs / 1000).toFixed(2)}s\n` +
+          `GPU上传: ${(gpuMs / 1000).toFixed(2)}s\n` +
+          `累计:   ${((performance.now() - t0) / 1000).toFixed(2)}s`;
+      };
+
+      // 1) 并发(限 8)拉全部块
+      window.__CITY_STAGE = 'fetch';
+      const tFetch = performance.now();
+      const payloads = new Array(blocks.length);
+      let next = 0;
+      const worker = async () => {
+        while (next < blocks.length) {
+          const i = next++;
+          const r = await fetch(DATA_BASE + blocks[i].file);
+          if (!r.ok) throw new Error(blocks[i].file + ' HTTP ' + r.status);
+          payloads[i] = await r.json();
+          fetched++;
+          if (fetched % 32 === 0 || fetched === blocks.length) {
+            fetchMs = performance.now() - tFetch;
+            render('fetch');
+          }
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(FETCH_CONCURRENCY, blocks.length) }, worker));
+      fetchMs = performance.now() - tFetch;
+
+      // 2) 增量 addBuilding → 每批 BLOCKS_PER_BATCH 块 build+addPrimitive+yield
+      window.__CITY_STAGE = 'build';
+      let semanticId = 0;
+      for (let start = 0; start < payloads.length; start += BLOCKS_PER_BATCH) {
+        const batch = payloads.slice(start, start + BLOCKS_PER_BATCH);
+        const builder = new CityBlockBuilder();
+        const tb = performance.now();
+        for (const blk of batch) {
+          for (const b of blk.buildings) {
+            builder.addBuilding(
+              b.r.map(c => ({ lon: c[0], lat: c[1] })), b.h, ++semanticId);
+          }
+          builtB += blk.buildings.length;
+        }
+        buildMs += performance.now() - tb;
+
+        const tg = performance.now();
+        const prims = builder.build(viewer.context);   // 含 GPU buffer 创建/上传
+        for (const p of prims) viewer.scene.addPrimitive(p);
+        gpuMs += performance.now() - tg;
+        tris += builder.triangleCount;                 // 全局累计
+        draws += prims.length;
+        render('build');
+        await new Promise(r => setTimeout(r, 0));      // 让 UI 出进度
+      }
+
+      // 3) 完成标记（等两帧确保首帧渲染完成）
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const loadMs = performance.now() - t0;
+      window.__CITY_STAGE = 'ready';
+      window.__CITY_READY = {
+        buildings: builtB,
+        triangles: Math.round(tris),
+        loadMs: Math.round(loadMs),
+        draws,
+        blocks: blocks.length,
+        fetchMs: Math.round(fetchMs),
+        buildMs: Math.round(buildMs),
+        gpuMs: Math.round(gpuMs),
+      };
+      render('完成 ✓');
+      result.textContent +=
+        `\n\n__CITY_READY = ${JSON.stringify(window.__CITY_READY)}`;
+    }
+
+    // ── demo 模式：8892 优先，回退程序化（原有行为）─────────────────
+    async function demo(viewer, engineApi) {
+      const result = document.getElementById('result');
+      const { CityBlockBuilder, CesiumMath } = engineApi;
+
+      // 俯瞰姿态：startup 的 view 只设位置（默认朝向斜视），显式压到
+      // -75° 近垂直俯瞰，保证建筑群铺满画面中心（保留少量侧面看光照）
+      viewer.camera.setView({
+        destination: { lon: LON, lat: LAT, height: 5000 },
+        orientation: { heading: 0, pitch: CesiumMath.toRadians(-75) },
+      });
+
+      // 1) 取数据：8892 优先，失败回退程序化城市
+      let buildings, source;
+      try {
+        buildings = await fetchBuildingsFrom8892();
+        source = '8892 空间分析后台';
+      } catch {
+        buildings = generateDemoBuildings();
+        source = '内嵌演示数据（8892 未启动）';
+      }
+
+      // 2) 合批构建：N 栋 → 分块大 buffer（semanticId 用楼栋序号，F3 分割预留）
+      const builder = new CityBlockBuilder();
+      const t0 = performance.now();
+      for (let i = 0; i < buildings.length; i++) {
+        builder.addBuilding(buildings[i].ring, buildings[i].heightM, i + 1);
+      }
+      const primitives = builder.build(viewer.context);
+      const buildMs = (performance.now() - t0).toFixed(1);
+
+      // 3) 入场景：必须走 scene.addPrimitive（自动 buildOpaqueBindGroup；
+      //    直接 primitives.add 会因缺 bind group 被 drawOpaque 静默跳过）
+      for (const p of primitives) viewer.scene.addPrimitive(p);
+
+      const vertCount = builder.buildChunks()
+        .reduce((s, c) => s + c.geometry.vertexCount, 0);
+      result.textContent =
+        `数据源:     ${source}\n` +
+        `建筑数:     ${builder.buildingCount}\n` +
+        `三角形数:   ${builder.triangleCount}\n` +
+        `顶点数:     ${vertCount}\n` +
+        `构建耗时:   ${buildMs} ms（含几何+GPU 上传）\n` +
+        `分块:       ${primitives.length} 个 Primitive（128MB/块自动分块）\n` +
+        `渲染路径:   合并 buffer，每块 1 次 drawIndexed`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [LON, LAT, 5000],        // 5km 千米级俯瞰光谷
+          imagery: 'gaode-sat',
+          title: '89 · 城市建筑白模',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        if (MODE === 'full') {
+          await loadFull(viewer, engine, document.getElementById('result'));
+        } else {
+          await demo(viewer, engine);
+          DemoUtils.showCode(demo, '89 城市建筑白模 · 核心代码');
+        }
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

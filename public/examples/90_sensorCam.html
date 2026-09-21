@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 90：合成传感器通道 SensorCam（RGB/深度/分割同帧导出）- CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:320px;max-width:460px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);
+      font:13px/1.6 system-ui,sans-serif;}
+    .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9fd0ff;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel button{margin:2px 6px 2px 0;padding:5px 12px;border:1px solid rgba(120,180,255,.4);
+      border-radius:6px;background:rgba(40,80,140,.6);color:#d8e8ff;cursor:pointer;font-size:12px;}
+    .cg-panel button:hover{background:rgba(60,110,180,.7);}
+    .cg-panel button:disabled{opacity:.45;cursor:not-allowed;}
+    .cg-panel select{padding:4px;border-radius:6px;background:rgba(20,40,70,.9);
+      color:#d8e8ff;border:1px solid rgba(120,180,255,.4);}
+    #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;max-height:150px;overflow:auto;margin-top:8px;}
+    /* 四宫格预览 */
+    #quad{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px;}
+    #quad .cell{position:relative;background:#0a1420;border:1px solid rgba(120,180,255,.25);
+      border-radius:6px;overflow:hidden;aspect-ratio:4/3;}
+    #quad .cell canvas,#quad .cell img{width:100%;height:100%;object-fit:contain;display:block;}
+    #quad .cell .tag{position:absolute;left:4px;top:2px;font:10px/1.5 system-ui;color:#9fd0ff;
+      background:rgba(0,0,0,.5);padding:0 5px;border-radius:4px;z-index:1;}
+    #status{font:12px/1.7 Consolas,Monaco,monospace;color:#ffd9a0;margin-top:8px;white-space:pre-wrap;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>90 合成传感器通道 SensorCam（F3）</h1>
+    <p class="desc">
+      程序化小城市（~2000 栋，武汉光谷）+ 矩形航线 mock 位姿（500m×200m、120m 高、
+      5 航点、8m/s）。点「开始录制」按选定 hz 采样，每帧同视锥导出 RGB（主 canvas
+      dataURL）/ 深度（G-Buffer depth32float → 米制线性化）/ 语义分割（GPU id 纹理 →
+      调色板），FrameRecord 字段对齐 dataset-tools schema。setInterval 驱动，不依赖 rAF，
+      后台标签可持续采样。
+    </p>
+    <div>
+      <button id="btnStart">开始录制</button>
+      <button id="btnStop" disabled>停止录制</button>
+      <button id="btnDownload" disabled>下载 JSON</button>
+      <label>hz <select id="hzSel">
+        <option value="1">1</option>
+        <option value="5" selected>5</option>
+        <option value="10">10</option>
+      </select></label>
+    </div>
+    <div id="quad">
+      <div class="cell"><span class="tag">RGB</span><img id="prevRgb" alt="rgb" /></div>
+      <div class="cell"><span class="tag">深度伪彩（turbo, 米）</span><canvas id="prevDepth" width="320" height="240"></canvas></div>
+      <div class="cell"><span class="tag">语义分割</span><canvas id="prevSeg" width="320" height="240"></canvas></div>
+      <div class="cell"><span class="tag">状态</span><div id="status">待录制…</div></div>
+    </div>
+    <div id="result">加载中…</div>
+  </div>
+
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const LON = 114.393, LAT = 30.50;          // 武汉光谷（mock 模式 ENU 锚点）
+    const ALT_M = 120;                          // 航线高度（米，mock 模式）
+    const SPEED_MS = 8;                         // 匀速（米/秒，mock 模式）
+    // 矩形航线 500m×200m，5 航点（闭合回路），ENU 米
+    const WAYPOINTS_ENU = [
+      [0, 0], [500, 0], [500, 200], [0, 200], [0, 0],
+    ];
+    const SEG_LEN = [];
+    for (let i = 0; i < WAYPOINTS_ENU.length - 1; i++) {
+      const [x0, y0] = WAYPOINTS_ENU[i];
+      const [x1, y1] = WAYPOINTS_ENU[i + 1];
+      SEG_LEN.push(Math.hypot(x1 - x0, y1 - y0));
+    }
+    const TOTAL_LEN = SEG_LEN.reduce((a, b) => a + b, 0);   // 1400m
+
+    // ── URL 参数：pose=sse 启用 SimKernel 真实位姿源（缺省 mock，向后兼容）──
+    // ?pose=sse&simUrl=http://localhost:8895&scenario=<encoded-abs-path>&seed=<n>&hz=5
+    //  &spec=<encoded scenario json>（farm 透传，供 command 目标航点/风场/scenario_id）
+    const urlQ = new URLSearchParams(location.search);
+    const POSE_SSE = urlQ.get('pose') === 'sse';
+    const SIM_URL = urlQ.get('simUrl') || 'http://localhost:8895';
+    const SCENARIO_PATH = urlQ.get('scenario') || '';
+    const URL_SEED = urlQ.get('seed') || '';
+    const SCENARIO_SPEC = urlQ.get('spec')
+      ? JSON.parse(urlQ.get('spec'))
+      : null;
+
+    // ── ENU 锚点：SSE 模式跟随 scenario origin，mock 模式保持页面常量 ──
+    const ORIGIN = (POSE_SSE && SCENARIO_SPEC)
+      ? { lon: SCENARIO_SPEC.origin.lon, lat: SCENARIO_SPEC.origin.lat, alt: SCENARIO_SPEC.origin.alt_m ?? 0 }
+      : { lon: LON, lat: LAT, alt: 0 };
+    // 城市网格锚点偏移：SSE 模式把 50×40 网格中心 (≈272,214) 对准航线中心 (250,100)
+    const CITY_OFF = (POSE_SSE && SCENARIO_SPEC) ? [-22, -114] : [0, 0];
+
+    // ── ENU(米) → 经纬度（度）：小范围线性近似 ──
+    const M_PER_DEG_LAT = 111320;
+    const M_PER_DEG_LON = 111320 * Math.cos(ORIGIN.lat * Math.PI / 180);
+    const enuToLonLat = (e, n) => ({
+      lon: ORIGIN.lon + e / M_PER_DEG_LON,
+      lat: ORIGIN.lat + n / M_PER_DEG_LAT,
+    });
+    /** 城市 ENU（含网格偏移）→ 经纬度 */
+    const cityEnuToLonLat = (e, n) => enuToLonLat(e + CITY_OFF[0], n + CITY_OFF[1]);
+    /** 经纬度（度）+ 绝对高度（米）→ ENU 米（同一线性近似的逆变换） */
+    const lonLatToEnu = (lon, lat, altM) => [
+      (lon - ORIGIN.lon) * M_PER_DEG_LON,
+      (lat - ORIGIN.lat) * M_PER_DEG_LAT,
+      altM - ORIGIN.alt,
+    ];
+
+    // ── 位姿源 mock：弧长 s(t) = v·t mod 周长 → 段插值 → 位姿 + 指令/真值 ──
+    function poseAt(tSimS) {
+      let s = (SPEED_MS * tSimS) % TOTAL_LEN;
+      let seg = 0;
+      while (seg < SEG_LEN.length - 1 && s > SEG_LEN[seg]) { s -= SEG_LEN[seg]; seg++; }
+      const [x0, y0] = WAYPOINTS_ENU[seg];
+      const [x1, y1] = WAYPOINTS_ENU[seg + 1];
+      const t = s / SEG_LEN[seg];
+      const e = x0 + (x1 - x0) * t;
+      const n = y0 + (y1 - y0) * t;
+      const dirE = (x1 - x0) / SEG_LEN[seg];
+      const dirN = (y1 - y0) / SEG_LEN[seg];
+      const { lon, lat } = enuToLonLat(e, n);
+      return {
+        pose: {
+          lonDeg: lon, latDeg: lat, heightM: ALT_M,
+          headingRad: Math.atan2(dirE, dirN),   // 0 = 北，正 = 向东
+          pitchRad: -Math.PI / 2,               // nadir
+          rollRad: 0,
+        },
+        targetEnu: [x1, y1, -ALT_M],
+        setpoint: { vx: dirE * SPEED_MS, vy: dirN * SPEED_MS, vz: 0, yawRate: 0 },
+        velEnu: [dirE * SPEED_MS, dirN * SPEED_MS, 0],
+        posEnu: [e, n, ALT_M],
+      };
+    }
+
+    // ── SSE 真实位姿源（pose=sse）：EventSource 消费 SimKernel /stream ──
+    // 帧（50Hz）：{sim_t_s, step, seq, pos_ecef[3]米, pos_enu[3], quat[w,x,y,z]
+    //              body→ENU, vel_e, ang_rate_e, motor[4]归一化, events[], battery}
+    let sseLatest = null;          // 最新帧缓存（页面驱动循环消费，只保留最新）
+    let sseMsgCount = 0;
+    window.__POSE_DONE = false;    // done 事件置位（farm/录制窗口用）
+    window.__POSE_MANIFEST = null; // done 事件携带的 manifest
+    window.__POSE_DEBUG = {        // 联调诊断出口
+      poseSse: POSE_SSE,
+      simUrl: SIM_URL,
+      scenarioLen: SCENARIO_PATH.length,
+      spec: !!SCENARIO_SPEC,
+      seed: URL_SEED,
+    };
+    if (POSE_SSE && SCENARIO_PATH) {
+      // 注意必须用 SimKernel 绝对地址（SIM_URL）：相对 /stream 会打到 vite(3599)；
+      // 跨源 SSE 依赖 sim-kernel server 的 access-control-allow-origin 响应头。
+      const es = new EventSource(
+        `${SIM_URL}/stream?scenario=${encodeURIComponent(SCENARIO_PATH)}` +
+        (URL_SEED ? `&seed=${encodeURIComponent(URL_SEED)}` : ''));
+      es.addEventListener('frame', (ev) => {
+        sseLatest = JSON.parse(ev.data);
+        sseMsgCount += 1;
+      });
+      es.addEventListener('done', (ev) => {
+        window.__POSE_MANIFEST = JSON.parse(ev.data);
+        window.__POSE_DONE = true;
+        es.close();
+      });
+      es.onerror = () => { /* 断流保持最近帧；状态面板显示 msg 计数 */ };
+      if (SCENARIO_SPEC == null) {
+        console.warn('[90] pose=sse 未提供 spec 参数：command 目标航点将退化为当前位置');
+      }
+    } else if (POSE_SSE) {
+      console.warn('[90] pose=sse 但缺少 scenario 参数，退回 mock 位姿');
+    }
+
+    /** 四元数 [w,x,y,z] 旋转向量（q·v·q*） */
+    function quatRotateVec(q, v) {
+      const [w, x, y, z] = q;
+      const tx = 2 * (y * v[2] - z * v[1]);
+      const ty = 2 * (z * v[0] - x * v[2]);
+      const tz = 2 * (x * v[1] - y * v[0]);
+      return [
+        v[0] + w * tx + (y * tz - z * ty),
+        v[1] + w * ty + (z * tx - x * tz),
+        v[2] + w * tz + (x * ty - y * tx),
+      ];
+    }
+
+    // 当前指令航点指针：按 SSE 事件的 waypoint_reached 顺序推进
+    let wpCursor = 0;
+    function advanceWpCursor(events) {
+      if (!SCENARIO_SPEC) return;
+      for (const ev of events || []) {
+        if (ev.type === 'waypoint_reached' && Number.isFinite(ev.payload?.index)) {
+          wpCursor = Math.min(Math.max(wpCursor, ev.payload.index + 1),
+            SCENARIO_SPEC.waypoints.length - 1);
+        }
+      }
+    }
+
+    /** 航点（绝对经纬高）→ ENU 米 */
+    function wpTargetEnu(wp) {
+      return lonLatToEnu(wp.lon, wp.lat, wp.alt_m);
+    }
+
+    /**
+     * SSE 帧 → PoseMock（位姿源单点输出）。
+     * 朝向说明（W4 修复）：FrameRecord 契约 align.cam_T_body = I 且
+     * action.quat 回填 SimKernel 机体姿态（body FLU→ENU）——传感器视锥必须与
+     * 该姿态一致，否则 action.quat 推出的验证射线与渲染视锥错位（W3B 发现 #2：
+     * 渲染 nadir 而记录 −20°~−29° 机体俯仰）。故 heading/pitch/roll 全部由
+     * quat 解出：pitch = asin(前向·up)；heading 仍优先水平速度方向（巡航时
+     * 与 quat 偏航一致、悬停时退回 quat 前向水平投影）；roll 由左向量绕前向
+     * 的偏转解出（l0 = 去滚转理想左向 = normalize(up_world × fwd)）。
+     * 位置经 ENU 线性近似映射经纬高（同城市网格）。
+     */
+    function poseAtSse(_tSimS) {
+      const f = sseLatest;
+      if (!f) return poseAt(_tSimS ?? 0);   // 流未到帧：mock 兜底
+      advanceWpCursor(f.events);
+      const [e, n, u] = f.pos_enu;
+      const { lon, lat } = enuToLonLat(e, n);
+      const heightM = ORIGIN.alt + u;
+      const fwd = quatRotateVec(f.quat, [1, 0, 0]);    // body 前（ENU）
+      const left = quatRotateVec(f.quat, [0, 1, 0]);   // body 左（ENU）
+      const pitchRad = Math.asin(Math.max(-1, Math.min(1, fwd[2])));
+      const vh = Math.hypot(f.vel_e[0], f.vel_e[1]);
+      let heading;
+      if (vh > 0.3) {
+        heading = Math.atan2(f.vel_e[0], f.vel_e[1]);
+      } else {
+        heading = Math.atan2(fwd[0], fwd[1]);
+      }
+      // roll：roll>0 ⇔ 左向量向天顶偏转（与 Camera._applyOrientation 约定一致）
+      const l0x = -fwd[1], l0y = fwd[0];               // up_world × fwd（水平）
+      const l0n = Math.hypot(l0x, l0y);
+      let rollRad = 0;
+      if (l0n > 1e-6) {
+        const l0 = [l0x / l0n, l0y / l0n, 0];
+        const axis = [                                 // fwd × l0
+          fwd[1] * l0[2] - fwd[2] * l0[1],
+          fwd[2] * l0[0] - fwd[0] * l0[2],
+          fwd[0] * l0[1] - fwd[1] * l0[0],
+        ];
+        const dot = left[0] * axis[0] + left[1] * axis[1] + left[2] * axis[2];
+        const dot0 = left[0] * l0[0] + left[1] * l0[1] + left[2] * l0[2];
+        rollRad = Math.atan2(dot, dot0);
+      }
+      const wp = SCENARIO_SPEC
+        ? SCENARIO_SPEC.waypoints[wpCursor]
+        : null;
+      const targetEnu = wp ? wpTargetEnu(wp) : [e, n, u];
+      return {
+        pose: {
+          lonDeg: lon, latDeg: lat, heightM,
+          headingRad: heading, pitchRad, rollRad,
+        },
+        targetEnu,
+        setpoint: { vx: f.vel_e[0], vy: f.vel_e[1], vz: f.vel_e[2], yawRate: 0 },
+        velEnu: f.vel_e,
+        posEnu: f.pos_enu,
+        sseFrame: f,
+      };
+    }
+
+    // ── turbo 伪彩（Google turbo 多项式近似，d∈[0,1]）──
+    function turbo(d) {
+      const c = (x) => Math.max(0, Math.min(255, Math.round(x * 255)));
+      return [
+        c(0.13572138 + 4.61539260 * d - 42.66032258 * d * d + 132.13108234 * d ** 3
+            - 152.94239396 * d ** 4 + 59.28637943 * d ** 5),
+        c(0.09140261 + 2.19418839 * d + 4.84296658 * d * d - 14.18503333 * d ** 3
+            + 4.27729857 * d ** 4 + 2.82956604 * d ** 5),
+        c(0.10667330 + 12.64194608 * d - 60.58204836 * d * d + 110.36276771 * d ** 3
+            - 89.90310912 * d ** 4 + 27.34824973 * d ** 5),
+        255,
+      ];
+    }
+
+    async function demo(viewer, engineApi) {
+      const result = document.getElementById('result');
+      const { CityBlockBuilder, CesiumMath, SensorCam, SensorRecorder } = engineApi;
+
+      // ── 1) 底图：8890 离线瓦片探测 → 不可达走在线底图（引擎程序纹理兜底）──
+      let imageryNote = 'gaode-sat 在线底图（8890 不可达）';
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 1500);
+        await fetch('http://127.0.0.1:8890/tiles/10/843/386.png',
+          { signal: ctrl.signal, mode: 'cors' });
+        clearTimeout(timer);
+        imageryNote = '8890 离线瓦片';
+      } catch { /* 8890 未启动：保持 gaode-sat，tiles 全失败时引擎程序纹理兜底 */ }
+      result.textContent = `底图: ${imageryNote}\n城市生成中…`;
+
+      // ── 2) 程序化小城市：50×40 网格 ≈ 2000 栋（固定种子可复现）──
+      let seedState = 42;
+      const rand = () => {
+        seedState = (seedState * 1664525 + 1013904223) >>> 0;
+        return seedState / 0xffffffff;
+      };
+      const builder = new CityBlockBuilder();
+      const COLS = 50, ROWS = 40, GAP = 11;               // 500m×200m 网格
+      for (let i = 0; i < COLS; i++) {
+        for (let j = 0; j < ROWS; j++) {
+          const e = i * GAP, n = j * GAP;
+          const { lon, lat } = cityEnuToLonLat(e, n);
+          const halfLon = (2.5 + rand() * 2) / M_PER_DEG_LON;
+          const halfLat = (2.5 + rand() * 2) / M_PER_DEG_LAT;
+          const heightM = 15 + rand() * 65;
+          builder.addBuilding([
+            { lon: lon - halfLon, lat: lat - halfLat },
+            { lon: lon + halfLon, lat: lat - halfLat },
+            { lon: lon + halfLon, lat: lat + halfLat },
+            { lon: lon - halfLon, lat: lat + halfLat },
+          ], heightM);
+        }
+      }
+      const primitives = builder.build(viewer.context);
+      // pickId → 语义：城市 chunk = building(1)，其余（globe/瓦片）= ground(3)
+      const buildingPickIds = new Set(primitives.map((p) => p.pickId));
+      for (const p of primitives) viewer.scene.addPrimitive(p);
+
+      // ── 3) 传感器相机 + 录制器 ──
+      const sensorCam = new SensorCam(viewer.scene, {
+        fovYDeg: 45,
+        width: viewer.context.drawingBufferWidth,
+        height: viewer.context.drawingBufferHeight,
+        nearM: 1,
+        farM: 2000,
+        pickIdToSemantic: (id) => buildingPickIds.has(id) ? 1 : 3,
+      });
+
+      let episode = null;
+      let recording = false;
+      let pendingSse = null;        // 当前 tick 的 SSE 真值帧（poseAt 捕获、onFrame 消费）
+      let watchHandle = null;       // 收窗看门狗
+      let watchT0 = 0;
+      let durationCapS = 0;         // 录制窗口上限（0 = 不限，仅等 __POSE_DONE）
+
+      /**
+       * SSE 真值回填（pose=sse 时逐帧调用）：
+       * action.sim_t/pos/quat/vel/ang_rate/motor ← SimKernel 帧；
+       * battery/wind/gnss ← 场景参数或合理常量（对齐 dataset-tools validator 约束：
+       * battery.v>0、soc∈[0,1]、gnss.hdop>0、wind.params 全 number、quat 单位范数）。
+       */
+      function patchWithSse(rec, sse) {
+        rec.sim_time_s = sse.sim_t_s;
+        rec.action.pos_ecef = [...sse.pos_ecef];
+        rec.action.pos_enu = [...sse.pos_enu];
+        rec.action.quat = [...sse.quat];
+        rec.action.vel_e = [...sse.vel_e];
+        rec.action.ang_rate_e = [...sse.ang_rate_e];
+        rec.action.motor_rpm = [...sse.motor];
+        rec.action.battery = {
+          v: 22.2,
+          a: 8.5,
+          soc: Math.min(1, Math.max(0, Number(sse.battery) || 1)),
+        };
+        const w = (SCENARIO_SPEC && SCENARIO_SPEC.wind)
+          || { mean_vec: [0, 0, 0], gust_model: 'none', gust_params: {} };
+        rec.environment.wind = {
+          vec: [...w.mean_vec],
+          gust_model: (w.gust_model === 'dryden' || w.gust_model === 'const') ? w.gust_model : 'none',
+          params: { ...(w.gust_params || {}) },
+        };
+        rec.environment.gnss = { sv_visible: 18, hdop: 0.9, nlos_masked: [], noise_std_m: 1.5 };
+      }
+      const depthCv = document.getElementById('prevDepth');
+      const segCv = document.getElementById('prevSeg');
+      const statusEl = document.getElementById('status');
+      const DEPTH_DISPLAY_MAX = 400;   // 伪彩量程（米）
+
+      function renderPreview(record, frame) {
+        document.getElementById('prevRgb').src = frame.rgb;
+        // 深度伪彩（降采样到画布尺寸，预览用）
+        const dctx = depthCv.getContext('2d');
+        const dimg = dctx.createImageData(depthCv.width, depthCv.height);
+        for (let y = 0; y < depthCv.height; y++) {
+          for (let x = 0; x < depthCv.width; x++) {
+            const sx = Math.floor((x / depthCv.width) * frame.width);
+            const sy = Math.floor((y / depthCv.height) * frame.height);
+            const d = frame.depth[sy * frame.width + sx];
+            const [r, g, b, a] = turbo(Math.min(d / DEPTH_DISPLAY_MAX, 1));
+            const di = (y * depthCv.width + x) * 4;
+            dimg.data[di] = r; dimg.data[di + 1] = g; dimg.data[di + 2] = b; dimg.data[di + 3] = a;
+          }
+        }
+        dctx.putImageData(dimg, 0, 0);
+        // 分割（先按原分辨率画临时 canvas，再等比缩进预览格）
+        const tmp = document.createElement('canvas');
+        tmp.width = frame.width; tmp.height = frame.height;
+        const simg = tmp.getContext('2d').createImageData(frame.width, frame.height);
+        simg.data.set(frame.seg);
+        tmp.getContext('2d').putImageData(simg, 0, 0);
+        const sctx = segCv.getContext('2d');
+        sctx.clearRect(0, 0, segCv.width, segCv.height);
+        sctx.drawImage(tmp, 0, 0, segCv.width, segCv.height);
+        // 状态文字
+        const m = frame.meta;
+        const nowPose = (POSE_SSE ? poseAtSse : poseAt)(record.sim_time_s).pose;
+        statusEl.textContent =
+          `帧 ${record.step_index}  t=${record.sim_time_s.toFixed(2)}s\n` +
+          `位姿 lon=${nowPose.lonDeg.toFixed(6)} lat=${nowPose.latDeg.toFixed(6)} ` +
+          `H=${nowPose.heightM.toFixed(1)}m\n` +
+          `near=${m.nearM.toFixed(1)}m far=${(m.farM / 1000).toFixed(1)}km\n` +
+          `fx=${m.intrinsics.fx.toFixed(1)}px hfov=${m.hfovDeg.toFixed(1)}°`;
+      }
+
+      const recorder = new SensorRecorder(sensorCam, {
+        hz: 5,
+        scenarioId: (POSE_SSE && SCENARIO_SPEC) ? SCENARIO_SPEC.scenario_id : 'guanggu-sensorcam',
+        episodeId: POSE_SSE && URL_SEED ? `ep-${URL_SEED}` : `ep-${Date.now()}`,
+        seed: URL_SEED ? BigInt(URL_SEED) : 42n,
+        poseAt: (t) => {
+          // 包装位姿源：捕获当帧 SSE 真值，供 onFrame 回填（_inFlight 保证 tick 互斥）
+          const m = POSE_SSE ? poseAtSse(t) : poseAt(t);
+          pendingSse = m.sseFrame ?? null;
+          return m;
+        },
+        onFrame: (record, frame) => {
+          if (POSE_SSE && pendingSse) patchWithSse(record, pendingSse);
+          pendingSse = null;
+          // 回放消费约定（91 页 drawQuad / demo-episode 同构）：32×32 降采样
+          // 内联数组与 uri 并存，深度伪彩/分割色块可离线重放
+          const G = 32, dw = frame.width, dh = frame.height;
+          const dData = new Array(G * G);
+          const sData = new Array(G * G);
+          for (let gy = 0; gy < G; gy++) {
+            for (let gx = 0; gx < G; gx++) {
+              const sx = Math.min(dw - 1, Math.floor(((gx + 0.5) / G) * dw));
+              const sy = Math.min(dh - 1, Math.floor(((gy + 0.5) / G) * dh));
+              dData[gy * G + gx] = frame.depth[sy * dw + sx];
+              sData[gy * G + gx] = frame.segIds[sy * dw + sx];
+            }
+          }
+          record.vision.depth.data = dData;
+          record.vision.seg.data = sData;
+          renderPreview(record, frame);
+        },
+      });
+
+      // 主视角跟随（独立低频 setInterval：capture 临时接管相机并在 finally
+      // 还原，跟随 tick 下一轮重设，两者互不污染）。
+      // W4：跟随位姿 = 传感器位姿（同位置同姿态，不再 +60m/-60° 偏移）——
+      // 主循环与 capture 必须驱动同一视锥，否则 imagery quadtree 的选择集
+      // 在两个相机间来回切换，LRU 把 capture 视锥的瓦片纹理逐出，采集帧
+      // 地面图元被丢弃（深度读 far/裙边穿透值）。
+      setInterval(() => {
+        const { pose } = POSE_SSE
+          ? poseAtSse(performance.now() / 1000)   // SSE：消费最新帧
+          : poseAt((performance.now() / 1000) % (TOTAL_LEN / SPEED_MS));
+        viewer.camera.setView({
+          destination: { lon: pose.lonDeg, lat: pose.latDeg, height: pose.heightM },
+          orientation: { heading: pose.headingRad, pitch: pose.pitchRad, roll: pose.rollRad },
+        });
+      }, 200);
+
+      // ── 收窗：停采样 →（SSE 真值已在 onFrame 逐帧回填）→ 存 episode → UI 复位 ──
+      // episode 统一存 JSON 安全克隆：CDP Runtime.evaluate(returnByValue) 无法
+      // 序列化 BigInt（FrameRecord.seed），bigint → 十进制字符串（dataset-tools 约定）。
+      const toJsonSafe = (v) =>
+        JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x)));
+
+      let finalizing = null;   // 收窗共享 promise（看门狗与 stop() 并发去重）
+      function beginFinalize() {
+        if (!finalizing) {
+          recording = false;
+          finalizing = (async () => {
+            const res = await recorder.stop();
+            episode = toJsonSafe(res);
+            document.getElementById('btnStart').disabled = false;
+            document.getElementById('btnStop').disabled = true;
+            document.getElementById('btnDownload').disabled = false;
+            statusEl.textContent += `\n收窗完成：${res.stats.nFrames} 帧`;
+            return episode;
+          })();
+        }
+        return finalizing;
+      }
+
+      // ── 4) 冻结约定：window.__SENSOR_RECORD = {start, stop, status} ──
+      // start(opts:{hz, durationS?, seed?})：
+      //   pose=sse —— 录制窗口跟随仿真（__POSE_DONE 或 durationS 上限即自动收窗）；
+      //   mock    —— 仅当显式传 durationS 才自动收窗（不传时手动模式行为不变）。
+      // status() 额外提供 running（farm 轮询契约）与 done（仿真完成标志）。
+      window.__SENSOR_RECORD = {
+        start(opts = {}) {
+          if (recording) return;
+          recording = true;
+          episode = null;
+          durationCapS = Number(opts.durationS ?? 0) || 0;
+          if (opts.seed != null && String(opts.seed) !== '') {
+            recorder._opts.seed = BigInt(opts.seed);
+            recorder._opts.episodeId = `ep-${opts.seed}`;
+          }
+          recorder._opts.hz = opts.hz ?? Number(document.getElementById('hzSel').value);
+          document.getElementById('btnStart').disabled = true;
+          document.getElementById('btnStop').disabled = false;
+          document.getElementById('btnDownload').disabled = true;
+          statusEl.textContent =
+            `录制中（${recorder._opts.hz}Hz${POSE_SSE ? `，SSE ${SIM_URL}` : ''}）…`;
+          recorder.start();
+          watchT0 = performance.now();
+          watchHandle = setInterval(() => {
+            const elapsedS = (performance.now() - watchT0) / 1000;
+            const hitDone = POSE_SSE && window.__POSE_DONE === true;
+            const hitCap = durationCapS > 0 && elapsedS >= durationCapS;
+            if (hitDone || hitCap) {
+              clearInterval(watchHandle);
+              watchHandle = null;
+              void beginFinalize();
+            }
+          }, 100);
+        },
+        async stop() {
+          if (watchHandle !== null) {
+            clearInterval(watchHandle);
+            watchHandle = null;
+          }
+          if (recording || !finalizing) await beginFinalize();
+          else await finalizing;
+          // 分块协议：真实三通道全量（数百 MB）超 CDP 单消息 64MB 上限，
+          // frames 一律经 nFrames()/take() 拉取（farm 检测到 take 即分块；
+          // 手动导出走「下载 JSON」按钮，episode 在页面内存中）。
+          return {
+            frames: [],
+            stats: episode
+              ? { ...episode.stats }
+              : { nFrames: 0, droppedMs: 0 },
+          };
+        },
+        status() {
+          const st = recorder.status();
+          return { ...st, running: recording && st.recording, done: window.__POSE_DONE === true };
+        },
+        // 分块取帧辅助（真实三通道帧单 episode 可达数百 MB，超出 CDP 单消息
+        // 64MB 上限；farm 检测到本方法即分块拉取。mock-page 无此方法走旧契约。）
+        nFrames() { return (episode && episode.frames.length) || 0; },
+        take(from, count) {
+          const fr = (episode && episode.frames) || [];
+          return fr.slice(from, from + count);
+        },
+      };
+
+      document.getElementById('btnStart').onclick = () => window.__SENSOR_RECORD.start();
+      document.getElementById('btnStop').onclick = async () => {
+        const res = await window.__SENSOR_RECORD.stop();
+        result.textContent =
+          `录制完成: ${res.stats.nFrames} 帧（丢帧累计 ${res.stats.droppedMs.toFixed(0)}ms）\n` +
+          `帧字段: frame_id / vision.rgb{fx…} / depth{near_m,far_m} / seg / command / action\n` +
+          `点「下载 JSON」导出 episode（附件 dataURL / inline base64 内联）`;
+      };
+      document.getElementById('btnDownload').onclick = () => {
+        if (!episode) return;
+        const json = JSON.stringify(
+          {
+            episode_id: recorder._opts.episodeId,
+            scenario_id: recorder._opts.scenarioId,
+            seed: String(recorder._opts.seed ?? 0n),
+            scenario: SCENARIO_SPEC ?? undefined,
+            palette_map: engineApi.PALETTE_MAP_VERSION,
+            frame_rate_hz: recorder._opts.hz,
+            frames: episode.frames,
+          },
+          (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
+          1,
+        );
+        const blob = new Blob([json], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${recorder._opts.episodeId}.frames.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      };
+
+      // 等首帧渲染完成后刷新就绪信息（probe 由外层 IIFE 置位）
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      result.textContent =
+        `城市:     ${builder.buildingCount} 栋 / ${builder.triangleCount} 三角形\n` +
+        `底图:     ${imageryNote}\n` +
+        (POSE_SSE
+          ? `位姿源:   SSE ${SIM_URL}/stream（scenario=${SCENARIO_PATH.split(/[\\\\/]/).pop()}，` +
+            `seed=${URL_SEED || '缺省'}，帧 ${sseMsgCount}）\n`
+          : `航线:     矩形 500m×200m @ ${ALT_M}m，5 航点，${SPEED_MS}m/s\n`) +
+        `传感器:   fovY 45°，canvas ${viewer.context.drawingBufferWidth}×` +
+        `${viewer.context.drawingBufferHeight}\n` +
+        `API:      window.__SENSOR_RECORD.{start,stop,status}`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）──
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [LON, LAT, 1500],
+          imagery: 'gaode-sat',
+          title: '90 · 合成传感器 SensorCam',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer, engine);
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

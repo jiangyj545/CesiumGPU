@@ -101,6 +101,15 @@ export class GBufferPass implements IPass {
     return this.textures.worldPos;
   }
 
+  /**
+   * Depth texture for the synthetic-sensor channel (F3 SensorCam full-frame
+   * metric-depth readback). Carries COPY_SRC; depth/stencil formats only
+   * allow full-subresource copies, so the copy must span the whole texture.
+   */
+  getDepthTexture(): GPUTexture {
+    return this.textures.depth;
+  }
+
   /** Resize G-Buffer (e.g., on canvas resize). */
   resize(width: number, height: number): void {
     if (width === this._width && height === this._height) return;
@@ -214,7 +223,9 @@ export class GBufferPass implements IPass {
     // (depth32float cannot: WebGPU only allows full-subresource copies of
     // depth/stencil formats, so a 1×1 depth readback is not possible)
     const worldPos = makeRT('rgba32float',  'GBuffer.WorldPos', GPUTextureUsage.COPY_SRC);
-    const depth    = makeRT('depth32float', 'GBuffer.Depth');
+    // depth carries COPY_SRC for the synthetic-sensor channel (F3 SensorCam):
+    // full-subresource copyTextureToBuffer → linearised metric depth per frame.
+    const depth    = makeRT('depth32float', 'GBuffer.Depth', GPUTextureUsage.COPY_SRC);
 
     this._textures = {
       albedo, normal, worldPos, depth,

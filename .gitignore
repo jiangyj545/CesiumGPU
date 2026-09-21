@@ -39,3 +39,6 @@ docs/api/
 # Debug artifacts (root level screenshots)
 /*.png
 /*.jpg
+
+# W2b: 全量建筑分块数据（由 仿真/scripts/export_buildings_json.py 生成，不入 git）
+public/examples/data/buildings/

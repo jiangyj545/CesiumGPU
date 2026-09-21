@@ -46,6 +46,19 @@ export { Primitive, PrimitiveCollection } from './scene/Primitive';
 export { EllipsoidGeometry } from './scene/EllipsoidGeometry';
 export { SunPosition } from './scene/SunPosition';
 
+// Geometry (F2b 城市建筑白模批量渲染)
+export { ExtrudedGeometry } from './geometry/ExtrudedGeometry';
+export type {
+  ExtrudedGeometryOptions,
+  ExtrudedGeometryBuffers,
+  LonLatPoint,
+} from './geometry/ExtrudedGeometry';
+export { CityBlockBuilder } from './geometry/CityBlockBuilder';
+export type {
+  CityBlockBuilderOptions,
+  CityBlockChunk,
+} from './geometry/CityBlockBuilder';
+
 // Model loading
 export { Model } from './scene/Model';
 export { GltfLoader } from './loader/GltfLoader';
@@ -70,6 +83,32 @@ export { ImageryLayerCollection } from './imagery/ImageryLayerCollection';
 // GPU picking (T2.3)
 export { PickPass } from './picking/PickPass';
 export type { PickResult } from './picking/PickPass';
+
+// 合成传感器通道（F3 SensorCam）
+export {
+  SensorCam,
+  SensorRecorder,
+  PALETTE_MAP_VERSION,
+  DEFAULT_PALETTE,
+  SEMANTIC,
+  linearizeDepthMeters,
+  quatFromFLU,
+  decodeSegPixel,
+  f32ToBase64,
+  defaultEncodeUris,
+  buildFrameRecord,
+} from './sensors/SensorCam';
+export type {
+  SensorCamParams,
+  SensorCamOptions,
+  SensorPose,
+  SensorFrame,
+  SensorFrameMeta,
+  PickIdToSemantic,
+  FrameRecord,
+  EpisodeResult,
+  SensorRecorderOptions,
+} from './sensors/SensorCam';
 
 // Data sources (Entity / GeoJSON)
 export { Event } from './dataSource/Event';

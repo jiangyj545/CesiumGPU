@@ -374,6 +374,15 @@ export class Scene {
     return this._gbufferPass?.getWorldPosTexture() ?? null;
   }
 
+  /**
+   * The G-Buffer depth texture (depth32float, COPY_SRC) used by the synthetic
+   * sensor channel for full-frame metric-depth readback — null before
+   * initialize().
+   */
+  getDepthTexture(): GPUTexture | null {
+    return this._gbufferPass?.getDepthTexture() ?? null;
+  }
+
   /** The WebGPU context (null-safe only after Viewer.initialize()). */
   get context(): Context { return this._context; }
 
