@@ -66,6 +66,7 @@
     const LON = 114.393, LAT = 30.50;          // 武汉光谷（mock 模式 ENU 锚点）
     const ALT_M = 120;                          // 航线高度（米，mock 模式）
     const SPEED_MS = 8;                         // 匀速（米/秒，mock 模式）
+    const COLS = 50, ROWS = 40, GAP = 11;       // 城市网格 50×40，间距 11m（≈500m×430m）
     // 矩形航线 500m×200m，5 航点（闭合回路），ENU 米
     const WAYPOINTS_ENU = [
       [0, 0], [500, 0], [500, 200], [0, 200], [0, 0],
@@ -94,8 +95,15 @@
     const ORIGIN = (POSE_SSE && SCENARIO_SPEC)
       ? { lon: SCENARIO_SPEC.origin.lon, lat: SCENARIO_SPEC.origin.lat, alt: SCENARIO_SPEC.origin.alt_m ?? 0 }
       : { lon: LON, lat: LAT, alt: 0 };
-    // 城市网格锚点偏移：SSE 模式把 50×40 网格中心 (≈272,214) 对准航线中心 (250,100)
-    const CITY_OFF = (POSE_SSE && SCENARIO_SPEC) ? [-22, -114] : [0, 0];
+    // 城市网格锚点偏移（W9 修复）：50×40 网格中心 = ((COLS-1)·GAP, (ROWS-1)·GAP)/2
+    // ≈ (269.5, 214.5)。SSE 航线中心 = scenario origin = ENU (0,0)，城市必须
+    // 覆盖 origin 周边航线（±200×±100m）——旧值 [-22,-114] 错按 mock 航线中心
+    // (250,100) 对齐，飞机绕 origin 飞时城市整体偏东南 ~270m（nadir 视锥地面
+    // 半径 120m 高仅 ~50m，永远看不到）。mock 保持 [0,0]（mock 航线
+    // 0..500×0..200 被网格 0..539×0..429 覆盖，行为不回归）。
+    const CITY_OFF = (POSE_SSE && SCENARIO_SPEC)
+      ? [-(COLS - 1) * GAP / 2, -(ROWS - 1) * GAP / 2]
+      : [0, 0];
 
     // ── ENU(米) → 经纬度（度）：小范围线性近似 ──
     const M_PER_DEG_LAT = 111320;
@@ -209,13 +217,17 @@
 
     /**
      * SSE 帧 → PoseMock（位姿源单点输出）。
-     * 朝向说明（W4 修复）：FrameRecord 契约 align.cam_T_body = I 且
-     * action.quat 回填 SimKernel 机体姿态（body FLU→ENU）——传感器视锥必须与
-     * 该姿态一致，否则 action.quat 推出的验证射线与渲染视锥错位（W3B 发现 #2：
-     * 渲染 nadir 而记录 −20°~−29° 机体俯仰）。故 heading/pitch/roll 全部由
-     * quat 解出：pitch = asin(前向·up)；heading 仍优先水平速度方向（巡航时
-     * 与 quat 偏航一致、悬停时退回 quat 前向水平投影）；roll 由左向量绕前向
-     * 的偏转解出（l0 = 去滚转理想左向 = normalize(up_world × fwd)）。
+     * 朝向说明（W9 修复）：传感器相机按**云台 nadir 刚性安装**建模
+     * （cam_T_body：光轴 = body −z、画面上 = body +x、画面右 = body −y），
+     * 视线 = q·(0,0,−1) 随机体姿态耦合——SimKernel body FLU、推力沿 body +z，
+     * 悬停（quat=identity）时光轴即天底。W4 版把光轴绑到 body x：巡航时
+     * asin(fwd.z) ≈ −20°~−29°（复现 W3B 记录），视锥平视远方地平线，nadir
+     * 城市完全出视锥（白模不可见；61.2% ANOMALY 同根因：深度全是远瓦片/裙边，
+     * 解析射线打不到近地面）。dataset-tools/verify-depth.mjs 的像素→body 射线
+     * 已随本约定同步修订（光轴 −z / 画面上 +x / 画面右 −y），渲染与解析
+     * 逐像素自洽。heading 取机头水平方位 + π（使 nadir 视锥「画面上 = 机头」
+     * 对齐解析约定；悬停/巡航均无速度阈值歧义）；roll = 0（绕光轴旋转不改变
+     * 射线-地面距离，对深度验证是曲率二阶量）。
      * 位置经 ENU 线性近似映射经纬高（同城市网格）。
      */
     function poseAtSse(_tSimS) {
@@ -225,31 +237,42 @@
       const [e, n, u] = f.pos_enu;
       const { lon, lat } = enuToLonLat(e, n);
       const heightM = ORIGIN.alt + u;
-      const fwd = quatRotateVec(f.quat, [1, 0, 0]);    // body 前（ENU）
-      const left = quatRotateVec(f.quat, [0, 1, 0]);   // body 左（ENU）
-      const pitchRad = Math.asin(Math.max(-1, Math.min(1, fwd[2])));
-      const vh = Math.hypot(f.vel_e[0], f.vel_e[1]);
+      const fwd = quatRotateVec(f.quat, [1, 0, 0]);      // body 机头（ENU）
+      const fwdCam = quatRotateVec(f.quat, [0, 0, -1]);  // 光轴（ENU，nadir 安装）
+      const pitchRad = Math.asin(Math.max(-1, Math.min(1, fwdCam[2])));
+      // heading 取光轴水平方位（dir 必须逐分量等于 fwdCam）；仅当光轴≈天底
+      // （水平分量退化，方位无定义）时退回机头方位 + π——该特例下引擎
+      // camUp 水平方位 = heading + π，取机头方位 + π 恰使「画面上 = 机头」。
       let heading;
-      if (vh > 0.3) {
-        heading = Math.atan2(f.vel_e[0], f.vel_e[1]);
+      if (Math.hypot(fwdCam[0], fwdCam[1]) > 1e-6) {
+        heading = Math.atan2(fwdCam[0], fwdCam[1]);
       } else {
-        heading = Math.atan2(fwd[0], fwd[1]);
+        heading = Math.atan2(fwd[0], fwd[1]) + Math.PI;
       }
-      // roll：roll>0 ⇔ 左向量向天顶偏转（与 Camera._applyOrientation 约定一致）
-      const l0x = -fwd[1], l0y = fwd[0];               // up_world × fwd（水平）
-      const l0n = Math.hypot(l0x, l0y);
+      if (heading > Math.PI) heading -= 2 * Math.PI;       // wrap 回 (−π,π]
+      // roll（W9.2）：机体耦合斜视（巡航俯仰 −25°~−30° → 光轴 −60° 附近）时，
+      // 绕光轴的旋转对地面交距是一阶敏感量——渲染 camUp 必须精确对齐解析
+      // 约定（画面上 = body +x 在垂直光轴平面的投影），否则像素↔射线配对
+      // 错位（verify-depth 出 beyond-ground ANOMALY）。roll = camUp0 绕光轴
+      // 转到 upDes 的有符号角（引擎 _applyOrientation 同款右手旋转）。
+      const dn = (v) => {
+        const l = Math.hypot(v[0], v[1], v[2]) || 1;
+        return [v[0] / l, v[1] / l, v[2] / l];
+      };
+      const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const cross3 = (a, b) => [
+        a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
+      ];
+      const dirN = dn(fwdCam);
+      const upW = [0, 0, 1];
+      const proj = (v, n) => [v[0] - n[0] * dot3(v, n), v[1] - n[1] * dot3(v, n), v[2] - n[2] * dot3(v, n)];
+      const upDes = dn(proj(fwd, dirN));           // 画面上期望方向（= body +x 投影）
+      const camUp0 = proj(upW, dirN);              // roll=0 时引擎给出的 camUp（Gram-Schmidt）
       let rollRad = 0;
-      if (l0n > 1e-6) {
-        const l0 = [l0x / l0n, l0y / l0n, 0];
-        const axis = [                                 // fwd × l0
-          fwd[1] * l0[2] - fwd[2] * l0[1],
-          fwd[2] * l0[0] - fwd[0] * l0[2],
-          fwd[0] * l0[1] - fwd[1] * l0[0],
-        ];
-        const dot = left[0] * axis[0] + left[1] * axis[1] + left[2] * axis[2];
-        const dot0 = left[0] * l0[0] + left[1] * l0[1] + left[2] * l0[2];
-        rollRad = Math.atan2(dot, dot0);
-      }
+      if (Math.hypot(camUp0[0], camUp0[1], camUp0[2]) > 1e-6) {
+        const c0 = dn(camUp0);
+        rollRad = Math.atan2(dot3(dirN, cross3(c0, upDes)), dot3(c0, upDes));
+      }   // 光轴≈天底时 camUp0 退化：upDes 即引擎缺省方位，roll=0
       const wp = SCENARIO_SPEC
         ? SCENARIO_SPEC.waypoints[wpCursor]
         : null;
@@ -374,7 +397,7 @@
         return seedState / 0xffffffff;
       };
       const builder = new CityBlockBuilder();
-      const COLS = 50, ROWS = 40, GAP = 11;               // 500m×200m 网格
+      // COLS/ROWS/GAP 见文件头常量区（W9 上移：CITY_OFF 初始化早于 demo()）
       for (let i = 0; i < COLS; i++) {
         for (let j = 0; j < ROWS; j++) {
           const e = i * GAP, n = j * GAP;
@@ -391,6 +414,20 @@
         }
       }
       const primitives = builder.build(viewer.context);
+      // ── W9 诊断出口：城市 ENU 包围盒（含 CITY_OFF）+ 最新位姿快照/机位，
+      //    供 batch/w9.cjs 探针与验收截图判断「相机在城市上空且 pitch 朝下」──
+      window.__CITY_BBOX = {
+        eMin: CITY_OFF[0], eMax: CITY_OFF[0] + (COLS - 1) * GAP,
+        nMin: CITY_OFF[1], nMax: CITY_OFF[1] + (ROWS - 1) * GAP,
+      };
+      window.__W9_POSE = () => {
+        const m = POSE_SSE ? poseAtSse(0) : poseAt(0);
+        return { ...m, cam: viewer.camera && {
+          position: viewer.camera.position,
+          direction: viewer.camera.direction,
+          up: viewer.camera.up,
+        } };
+      };
       // ── F7 DR 视觉轴应用（?dr= 未传返回 null，渲染行为与 F5 批量完全一致）──
       const drApplied = applyDrVisual(viewer, engineApi);
       // pickId → 语义：城市 chunk = building(1)，其余（globe/瓦片）= ground(3)
@@ -563,8 +600,19 @@
       // ── 收窗：停采样 →（SSE 真值已在 onFrame 逐帧回填）→ 存 episode → UI 复位 ──
       // episode 统一存 JSON 安全克隆：CDP Runtime.evaluate(returnByValue) 无法
       // 序列化 BigInt（FrameRecord.seed），bigint → 十进制字符串（dataset-tools 约定）。
-      const toJsonSafe = (v) =>
-        JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x)));
+      // W9 修复：不再 JSON.parse(JSON.stringify(...)) 整集转换——白模入画后
+      // 100 帧 RGB dataURL + 全分辨率 RLE 超 V8 单字符串上限（RangeError:
+      // Invalid string length；旧基线单集 397MB 已贴顶），改纯递归转换。
+      const toJsonSafe = (v) => {
+        if (typeof v === 'bigint') return v.toString();
+        if (Array.isArray(v)) return v.map(toJsonSafe);
+        if (v !== null && typeof v === 'object') {
+          const o = {};
+          for (const k of Object.keys(v)) o[k] = toJsonSafe(v[k]);
+          return o;
+        }
+        return v;
+      };
 
       let finalizing = null;   // 收窗共享 promise（看门狗与 stop() 并发去重）
       function beginFinalize() {
@@ -572,6 +620,11 @@
           recording = false;
           finalizing = (async () => {
             const res = await recorder.stop();
+            // W9：不再整集 JSON.stringify（100 帧 RGB dataURL + 全分辨率 RLE 在
+            // 白模入画后超 V8 字符串上限 RangeError: Invalid string length——
+            // 老基线单集已 397MB 贴顶）。episode 保内存对象，仅深拷贝把
+            // seed BigInt → 十进制字符串（dataset-tools 约定；farm/验收的
+            // 分块 take() 拉帧路径本就不依赖整集字符串）。
             episode = toJsonSafe(res);
             document.getElementById('btnStart').disabled = false;
             document.getElementById('btnStop').disabled = true;
@@ -659,19 +712,28 @@
       };
       document.getElementById('btnDownload').onclick = () => {
         if (!episode) return;
-        const json = JSON.stringify(
-          {
-            episode_id: recorder._opts.episodeId,
-            scenario_id: recorder._opts.scenarioId,
-            seed: String(recorder._opts.seed ?? 0n),
-            scenario: SCENARIO_SPEC ?? undefined,
-            palette_map: engineApi.PALETTE_MAP_VERSION,
-            frame_rate_hz: recorder._opts.hz,
-            frames: episode.frames,
-          },
-          (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
-          1,
-        );
+        let json;
+        try {
+          json = JSON.stringify(
+            {
+              episode_id: recorder._opts.episodeId,
+              scenario_id: recorder._opts.scenarioId,
+              seed: String(recorder._opts.seed ?? 0n),
+              scenario: SCENARIO_SPEC ?? undefined,
+              palette_map: engineApi.PALETTE_MAP_VERSION,
+              frame_rate_hz: recorder._opts.hz,
+              frames: episode.frames,
+            },
+            (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
+            1,
+          );
+        } catch (err) {
+          // W9：白模入画后整集字符串可超 V8 上限——手动导出走降采样拷贝兜底提示
+          result.textContent =
+            `导出失败：整集 JSON 超 V8 字符串上限（${err.message}）。\n` +
+            `请走分块协议（window.__SENSOR_RECORD.nFrames()/take()）导出。`;
+          return;
+        }
         const blob = new Blob([json], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
