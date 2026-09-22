@@ -25,6 +25,15 @@ export interface PrimitiveOptions {
    * bind-group structure are identical to lit primitives.
    */
   unlit?: boolean;
+  /**
+   * Per-vertex pick id override (u32, one entry per vertex) — F12 instance-level
+   * picking. Stored in a SECOND vertex buffer (stride 4, format 'uint32') that
+   * only the pick pipeline binds (see PickPass); the G-Buffer path is untouched.
+   * A value of 0 means "no instance" and falls back to the primitive pickId.
+   * Ids must stay below 0x800000: the pick shader emits `0x800000 | instanceId`
+   * so the instance id space never collides with primitive pickIds.
+   */
+  instanceIds?: Uint32Array;
 }
 
 /**
@@ -56,6 +65,8 @@ export class Primitive {
 
   private _context: Context;
   private _vertexBuffer: GPUBuffer;
+  /** Optional per-vertex instance id buffer (pick pipeline slot 1); null otherwise. */
+  private _instanceIdBuffer: GPUBuffer | null = null;
   private _indexBuffer: GPUBuffer;
   private _indexCount: number;
   private _translucent: boolean;
@@ -105,6 +116,17 @@ export class Primitive {
     // Copy through the view (not .buffer) so subarray() views upload exactly
     // their own range instead of the whole underlying ArrayBuffer.
     context.writeBuffer(this._vertexBuffer, 0, new Float32Array(options.vertices));
+
+    // Optional per-vertex instance id buffer (F12) — bound only by the pick
+    // pipeline's second vertex slot; never touched by the G-Buffer path.
+    if (options.instanceIds && options.instanceIds.length > 0) {
+      this._instanceIdBuffer = device.createBuffer({
+        label: 'Primitive.InstanceIdVBO',
+        size:  options.instanceIds.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+      context.writeBuffer(this._instanceIdBuffer, 0, new Uint32Array(options.instanceIds));
+    }
 
     // Index buffer
     this._indexBuffer = device.createBuffer({
@@ -176,6 +198,12 @@ export class Primitive {
   }
 
   get translucent(): boolean { return this._translucent; }
+
+  /** True when this primitive carries a per-vertex instance id buffer (F12). */
+  get hasInstanceIds(): boolean { return this._instanceIdBuffer !== null; }
+
+  /** Per-vertex instance id buffer (pick pipeline vertex slot 1), or null. */
+  get instanceIdBuffer(): GPUBuffer | null { return this._instanceIdBuffer; }
 
   /** True when this primitive draws through the unlit (emissive) pipeline. */
   get unlit(): boolean { return this._unlit; }
@@ -308,6 +336,7 @@ export class Primitive {
 
   destroy(): void {
     this._vertexBuffer.destroy();
+    this._instanceIdBuffer?.destroy();
     this._indexBuffer.destroy();
     this._modelUniformBuffer.destroy();
     this._materialUniformBuffer.destroy();

@@ -394,6 +394,8 @@
       // ── F7 DR 视觉轴应用（?dr= 未传返回 null，渲染行为与 F5 批量完全一致）──
       const drApplied = applyDrVisual(viewer, engineApi);
       // pickId → 语义：城市 chunk = building(1)，其余（globe/瓦片）= ground(3)
+      // F12：bit23 置位的 id = 建筑实例像素（0x800000|楼序号），cls 恒 building(1)
+      const INSTANCE_FLAG = 0x800000;
       const buildingPickIds = new Set(primitives.map((p) => p.pickId));
       for (const p of primitives) viewer.scene.addPrimitive(p);
 
@@ -404,7 +406,7 @@
         height: viewer.context.drawingBufferHeight,
         nearM: 1,
         farM: 2000,
-        pickIdToSemantic: (id) => buildingPickIds.has(id) ? 1 : 3,
+        pickIdToSemantic: (id) => (id & INSTANCE_FLAG) ? 1 : (buildingPickIds.has(id) ? 1 : 3),
       });
 
       let episode = null;
@@ -496,6 +498,13 @@
         },
         onFrame: (record, frame) => {
           if (POSE_SSE && pendingSse) patchWithSse(record, pendingSse);
+          else if (!POSE_SSE) {
+            // mock 航线模式：无 SSE 真值，回填 validator 约束缺省（电池满/晴空
+            // GNSS），与 patchWithSse 的常量一致——否则 battery.v=0 / hdop=0
+            // 触发 validate-frame FAIL（任务约定：帧校验必须 PASS）。
+            record.action.battery = { v: 22.2, a: 8.5, soc: 1 };
+            record.environment.gnss = { sv_visible: 18, hdop: 0.9, nlos_masked: [], noise_std_m: 1.5 };
+          }
           pendingSse = null;
           // 回放消费约定（91 页 drawQuad / demo-episode 同构）：32×32 降采样
           // 内联数组与 uri 并存，深度伪彩/分割色块可离线重放
@@ -511,7 +520,26 @@
             }
           }
           record.vision.depth.data = dData;
-          record.vision.seg.data = sData;
+          // ── F12：seg 全分辨率 RLE 导出（实例级标注数据源）──
+          // 数据源 = instanceSegIds（bit23 置位 = 建筑实例，0x800000|楼序号；
+          // 其余 = palette cls 1..4；0 = 背景）。palette 查表在消费侧。
+          // 行主序 RLE：data = [value, runLen, ...]，通常几 KB～几十 KB，
+          // 满足帧 JSON <2MB 目标（旧 32×32 方阵保留为 grid32 兼容副本）。
+          const ids = frame.instanceSegIds ?? frame.segIds;
+          const rle = [];
+          if (ids.length > 0) {
+            let prev = ids[0], run = 1;
+            for (let i = 1; i < ids.length; i++) {
+              if (ids[i] === prev) { run++; }
+              else { rle.push(prev, run); prev = ids[i]; run = 1; }
+            }
+            rle.push(prev, run);
+          }
+          record.vision.seg.width = dw;
+          record.vision.seg.height = dh;
+          record.vision.seg.encoding = 'rle-palette';
+          record.vision.seg.data = rle;
+          record.vision.seg.grid32 = sData;
           renderPreview(record, frame);
         },
       });

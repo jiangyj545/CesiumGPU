@@ -17,6 +17,13 @@ export interface CityBlockBuilderOptions {
 export interface CityBlockChunk {
   /** 合并后的几何（8 float 交错 + 索引），`Primitive` 直接消费。 */
   geometry: ExtrudedGeometryBuffers;
+  /**
+   * 每顶点实例 id（u32，F12）——builder 内全局唯一的建筑序号（1 起，
+   * < 0x800000）。pick 管线把 `0x800000 | instanceId` 渲染进 id 平面，
+   * 消费侧（SensorCam / bbox-from-seg）按 bit23 判别实例像素，实现
+   * 逐楼 bbox。语义类别仍走 `geometry.semanticIds`（类别 → 调色板）。
+   */
+  instanceIds: Uint32Array;
   /** 该分块包含的楼栋数。 */
   buildingCount: number;
 }
@@ -35,9 +42,9 @@ export interface CityBlockChunk {
  * ## semanticId（F3 分割 pass 铺路）
  *
  * 每顶点 u32 语义 ID 随几何一起合并（`ExtrudedGeometryBuffers.semanticIds`）。
- * 当前管线顶点布局为固定 32 字节 stride，本任务不新增顶点槽位；F3 做
- * 分割 pass 时把该数组绑为第二顶点缓冲（`format: 'uint32'`）即可，数据
- * 无需重新生成。
+ * 类别 id 不唯一——F12 起 builder 另分配每建筑唯一实例 id（`instanceIds`，
+ * builder 内 1 起递增），经 `Primitive` 的第二顶点缓冲进 pick 管线：
+ * 类别给调色板、实例给 bbox（见 `CityBlockChunk.instanceIds`）。
  *
  * ## 分块（WebGPU buffer size 上限）
  *
@@ -50,10 +57,15 @@ export class CityBlockBuilder {
 
   private readonly _maxChunkBytes: number;
 
+  /** 实例 id 分配上限（23-bit）：pick shader 输出 `0x800000 | id`，bit23 为实例标记位。 */
+  static readonly MAX_INSTANCE_ID = 0x7FFFFF;
+
   /** 当前未 flush 分块的累积段（typed array 切片列表，flush 时拼接）。 */
   private _vertSegs: Float32Array[] = [];
   private _idxSegs: number[] = [];        // 已含分块内顶点基址偏移
   private _semanticSegs: Uint32Array[] = [];
+  private _instanceSegs: Uint32Array[] = [];
+  private _nextInstanceId = 1;            // builder 内全局唯一建筑序号（F12）
   private _chunkVertFloats = 0;           // 当前分块 vertices 总 float 数
   private _chunkBytes = 0;                // 当前分块 顶点+索引 字节数
   private _chunkBuildings = 0;
@@ -87,6 +99,13 @@ export class CityBlockBuilder {
     const g = ExtrudedGeometry.create({ ring, heightM, semanticId });
     if (g.indexCount === 0) return this;
 
+    // F12 实例 id：builder 内全局唯一建筑序号（1 起）。semanticId 是类别 id
+    // （palette 查表用），不唯一；实例分离靠本 id。
+    if (this._nextInstanceId > CityBlockBuilder.MAX_INSTANCE_ID) {
+      throw new Error('CityBlockBuilder: 23-bit instance id space exhausted');
+    }
+    const instanceId = this._nextInstanceId++;
+
     // 分块预算：顶点(32B/顶点) + 索引(4B/索引)。放不下且当前块非空 → 先 flush
     const bytes = g.vertices.byteLength + g.indices.byteLength;
     if (this._chunkBuildings > 0 && this._chunkBytes + bytes > this._maxChunkBytes) {
@@ -97,6 +116,9 @@ export class CityBlockBuilder {
     this._chunkVertFloats += g.vertices.length;
     this._chunkBytes += bytes;
     this._semanticSegs.push(g.semanticIds);
+
+    const buildingInstances = new Uint32Array(g.vertexCount).fill(instanceId);
+    this._instanceSegs.push(buildingInstances);
 
     const base = this._chunkVertexBase;
     for (let i = 0; i < g.indices.length; i++) {
@@ -137,6 +159,7 @@ export class CityBlockBuilder {
       out.push(new Primitive(context, {
         vertices: c.geometry.vertices,
         indices:  c.geometry.indices,
+        instanceIds: c.instanceIds,
       }));
     }
     return out;
@@ -152,6 +175,10 @@ export class CityBlockBuilder {
     off = 0;
     for (const seg of this._semanticSegs) { semanticIds.set(seg, off); off += seg.length; }
 
+    const instanceIds = new Uint32Array(vertices.length / GeometryPipeline.VERTEX_STRIDE);
+    off = 0;
+    for (const seg of this._instanceSegs) { instanceIds.set(seg, off); off += seg.length; }
+
     const chunk: CityBlockChunk = {
       geometry: {
         vertices,
@@ -160,6 +187,7 @@ export class CityBlockBuilder {
         indexCount: this._idxSegs.length,
         semanticIds,
       },
+      instanceIds,
       buildingCount: this._chunkBuildings,
     };
     this._chunks.push(chunk);
@@ -167,6 +195,7 @@ export class CityBlockBuilder {
     this._vertSegs = [];
     this._idxSegs = [];
     this._semanticSegs = [];
+    this._instanceSegs = [];
     this._chunkVertFloats = 0;
     this._chunkBytes = 0;
     this._chunkBuildings = 0;

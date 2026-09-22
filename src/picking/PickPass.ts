@@ -147,6 +147,12 @@ export class PickPass {
   private readonly _idBindGroups = new Map<number, GPUBindGroup>();
 
   private _pipeline: GPURenderPipeline | null = null;
+  /**
+   * F12 instance-id variant: second vertex buffer (stride 4, 'uint32' @
+   * location 3) carries the per-vertex instance id; fragment emits
+   * `0x800000 | instanceId`. Created lazily alongside `_pipeline`.
+   */
+  private _instancePipeline: GPURenderPipeline | null = null;
   private _pickIdBGL: GPUBindGroupLayout | null = null;
   private _cameraBindGroup: GPUBindGroup | null = null;
 
@@ -522,6 +528,42 @@ export class PickPass {
       layout: cameraBGL,
       entries: [{ binding: 0, resource: { buffer: this._cameraUbo } }],
     });
+
+    // F12 instance-id pipeline: same bind group layouts (groups 0-2) as the
+    // base pick pipeline, plus the per-vertex instance id buffer at slot 1.
+    this._instancePipeline = device.createRenderPipeline({
+      label:  'PickPassInstancePipeline',
+      layout: device.createPipelineLayout({
+        bindGroupLayouts: [cameraBGL, modelBGL, this._pickIdBGL],
+      }),
+      vertex: {
+        module:     shader,
+        entryPoint: 'vs_instanced',
+        buffers: [
+          {
+            arrayStride: 32, // same interleaved layout as the G-Buffer pass
+            attributes: [
+              { shaderLocation: 0, offset: 0,  format: 'float32x3' }, // position
+              { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
+              { shaderLocation: 2, offset: 24, format: 'float32x2' }, // uv
+            ],
+          },
+          {
+            arrayStride: 4,
+            attributes: [
+              { shaderLocation: 3, offset: 0, format: 'uint32' }, // per-vertex instance id
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module:     shader,
+        entryPoint: 'fs_instanced',
+        targets: [{ format: 'rgba8unorm' }],
+      },
+      primitive:    { topology: 'triangle-list', cullMode: 'back' },
+      depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' },
+    });
   }
 
   /** Lazily create (and cache) the per-id uniform + bind group. */
@@ -615,6 +657,15 @@ export class PickPass {
       if (frustum) {
         const bs = prim.boundingSphere;
         if (!frustum.intersectsSphere(bs.center, bs.radius)) return;
+      }
+      // F12: primitives carrying a per-vertex instance id buffer render through
+      // the two-slot pipeline so the id plane holds per-BUILDING ids; everything
+      // else keeps the original single-buffer pipeline (unchanged semantics).
+      if (prim.hasInstanceIds && prim.instanceIdBuffer && this._instancePipeline) {
+        pass.setPipeline(this._instancePipeline);
+        pass.setVertexBuffer(1, prim.instanceIdBuffer);
+      } else {
+        pass.setPipeline(this._pipeline!);
       }
       this._idToPrimitive.set(prim.pickId, prim);
       pass.setBindGroup(2, this._idBindGroup(prim.pickId));

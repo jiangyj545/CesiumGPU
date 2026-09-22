@@ -68,6 +68,47 @@ fn encodeId(id: u32) -> vec4<f32> {
 fn fs_main() -> @location(0) vec4<f32> {
   return encodeId(pickId.id);
 }
+
+// ── F12 实例级拾取（per-vertex instance id override）─────────────────────────
+// 第二顶点缓冲（stride 4, format 'uint32'，shaderLocation 3）携带每顶点实例
+// id（CityBlockBuilder 每建筑唯一序号，23-bit）。命中实例的像素输出
+// "INSTANCE_FLAG | instanceId" —— bit23 置位把实例 id 与 primitive pickId
+// 空间隔离（消费侧 SensorCam / bbox-from-seg 以 INSTANCE_FLAG 判别实例
+// 像素；pickId 分配器为 24-bit 递增值，与 bit23 置位空间的碰撞仅在 >8M
+// 图元的场景理论可达，实际不出现）。instanceId == 0（未赋值顶点）回退
+// primitive pickId，保证部分顶点缺失 id 时拾取语义仍正确。
+
+struct InstancedVertexInput {
+  @location(0) position   : vec3<f32>,
+  @location(1) normal     : vec3<f32>,
+  @location(2) uv         : vec2<f32>,
+  @location(3) instanceId : u32,
+}
+
+struct InstancedVertexOutput {
+  @builtin(position) clipPosition : vec4<f32>,
+  // WGSL 规则：整型 user-defined 顶点输出必须显式 @interpolate(flat)，
+  // 否则整个 ShaderModule 解析失败（2026-09-22 headless 实测：缺此属性时
+  // vs_main/vs_instanced 一并 invalid → pick id 平面全 0）。
+  @location(0) @interpolate(flat) instanceId : u32,
+}
+
+@vertex
+fn vs_instanced(in: InstancedVertexInput) -> InstancedVertexOutput {
+  var out: InstancedVertexOutput;
+  let worldPos = model.modelMatrix * vec4<f32>(in.position, 1.0);
+  out.clipPosition = camera.viewProjMatrix * worldPos;
+  out.instanceId = in.instanceId;
+  return out;
+}
+
+const INSTANCE_FLAG: u32 = 0x800000u;
+
+@fragment
+fn fs_instanced(in: InstancedVertexOutput) -> @location(0) vec4<f32> {
+  let id = select(INSTANCE_FLAG | in.instanceId, pickId.id, in.instanceId == 0u);
+  return encodeId(id);
+}
 `;
 
 /**

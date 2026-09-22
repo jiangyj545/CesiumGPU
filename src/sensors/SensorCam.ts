@@ -28,8 +28,10 @@
  * ## 已知限制（Phase 0）
  *  - rgb/depth/seg 分辨率 = 主 canvas drawing buffer（引擎 G-Buffer/拾取目标
  *    都按 canvas 尺寸分配），params.width/height 仅作记录与预期视场参考；
- *  - 分割粒度 = Primitive（合批 chunk）级：pickId 是 per-Primitive 的，
- *    每顶点 semanticId 尚未接入 GPU 管线（CityBlockBuilder 已预留数据）；
+ *  - 分割粒度（F12 起）：建筑图元为实例级——CityBlockBuilder 每楼唯一实例
+ *    id 经 pick 管线第二顶点缓冲渲染进 id 平面（bit23 标记，见
+ *    `PICK_INSTANCE_FLAG`），`instanceSegIds` 承载逐像素实例段 id；其余
+ *    图元仍为 Primitive 级语义（pickIdToSemantic 查表）；
  *  - near/far 受引擎动态 near/far 策略约束，params.nearM/farM 仅记录。
  */
 
@@ -121,11 +123,24 @@ export interface SensorFrame {
   seg: Uint8Array;
   /** 每像素语义 id（0..4，调试/训练侧可直接消费）。 */
   segIds: Uint32Array;
+  /**
+   * F12 每像素实例段 id（可选；缺省 = 场景无实例图元）。
+   * 0 = 背景或非实例图元；bit23 置位值（{@link PICK_INSTANCE_FLAG} | 建筑序号）
+   * = 实例像素。全分辨率，与 seg/depth 同尺寸同序——RLE 导出的数据源。
+   */
+  instanceSegIds?: Uint32Array;
   meta: SensorFrameMeta;
 }
 
 /** pickId → 语义 id 的可注入映射（0 = 天空/背景）。 */
 export type PickIdToSemantic = (pickId: number) => number;
+
+/**
+ * F12 实例像素标记位：pick id 平面中 bit23 置位的值为建筑实例
+ * （低 23 位 = CityBlockBuilder 建筑序号），与 primitive pickId 空间隔离。
+ * 与 PickShader.INSTANCE_FLAG / bbox-from-seg INSTANCE_FLAG 三方对齐。
+ */
+export const PICK_INSTANCE_FLAG = 0x800000;
 
 export interface SensorCamOptions extends SensorCamParams {
   /** pickId→语义映射，缺省全 0（全画面视作背景）。 */
@@ -351,16 +366,19 @@ export class SensorCam {
         depthM[i] = linearizeDepthMeters(f32[i], nearNorm, farNorm);
       }
 
-      // ── seg 解码：pickId → 语义 → 调色板 ──
+      // ── seg 解码：pickId → 语义 → 调色板（F12：同轮填充实例段平面）──
       const segData = dump ?? { w, h, data: new Uint8Array(w * h * 4) };
       const seg = new Uint8Array(w * h * 4);
       const segIds = new Uint32Array(w * h);
+      const instanceSegIds = new Uint32Array(w * h);
       const sw = Math.min(segData.w, w);
       const sh = Math.min(segData.h, h);
       for (let y = 0; y < sh; y++) {
         for (let x = 0; x < sw; x++) {
           const si = (y * segData.w + x) * 4;
           const di = y * w + x;
+          const rawId =
+            segData.data[si] | (segData.data[si + 1] << 8) | (segData.data[si + 2] << 16);
           const dec = decodeSegPixel(
             segData.data[si], segData.data[si + 1], segData.data[si + 2],
             this._pickIdToSemantic, this._palette,
@@ -370,6 +388,8 @@ export class SensorCam {
           seg[di * 4 + 2] = dec.rgba[2];
           seg[di * 4 + 3] = dec.rgba[3];
           segIds[di] = dec.semanticId;
+          // F12：bit23 置位 = 建筑实例像素，原值保留（含序号）；其余归 0
+          instanceSegIds[di] = (rawId & PICK_INSTANCE_FLAG) !== 0 ? rawId : 0;
         }
       }
 
@@ -390,6 +410,7 @@ export class SensorCam {
         depth: depthM,
         seg,
         segIds,
+        instanceSegIds,
         meta: {
           intrinsics: { fx, fy: fx, cx: w / 2, cy: h / 2 },
           hfovDeg: CesiumMath.toDegrees(hfovRad),
@@ -452,7 +473,19 @@ export interface FrameRecord {
       hfov_deg: number;
     };
     depth: { uri: string; fmt: 'f32' | 'u16'; near_m: number; far_m: number; unit: 'm' };
-    seg: { uri: string; palette_map_ref: string };
+    /**
+     * seg 通道。旧格式：data = G×G 语义 id 方阵（无 width/height/encoding）。
+     * F12 新格式：encoding 'rle-palette' + 全分辨率 RLE（data = [value,run,...]，
+     * value 语义：0 背景 / 1..4 调色板 cls / 0x800000|n 建筑实例 n），
+     * palette 查表在消费侧；grid32 为旧 32×32 兼容副本（离线重放）。
+     */
+    seg: {
+      uri: string; palette_map_ref: string;
+      width?: number; height?: number;
+      encoding?: 'rle-palette';
+      data?: number[];
+      grid32?: number[];
+    };
     bbox2d: Array<{ cls: string; track_id: number; x1: number; y1: number; x2: number; y2: number }>;
   };
   command: {
