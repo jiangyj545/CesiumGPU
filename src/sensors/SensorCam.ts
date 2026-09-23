@@ -717,6 +717,11 @@ export class SensorRecorder {
 
   get recording(): boolean { return this._recording; }
 
+  /** capture 在飞（render→copy→mapAsync 异步窗口）——外部相机驱动
+   * （90 页跟随 tick 等）应在此期间让路，防 setView 打进 capture 渲染
+   * 窗口污染深度帧（SSE 位姿时戳竞态的 0.2-1m 残差源，W9/F20-2 记录）。 */
+  get inFlight(): boolean { return this._inFlight; }
+
   /** 启动采样。间隔 = 1000/hz（setInterval，非 rAF）。 */
   start(): void {
     if (this._recording) return;

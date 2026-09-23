@@ -621,7 +621,12 @@
       // 主循环与 capture 必须驱动同一视锥，否则 imagery quadtree 的选择集
       // 在两个相机间来回切换，LRU 把 capture 视锥的瓦片纹理逐出，采集帧
       // 地面图元被丢弃（深度读 far/裙边穿透值）。
+      // W10（SSE 时戳竞态修复）：capture 在飞（render→copy→mapAsync 异步
+      // 窗口）期间跟随让路——否则 setView 用"此刻最新"SSE 位姿打进 capture
+      // 渲染窗口，深度帧混入 0-200ms 更新的位姿（8m/s 下 0.2-1.6m，正是
+      // verify-depth / lidar-bvh-verify 的 ~1m 残差主源）。
       setInterval(() => {
+        if (recorder.inFlight) return;             // capture 窗口互斥
         const { pose } = POSE_SSE
           ? poseAtSse(performance.now() / 1000)   // SSE：消费最新帧
           : poseAt((performance.now() / 1000) % (TOTAL_LEN / SPEED_MS));
