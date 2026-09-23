@@ -108,9 +108,16 @@
       ? [-(COLS - 1) * GAP / 2, -(ROWS - 1) * GAP / 2]
       : [0, 0];
 
-    // ── ENU(米) → 经纬度（度）：小范围线性近似 ──
-    const M_PER_DEG_LAT = 111320;
-    const M_PER_DEG_LON = 111320 * Math.cos(ORIGIN.lat * Math.PI / 180);
+    // ── ENU(米) → 经纬度（度）：WGS84 精确系数（W10 归因修复）──
+    // 旧常数线性近似 lat 系数 +0.414%（111320 vs 子午圈 @30.5°=110860.9）→
+    // 500m 航程 0.3-0.4m 位置差（实测均值 0.346m），与 f32 顶点量化叠加构成
+    // verify-depth |Δ| ~1m 残差主体（f20 文档 §14 剩余 ~0.5m 归因闭合）。
+    const E2_W = 1 - (6356752.314245 ** 2) / (6378137 ** 2);
+    const sinLat0 = Math.sin(ORIGIN.lat * Math.PI / 180);
+    const M_PER_DEG_LAT = 6378137 * (1 - E2_W)
+      / (1 - E2_W * sinLat0 * sinLat0) ** 1.5 * (Math.PI / 180);
+    const M_PER_DEG_LON = 6378137 / Math.sqrt(1 - E2_W * sinLat0 * sinLat0)
+      * Math.cos(ORIGIN.lat * Math.PI / 180) * (Math.PI / 180);
     const enuToLonLat = (e, n) => ({
       lon: ORIGIN.lon + e / M_PER_DEG_LON,
       lat: ORIGIN.lat + n / M_PER_DEG_LAT,
