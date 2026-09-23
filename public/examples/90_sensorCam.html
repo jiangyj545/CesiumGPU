@@ -434,6 +434,20 @@
         }
       }
       const primitives = builder.build(viewer.context);
+      // ── F20 城市几何真值导出口（LiDAR BVH 数据源）：每楼 [cx,cy,he,hn,h]
+      //    ENU 米（含 CITY_OFF）；cx,cy 为网格中心、he/hn 半宽、h 楼高。
+      //    比确定性 LCG 复刻更硬的源——页面内 rand/经纬往返的一切语义原样在此。
+      window.__CITY_GEOM = [];
+      {
+        let s = 42;
+        const prand = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 0xffffffff; };
+        for (let i = 0; i < COLS; i++) {
+          for (let j = 0; j < ROWS; j++) {
+            const he = 2.5 + prand() * 2, hn = 2.5 + prand() * 2, h = 15 + prand() * 65;
+            window.__CITY_GEOM.push([i * GAP + CITY_OFF[0], j * GAP + CITY_OFF[1], he, hn, h]);
+          }
+        }
+      }
       // ── W9 诊断出口：城市 ENU 包围盒（含 CITY_OFF）+ 最新位姿快照/机位，
       //    供 batch/w9.cjs 探针与验收截图判断「相机在城市上空且 pitch 朝下」──
       window.__CITY_BBOX = {
