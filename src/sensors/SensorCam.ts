@@ -516,13 +516,16 @@ export interface FrameRecord {
     cam_T_body: number[];
     imu_T_body: number[];
     /**
-     * F19：渲染相机真实姿态 [w,x,y,z]（ENU，FLU 基：列 = [forward,left,up]，
-     * 光轴 = forward）。capture 时从引擎相机实际基取值（"渲染用什么记什么"），
-     * 与云台模式无关恒写入。云台稳定（90 页 ?gimbal=stab）下相机与机体解耦，
-     * action.quat（机体）不再能推出相机朝向——verify-depth 等解析侧应优先
-     * 消费本字段重建像素射线（像素 → 相机 FLU 系 → qRotate → ENU）。
+     * F19：渲染相机真实姿态 [w,x,y,z]（FLU→ECEF 旋转：列 = [forward,left,up]
+     * 均为 ECEF 归一化坐标，光轴 = forward）。capture 时从引擎相机实际基取值
+     * （"渲染用什么记什么"），与云台模式无关恒写入。云台稳定（90 页
+     * ?gimbal=stab）下相机与机体解耦，action.quat（机体）不再能推出相机朝向
+     * ——verify-depth 等解析侧应优先消费本字段重建像素射线：
+     * 像素 → 相机 FLU 系 dir=[1,-(px-cx)/fx,-(py-cy)/fy] → qRotate → ECEF 方向。
+     * 注意是 ECEF 不是 ENU（引擎 cam.direction/up 原生 ECEF；曾误命名
+     * cam_quat_enu 导致消费方双重变换，2026-09-23 勘误改名）。
      */
-    cam_quat_enu: [number, number, number, number];
+    cam_quat_ecef: [number, number, number, number];
   };
   events: Array<{ t: number; type: string; payload?: unknown }>;
 }
@@ -632,8 +635,8 @@ export function buildFrameRecord(input: FrameRecordInput): FrameRecord {
       latency_model_ms: { sensor: 0, control: 0, actuator: 0 },
       cam_T_body: IDENTITY4,
       imu_T_body: IDENTITY4,
-      // F19：渲染相机姿态真值（拷贝防外部改 meta 污染帧记录）
-      cam_quat_enu: [...meta.camQuat] as [number, number, number, number],
+      // F19：渲染相机姿态真值（FLU→ECEF，拷贝防外部改 meta 污染帧记录）
+      cam_quat_ecef: [...meta.camQuat] as [number, number, number, number],
     },
 
     events: [],

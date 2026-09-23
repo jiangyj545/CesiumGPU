@@ -339,9 +339,9 @@ describe('buildFrameRecord 字段完整性', () => {
     expect(rec.align.latency_model_ms).toEqual({ sensor: 0, control: 0, actuator: 0 });
     expect(rec.align.cam_T_body).toHaveLength(16);
     expect(rec.align.imu_T_body).toHaveLength(16);
-    // F19：渲染相机姿态真值透传（拷贝副本，非 meta 同引用）
-    expect(rec.align.cam_quat_enu).toEqual([0.7071, 0, 0, 0.7071]);
-    expect(rec.align.cam_quat_enu).not.toBe(makeMockFrame(12.5).meta.camQuat);
+    // F19：渲染相机姿态真值透传（FLU→ECEF；拷贝副本，非 meta 同引用）
+    expect(rec.align.cam_quat_ecef).toEqual([0.7071, 0, 0, 0.7071]);
+    expect(rec.align.cam_quat_ecef).not.toBe(makeMockFrame(12.5).meta.camQuat);
     expect(rec.events).toEqual([]);
   });
 
