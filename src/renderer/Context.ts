@@ -147,6 +147,10 @@ export class Context {
 
   /**
    * Resize canvas and update WebGPU context.
+   *
+   * 只需改写 canvas.width/height：GPUCanvasContext.configure() 未固定 size，
+   * getCurrentTexture() 每帧自动跟随画布当前尺寸（WebGPU 规范行为），
+   * 因此 VideoRecorder 触发的 4K resize 无需 reconfigure，下一帧即按新尺寸出纹理。
    */
   resize(width: number, height: number): void {
     this._canvas.width = width;

@@ -7,6 +7,8 @@ import { Color } from '../math/Color';
 import { ScreenSpaceEventHandler } from './ScreenSpaceEventHandler';
 import type { PinchPosition, WheelPosition, ScreenSpacePosition } from './ScreenSpaceEventHandler';
 import type { PickResult } from '../picking/PickPass';
+import { VideoRecorder } from '../media/VideoRecorder';
+import type { RecordingOptions } from '../media/VideoRecorder';
 
 export interface ViewerOptions {
   /** GPU power preference. Default: 'high-performance' */
@@ -96,6 +98,11 @@ export class Viewer {
   private _initPromise: Promise<void> | null = null;
   private _resizeObserver: ResizeObserver | null = null;
 
+  // 4K 视频输出（惰性创建，见 captureStream/startRecording/stopRecording）
+  private _recorder: VideoRecorder | null = null;
+  /** 录制期间挂起容器自适应 resize（否则 ResizeObserver 会改回录制分辨率）。 */
+  private _autoResizePaused = false;
+
   constructor(containerOrId: string | HTMLElement, _options: ViewerOptions = {}) {
     if (typeof containerOrId === 'string') {
       const el = document.getElementById(containerOrId);
@@ -177,9 +184,57 @@ export class Viewer {
     this._canvas.remove();
   }
 
+  // ── 4K 视频输出（委托 VideoRecorder） ─────────────────────────────────────
+
+  /**
+   * 采集画布为 MediaStream。
+   * @param fps 采集帧率，默认 60。
+   */
+  captureStream(fps = 60): MediaStream {
+    return this._getRecorder().captureStream(fps);
+  }
+
+  /**
+   * 开始录制：保存旧尺寸 → resize 到目标分辨率（如 4K）→ 等一帧 → start。
+   * 录制期间挂起 ResizeObserver 自适应 resize。
+   * @throws 已在录制中、环境不支持或 mime 候选链全失败时 reject 带原因。
+   */
+  async startRecording(opts?: RecordingOptions): Promise<void> {
+    this._autoResizePaused = true;
+    try {
+      await this._getRecorder().startRecording(opts);
+    } catch (err) {
+      this._autoResizePaused = false; // 失败不留挂起态，原因照原样上抛（Invariant 1）
+      throw err;
+    }
+  }
+
+  /**
+   * 停止录制并 resolve 视频 Blob；同时恢复原尺寸并解除 resize 挂起。
+   * @throws 非 recording 态调用时 reject 带原因。
+   */
+  async stopRecording(): Promise<Blob> {
+    const blob = await this._getRecorder().stopRecording();
+    this._autoResizePaused = false;
+    this._resizeCanvas(); // 与容器重新对齐一次（录制期间容器可能变化）
+    return blob;
+  }
+
+  /** 当前录制状态：'idle' | 'recording'。 */
+  get recordingState(): 'idle' | 'recording' {
+    return this._recorder ? this._recorder.state : 'idle';
+  }
+
+  /** 惰性创建 VideoRecorder（Viewer 满足其最小宿主接口）。 */
+  private _getRecorder(): VideoRecorder {
+    if (!this._recorder) this._recorder = new VideoRecorder(this);
+    return this._recorder;
+  }
+
   // ── Private ────────────────────────────────────────────────────────────────
 
   private _resizeCanvas(): void {
+    if (this._autoResizePaused) return; // 录制 4K 期间禁止把画布改回容器尺寸
     const w = this._container.clientWidth  || window.innerWidth;
     const h = this._container.clientHeight || window.innerHeight;
     const dpr = window.devicePixelRatio || 1;

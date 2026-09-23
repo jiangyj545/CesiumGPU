@@ -191,6 +191,14 @@ export { VideoTexture, createVideoSampler } from './media/VideoTexture';
 export { drawMockFeed } from './media/MockVideoFeed';
 export type { MockFeedStyle } from './media/MockVideoFeed';
 
+// 4K 视频输出（MediaRecorder 画布录制）
+export { VideoRecorder } from './media/VideoRecorder';
+export type {
+  RecordingOptions,
+  VideoRecorderHost,
+  VideoRecorderState,
+} from './media/VideoRecorder';
+
 // Terrain (DEM streaming, Wave1)
 export type {
   TerrainProvider,
