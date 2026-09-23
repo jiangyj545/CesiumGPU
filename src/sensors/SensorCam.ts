@@ -338,6 +338,20 @@ export class SensorCam {
       }
       scene.render();
 
+      // W10 渲染时刻相机快照：render() 提交后本帧画面/投影已定格，但下方
+      // debugDumpPickTexture/mapAsync 两个 await 挂起期间，页面跟随 tick 的
+      // setView（新 SSE 位姿 + W4 动态 near/far）会改写相机——meta（camQuat/
+      // fx/near/far）与深度线性化必须用本快照，否则"帧 A 画面配帧 B 投影/
+      // 姿态"（W9/F20-2 记录的 0.2-1m 时戳竞态残差源，根因即此）。
+      const camSnap = {
+        fov: cam.frustum.fov,
+        near: cam.frustum.near,
+        far: cam.frustum.far,
+        dir: Cartesian3.clone(cam.direction),
+        up: Cartesian3.clone(cam.up),
+        pos: Cartesian3.clone(cam.position),
+      };
+
       // 一次性帧钩子已完成使命：本次 render 的 submit 已包含深度拷贝，
       // 立即摘除（finally 里的移除兜底异常路径）。若留到 finally，主循环
       // RAF 的每一帧都会重复编码 copy → depthBuf，与下方 mapAsync 的
@@ -359,8 +373,8 @@ export class SensorCam {
       const tightlyPacked = destrideBytes(raw, w, h, depthBytesPerRow, 4);
       depthBuf.unmap();
       const f32 = new Float32Array(tightlyPacked.buffer);
-      const nearNorm = cam.frustum.near;
-      const farNorm = cam.frustum.far;
+      const nearNorm = camSnap.near;
+      const farNorm = camSnap.far;
       const depthM = new Float32Array(w * h);
       for (let i = 0; i < f32.length; i++) {
         depthM[i] = linearizeDepthMeters(f32[i], nearNorm, farNorm);
@@ -393,15 +407,15 @@ export class SensorCam {
         }
       }
 
-      // ── meta：内参 / 位姿真值 ──
-      const fx = (h / 2) / Math.tan(cam.frustum.fov / 2);
+      // ── meta：内参 / 位姿真值（W10：全部取 render 时刻快照，见 camSnap 注释）──
+      const fx = (h / 2) / Math.tan(camSnap.fov / 2);
       const hfovRad = 2 * Math.atan((w / 2) / fx);
       // FLU 基（forward/left/up）→ body→ENU 四元数
-      const fwd = Cartesian3.normalize(cam.direction, new Cartesian3());
-      const upW = Cartesian3.normalize(cam.up, new Cartesian3());
+      const fwd = Cartesian3.normalize(camSnap.dir, new Cartesian3());
+      const upW = Cartesian3.normalize(camSnap.up, new Cartesian3());
       const left = Cartesian3.normalize(Cartesian3.cross(upW, fwd, new Cartesian3()), new Cartesian3());
       const quat = quatFromFLU(fwd, left, upW);
-      const pos = cam.position;
+      const pos = camSnap.pos;
 
       return {
         width: w,
