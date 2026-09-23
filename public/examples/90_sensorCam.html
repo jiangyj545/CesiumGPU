@@ -38,7 +38,8 @@
       5 航点、8m/s）。点「开始录制」按选定 hz 采样，每帧同视锥导出 RGB（主 canvas
       dataURL）/ 深度（G-Buffer depth32float → 米制线性化）/ 语义分割（GPU id 纹理 →
       调色板），FrameRecord 字段对齐 dataset-tools schema。setInterval 驱动，不依赖 rAF，
-      后台标签可持续采样。
+      后台标签可持续采样。pose=sse 时可加 &gimbal=stab 启用 F19 云台稳定模式
+      （相机与机体俯仰解耦、光轴恒天底——SITL 巡航俯仰下 RGB 不再黑帧）。
     </p>
     <div>
       <button id="btnStart">开始录制</button>
@@ -82,6 +83,7 @@
     // ── URL 参数：pose=sse 启用 SimKernel 真实位姿源（缺省 mock，向后兼容）──
     // ?pose=sse&simUrl=http://localhost:8895&scenario=<encoded-abs-path>&seed=<n>&hz=5
     //  &spec=<encoded scenario json>（farm 透传，供 command 目标航点/风场/scenario_id）
+    //  &gimbal=stab（F19 云台稳定模式：相机与机体俯仰/横滚解耦，光轴恒天底）
     const urlQ = new URLSearchParams(location.search);
     const POSE_SSE = urlQ.get('pose') === 'sse';
     const SIM_URL = urlQ.get('simUrl') || 'http://localhost:8895';
@@ -90,6 +92,7 @@
     const SCENARIO_SPEC = urlQ.get('spec')
       ? JSON.parse(urlQ.get('spec'))
       : null;
+    const GIMBAL_STAB = urlQ.get('gimbal') === 'stab';
 
     // ── ENU 锚点：SSE 模式跟随 scenario origin，mock 模式保持页面常量 ──
     const ORIGIN = (POSE_SSE && SCENARIO_SPEC)
@@ -228,6 +231,9 @@
      * 逐像素自洽。heading 取机头水平方位 + π（使 nadir 视锥「画面上 = 机头」
      * 对齐解析约定；悬停/巡航均无速度阈值歧义）；roll = 0（绕光轴旋转不改变
      * 射线-地面距离，对深度验证是曲率二阶量）。
+     * F19（?gimbal=stab）：上述为**刚性耦合缺省**；稳定云台模式下相机与
+     * 机体解耦（光轴恒天底），帧内 align.cam_quat_enu 恒记录渲染真值，
+     * 解析侧不再依赖 action.quat + 固定安装约定。
      * 位置经 ENU 线性近似映射经纬高（同城市网格）。
      */
     function poseAtSse(_tSimS) {
@@ -238,41 +244,55 @@
       const { lon, lat } = enuToLonLat(e, n);
       const heightM = ORIGIN.alt + u;
       const fwd = quatRotateVec(f.quat, [1, 0, 0]);      // body 机头（ENU）
-      const fwdCam = quatRotateVec(f.quat, [0, 0, -1]);  // 光轴（ENU，nadir 安装）
-      const pitchRad = Math.asin(Math.max(-1, Math.min(1, fwdCam[2])));
-      // heading 取光轴水平方位（dir 必须逐分量等于 fwdCam）；仅当光轴≈天底
-      // （水平分量退化，方位无定义）时退回机头方位 + π——该特例下引擎
-      // camUp 水平方位 = heading + π，取机头方位 + π 恰使「画面上 = 机头」。
-      let heading;
-      if (Math.hypot(fwdCam[0], fwdCam[1]) > 1e-6) {
-        heading = Math.atan2(fwdCam[0], fwdCam[1]);
-      } else {
+      let heading, pitchRad, rollRad;
+      if (GIMBAL_STAB) {
+        // F19 云台稳定模式（?gimbal=stab）：吊舱俯仰/横滚伺服与机体解耦——
+        // 光轴恒天底（pitch=-π/2）、roll=0、画面上 = 机头（heading = 机头
+        // 方位 + π：引擎 camUp 水平方位 = heading + π，同 W9 特例分支语义）。
+        // 修 F18 遗留：SITL 巡航俯仰 −25°~−30° 下 W9 刚性耦合把光轴带到
+        // −60° 附近，城市出视锥（RGB 黑帧、深度全靠远景瓦片/裙边）。帧内
+        // align.cam_quat_enu 已记录渲染真值姿态，解析侧（verify-depth）
+        // 优先消费它、不再从机体 quat 推导相机朝向。
+        pitchRad = -Math.PI / 2;
+        rollRad = 0;
         heading = Math.atan2(fwd[0], fwd[1]) + Math.PI;
+        if (heading > Math.PI) heading -= 2 * Math.PI;
+      } else {
+        const fwdCam = quatRotateVec(f.quat, [0, 0, -1]);  // 光轴（ENU，nadir 安装）
+        pitchRad = Math.asin(Math.max(-1, Math.min(1, fwdCam[2])));
+        // heading 取光轴水平方位（dir 必须逐分量等于 fwdCam）；仅当光轴≈天底
+        // （水平分量退化，方位无定义）时退回机头方位 + π——该特例下引擎
+        // camUp 水平方位 = heading + π，取机头方位 + π 恰使「画面上 = 机头」。
+        if (Math.hypot(fwdCam[0], fwdCam[1]) > 1e-6) {
+          heading = Math.atan2(fwdCam[0], fwdCam[1]);
+        } else {
+          heading = Math.atan2(fwd[0], fwd[1]) + Math.PI;
+        }
+        if (heading > Math.PI) heading -= 2 * Math.PI;       // wrap 回 (−π,π]
+        // roll（W9.2）：机体耦合斜视（巡航俯仰 −25°~−30° → 光轴 −60° 附近）时，
+        // 绕光轴的旋转对地面交距是一阶敏感量——渲染 camUp 必须精确对齐解析
+        // 约定（画面上 = body +x 在垂直光轴平面的投影），否则像素↔射线配对
+        // 错位（verify-depth 出 beyond-ground ANOMALY）。roll = camUp0 绕光轴
+        // 转到 upDes 的有符号角（引擎 _applyOrientation 同款右手旋转）。
+        const dn = (v) => {
+          const l = Math.hypot(v[0], v[1], v[2]) || 1;
+          return [v[0] / l, v[1] / l, v[2] / l];
+        };
+        const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        const cross3 = (a, b) => [
+          a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
+        ];
+        const dirN = dn(fwdCam);
+        const upW = [0, 0, 1];
+        const proj = (v, n) => [v[0] - n[0] * dot3(v, n), v[1] - n[1] * dot3(v, n), v[2] - n[2] * dot3(v, n)];
+        const upDes = dn(proj(fwd, dirN));           // 画面上期望方向（= body +x 投影）
+        const camUp0 = proj(upW, dirN);              // roll=0 时引擎给出的 camUp（Gram-Schmidt）
+        rollRad = 0;
+        if (Math.hypot(camUp0[0], camUp0[1], camUp0[2]) > 1e-6) {
+          const c0 = dn(camUp0);
+          rollRad = Math.atan2(dot3(dirN, cross3(c0, upDes)), dot3(c0, upDes));
+        }   // 光轴≈天底时 camUp0 退化：upDes 即引擎缺省方位，roll=0
       }
-      if (heading > Math.PI) heading -= 2 * Math.PI;       // wrap 回 (−π,π]
-      // roll（W9.2）：机体耦合斜视（巡航俯仰 −25°~−30° → 光轴 −60° 附近）时，
-      // 绕光轴的旋转对地面交距是一阶敏感量——渲染 camUp 必须精确对齐解析
-      // 约定（画面上 = body +x 在垂直光轴平面的投影），否则像素↔射线配对
-      // 错位（verify-depth 出 beyond-ground ANOMALY）。roll = camUp0 绕光轴
-      // 转到 upDes 的有符号角（引擎 _applyOrientation 同款右手旋转）。
-      const dn = (v) => {
-        const l = Math.hypot(v[0], v[1], v[2]) || 1;
-        return [v[0] / l, v[1] / l, v[2] / l];
-      };
-      const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-      const cross3 = (a, b) => [
-        a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
-      ];
-      const dirN = dn(fwdCam);
-      const upW = [0, 0, 1];
-      const proj = (v, n) => [v[0] - n[0] * dot3(v, n), v[1] - n[1] * dot3(v, n), v[2] - n[2] * dot3(v, n)];
-      const upDes = dn(proj(fwd, dirN));           // 画面上期望方向（= body +x 投影）
-      const camUp0 = proj(upW, dirN);              // roll=0 时引擎给出的 camUp（Gram-Schmidt）
-      let rollRad = 0;
-      if (Math.hypot(camUp0[0], camUp0[1], camUp0[2]) > 1e-6) {
-        const c0 = dn(camUp0);
-        rollRad = Math.atan2(dot3(dirN, cross3(c0, upDes)), dot3(c0, upDes));
-      }   // 光轴≈天底时 camUp0 退化：upDes 即引擎缺省方位，roll=0
       const wp = SCENARIO_SPEC
         ? SCENARIO_SPEC.waypoints[wpCursor]
         : null;
