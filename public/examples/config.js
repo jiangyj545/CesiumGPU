@@ -81,6 +81,7 @@ window.EXAMPLES_CONFIG = {
         { name: '淹没分析', fileName: '79_submergeAnalysis.html' },
         { name: '地形剖面（多点路径）', fileName: '80_terrainProfile.html' },
         { name: '路径分析', fileName: '86_routeAnalysis.html' },
+        { name: '水深/淹没模拟', fileName: '92_floodSim.html' },
       ],
     },
     {

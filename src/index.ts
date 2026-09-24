@@ -32,6 +32,9 @@ export { HermiteSpline, CatmullRomSpline } from './math/Spline';
 // Analysis
 export { Measure, MeasureCollection } from './analysis/Measure';
 export type { MeasureType, MeasureItem } from './analysis/Measure';
+// 水深/淹没分析（P1，纯计算不渲染；渲染组合 FloodWater / Entity）
+export { FloodAnalysis } from './analysis/FloodAnalysis';
+export type { FloodResult, RectangleDeg, FloodAnalysisOptions } from './analysis/FloodAnalysis';
 
 // Draw interaction (T2.5)
 export { DrawHandler } from './handler/DrawHandler';
@@ -146,6 +149,10 @@ export type { DynamicWallOptions } from './effect/DynamicWall';
 // Dynamic water surface effect (对齐 EV_DynamicWater / EV_Ocean)
 export { DynamicWater } from './effect/DynamicWater';
 export type { DynamicWaterOptions } from './effect/DynamicWater';
+
+// 水深/淹没水面特效（P1：水位走 uniform 零重建，片元水深色带）
+export { FloodWater } from './effect/FloodWater';
+export type { FloodWaterOptions, HeightGridData } from './effect/FloodWater';
 
 // Ground heatmap overlay effect (对齐 EV_Heatmap)
 export { HeatmapLayer } from './effect/HeatmapLayer';

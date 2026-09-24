@@ -55,6 +55,15 @@ export class TerrainLayer {
   /** Keys the provider reported as unavailable; not retried this session. */
   private readonly _failed = new Set<string>();
 
+  /**
+   * 分析用途的瓦片 pin 集合（{@link pinRegion} 登记）。LRU 驱逐会跳过
+   * 这些键，保证淹没/水深分析期间采样网格不被视锥调度挤出缓存。
+   */
+  private readonly _pinnedTiles = new Set<string>();
+
+  /** 分析预载（{@link ensureRegion}）在途的请求，按键去重并可等待。 */
+  private readonly _analysisInflight = new Map<string, Promise<void>>();
+
   /** Selection result of the last update (sorted near → far). */
   private _selected: SelectedTerrainTile[] = [];
 
@@ -149,9 +158,128 @@ export class TerrainLayer {
     this._stitchCache.clear();
     this._inflight.clear();
     this._failed.clear();
+    this._pinnedTiles.clear();
+    this._analysisInflight.clear();
     this._selected = [];
     this._renderTiles = [];
     this._volumes.clear();
+  }
+
+  // ── 区域预载与 pin（淹没 / 水深等离线分析用途）─────────────────────────────
+
+  /**
+   * 确保 `boundsDeg`（度）覆盖的全部 `level` 级瓦片网格都已进入 LRU 缓存。
+   *
+   * 绕过视锥选择（{@link _selectTiles}）直接按 bounds 反算瓦片范围，缺的
+   * 瓦片走 {@link _maxConcurrentRequests} 并发上限逐个
+   * `provider.requestTileGeometry` → `_putMesh` 入缓存。全部 settle 后返回：
+   * - 请求 reject（网络/解码失败）→ 收集后抛带完整清单的错（不静默）；
+   * - provider 返回 `null`（该瓦片无数据，如边界外）→ 记入失败缓存并
+   *   `console.warn`，不算失败（与渲染调度同语义）。
+   *
+   * 幂等：已在缓存/在途的瓦片不会重复请求。完成后由调用方决定是否
+   * {@link pinRegion} 钉住这些瓦片（防 LRU 挤出）。
+   */
+  async ensureRegion(
+    boundsDeg: { west: number; south: number; east: number; north: number },
+    level: number
+  ): Promise<void> {
+    if (this._destroyed) throw new Error('TerrainLayer.ensureRegion: 层已销毁');
+    const z = Math.min(level, this._maximumLevel, this.provider.maximumLevel);
+    const tiles = this._tilesInBounds(boundsDeg, z);
+    if (tiles.length === 0) return;
+
+    const failures: { key: string; reason: string }[] = [];
+    const missing: string[] = [];
+    let cursor = 0;
+    const limit = Math.max(1, Math.min(this._maxConcurrentRequests, tiles.length));
+
+    const fetchOne = async (tile: TerrainTileRef): Promise<void> => {
+      const key = tile.key;
+      // 与渲染调度（_launchRequests）在途的同一瓦片合并等待，避免双份请求。
+      const pending = this._analysisInflight.get(key);
+      if (pending) { await pending; return; }
+
+      const task = (async (): Promise<void> => {
+        if (this._meshes.has(key)) return;
+        if (this._failed.has(key)) { missing.push(key); return; }
+        if (!this.provider.getTileDataAvailable(tile.z, tile.x, tile.y)) {
+          this._failed.add(key);
+          missing.push(key);
+          return;
+        }
+        try {
+          const mesh = await this.provider.requestTileGeometry(tile.z, tile.x, tile.y);
+          if (this._destroyed) return;
+          if (mesh !== null) {
+            this._putMesh(tile.z, tile.x, tile.y, mesh);
+          } else {
+            this._failed.add(key); // provider 声明无数据，与渲染调度同语义
+            missing.push(key);
+          }
+        } catch (error) {
+          failures.push({ key, reason: String((error as Error)?.message ?? error) });
+        }
+      })();
+
+      this._analysisInflight.set(key, task);
+      try {
+        await task;
+      } finally {
+        this._analysisInflight.delete(key);
+      }
+    };
+
+    const workers = Array.from({ length: limit }, async () => {
+      while (cursor < tiles.length) {
+        const tile = tiles[cursor++];
+        await fetchOne(tile);
+      }
+    });
+    await Promise.all(workers);
+
+    if (missing.length > 0) {
+      console.warn(
+        `TerrainLayer.ensureRegion: ${missing.length}/${tiles.length} 瓦片无数据 ` +
+        `（z=${z}）→ ${missing.join(', ')}`
+      );
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `TerrainLayer.ensureRegion: ${failures.length}/${tiles.length} 瓦片请求失败 ` +
+        `→ ${failures.map((f) => `${f.key}: ${f.reason}`).join('; ')}`
+      );
+    }
+  }
+
+  /**
+   * 把 `boundsDeg` 覆盖的 `level` 级瓦片登记进 pin 集合（LRU 驱逐跳过）。
+   * 返回当前 pin 总数。幂等（重复登记同一瓦片不重复计数）。
+   *
+   * 前置校验（防分析数据挤占渲染瓦片池）：`level <= 10` 且 pin 总数
+   * `<= 256`，超限抛错。
+   */
+  pinRegion(
+    boundsDeg: { west: number; south: number; east: number; north: number },
+    level: number
+  ): number {
+    if (level > MAX_PIN_LEVEL) {
+      throw new Error(`TerrainLayer.pinRegion: level ${level} 超过上限 ${MAX_PIN_LEVEL}（防挤占渲染瓦片）`);
+    }
+    const merged = new Set(this._pinnedTiles);
+    for (const tile of this._tilesInBounds(boundsDeg, level)) merged.add(tile.key);
+    if (merged.size > MAX_PINNED_TILES) {
+      throw new Error(
+        `TerrainLayer.pinRegion: pin 总数 ${merged.size} 超过上限 ${MAX_PINNED_TILES}（防挤占渲染瓦片）`
+      );
+    }
+    for (const key of merged) this._pinnedTiles.add(key);
+    return this._pinnedTiles.size;
+  }
+
+  /** 解除全部分析 pin（LRU 恢复正常驱逐）。 */
+  unpinAll(): void {
+    this._pinnedTiles.clear();
   }
 
   // ── Private ────────────────────────────────────────────────────────────────
@@ -595,9 +723,16 @@ export class TerrainLayer {
   private _putMesh(z: number, x: number, y: number, mesh: TerrainMeshData): void {
     const key = `${z}/${x}/${y}`;
     while (this._meshes.size >= this._cacheCapacity) {
-      const oldest = this._meshes.keys().next();
-      if (oldest.done) break;
-      this._meshes.delete(oldest.value);
+      // 分析 pin 的瓦片不参与驱逐（见 pinRegion）；全部驻留被 pin 时允许
+      // 缓存临时超限——分析数据的完整性优先于缓存上限。
+      let evicted = false;
+      for (const candidate of this._meshes.keys()) {
+        if (this._pinnedTiles.has(candidate)) continue;
+        this._meshes.delete(candidate);
+        evicted = true;
+        break;
+      }
+      if (!evicted) break;
     }
     this._meshes.set(key, {
       key,
@@ -721,6 +856,50 @@ export class TerrainLayer {
   /** Tile columns at a level (geographic doubles the longitude axis). */
   private _columnsAtLevel(level: number): number {
     return this.provider.tilingScheme === 'geographic' ? 2 ** (level + 1) : 2 ** level;
+  }
+
+  /**
+   * Bounds（度）覆盖的 `level` 级瓦片列表（供 {@link ensureRegion} /
+   * {@link pinRegion} 反算范围）。坐标换算与各 tiling scheme 的 bounds
+   * 公式互逆：geographic 为 TMS 南起（`geographicTileBounds` 反解），
+   * webmercator 为标准 XYZ 北起（`webmercatorTileBounds` 反解）。
+   * 越界经纬度 clamp 到该层有效瓦片范围。
+   */
+  private _tilesInBounds(
+    boundsDeg: { west: number; south: number; east: number; north: number },
+    level: number
+  ): TerrainTileRef[] {
+    const cols = this._columnsAtLevel(level);
+    const rows = 2 ** level;
+    const clampI = (v: number, max: number): number => Math.min(max - 1, Math.max(0, v));
+
+    const x0 = clampI(Math.floor(((boundsDeg.west + 180.0) / 360.0) * cols), cols);
+    const x1 = clampI(Math.floor(((boundsDeg.east + 180.0) / 360.0) * cols), cols);
+
+    let y0: number;
+    let y1: number;
+    if (this.provider.tilingScheme === 'geographic') {
+      y0 = clampI(Math.floor(((boundsDeg.south + 90.0) / 180.0) * rows), rows);
+      y1 = clampI(Math.floor(((boundsDeg.north + 90.0) / 180.0) * rows), rows);
+    } else {
+      // Web Mercator 反解：lat → y（北起），越极纬度 clamp 到投影边界。
+      const MAX_LAT = 85.05112878;
+      const latToY = (lat: number): number => {
+        const clamped = Math.min(MAX_LAT, Math.max(-MAX_LAT, lat));
+        const rad = (clamped * Math.PI) / 180.0;
+        return ((1.0 - Math.asinh(Math.tan(rad)) / Math.PI) / 2.0) * rows;
+      };
+      y0 = clampI(Math.floor(latToY(boundsDeg.north)), rows); // 北 → 小 y
+      y1 = clampI(Math.floor(latToY(boundsDeg.south)), rows);
+    }
+
+    const tiles: TerrainTileRef[] = [];
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        tiles.push({ z: level, x, y, key: `${level}/${x}/${y}` });
+      }
+    }
+    return tiles;
   }
 
   /** Bounding sphere + world size for a tile (computed once, then cached). */
@@ -982,6 +1161,15 @@ const SAMPLE_BARYCENTRIC_EPSILON = -2e-3;
 
 /** Cap on the stitch-result cache. */
 const STITCH_CACHE_CAPACITY = 512;
+
+/**
+ * 分析 pin 允许的最高瓦片层级（pinRegion 前置校验）。粗层 pin 才不会把
+ * 渲染视锥需要的精细瓦片挤出缓存池。
+ */
+const MAX_PIN_LEVEL = 10;
+
+/** 分析 pin 的瓦片总数上限（pinRegion 前置校验）。 */
+const MAX_PINNED_TILES = 256;
 
 /** Shared "nothing to stitch against" resolution. */
 const NO_STITCH_NEIGHBOUR: StitchNeighbour = { entry: null, side: null };

@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 92：水深/淹没模拟 FloodSim - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:340px;max-width:460px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel #controls{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+    .cg-panel #controls button{padding:5px 10px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.75);}
+    .cg-panel #controls button.active{background:rgba(70,150,220,.8);}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;margin-top:8px;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+    .cg-panel #modeLine{font-size:11px;color:#7dd3fc;margin-top:6px;}
+    /* 水位 HUD（右下角大字） */
+    #waterHud{position:absolute;right:16px;bottom:16px;z-index:9000;padding:10px 16px;
+      background:rgba(8,20,40,.85);border:1px solid rgba(90,180,255,.45);border-radius:8px;
+      text-align:center;pointer-events:none;}
+    #waterLevel{font:26px/1.2 Consolas,Monaco,monospace;color:#6cc8ff;}
+    #waterSub{font:11px/1.6 Consolas,Monaco,monospace;color:#8fa8c8;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>92 水深/淹没模拟</h1>
+    <p class="desc">前端水深模拟：矩形框选分析区 → 预载并 pin 地形瓦片
+      （<code>FloodAnalysis.prepareRegion</code>）→ 规则网格水面
+      （<code>FloodWater</code>，水位走 uniform 零重建）随滑杆实时涨落，
+      片元色带按<b>水深</b>分级（浅青→深蓝）；同水位用
+      <code>computeFlooded</code>（marching squares + 球面小格面积）出
+      淹没面积读数，并与后台 <code>8892 /submerge</code>（ASTER GDEM
+      逐像素阈值）结果并排对照。离线时用数学合成盆地 DEM 演示。</p>
+    <label>水位高程 <span id="levelVal">500</span> m</label>
+    <input id="levelSlider" type="range" min="0" max="1000" step="10" value="500" />
+    <div id="controls">
+      <button id="btnDraw">矩形框选分析区</button>
+      <button id="btnReset">默认分析区</button>
+    </div>
+    <div id="modeLine">模式：初始化中</div>
+    <div id="result">初始化中…</div>
+    <p class="warn">⚠ 本地地形服务 <code>http://localhost:8888</code>
+      （terrain_hubei）离线时自动切换合成盆地 DEM；后台对照
+      <code>http://localhost:8892</code> 失败时显示「—」。</p>
+  </div>
+  <div id="waterHud">
+    <div id="waterLevel">500 m</div>
+    <div id="waterSub">面积 -- km²</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    const POLAR_RATIO = 0.9966472; // WGS84 极/赤半轴比（引擎约定）
+
+    /** 归一化 ECEF → (lonDeg, latDeg)（先撤销极区压扁再 atan2，引擎面约定）。 */
+    function lonLatOf(p) {
+      const y = p.y / POLAR_RATIO;
+      const z = p.z / POLAR_RATIO;
+      return [Math.atan2(y, p.x) * 180 / Math.PI,
+              Math.atan2(z, Math.hypot(p.x, y)) * 180 / Math.PI];
+    }
+
+    async function demo(viewer, engine) {
+      const result   = document.getElementById('result');
+      const modeLine = document.getElementById('modeLine');
+      const setMode  = (t) => { modeLine.textContent = `模式：${t}`; };
+
+      // ── 1. 地形源探测：8888 在线用真地形，离线用合成盆地 DEM ──────────
+      let terrainOk = false;
+      try {
+        const r = await fetch(
+          'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json',
+          { method: 'HEAD' });
+        terrainOk = r.ok;
+      } catch { terrainOk = false; }
+
+      // 默认分析区：湖北神农架—兴山（DEM 覆盖内）
+      const DEFAULT_DEG = { west: 110.35, east: 111.05, south: 31.05, north: 31.55 };
+      const deg = { ...DEFAULT_DEG };
+
+      const provider = new engine.LocalQuantizedMeshProvider({
+        url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+        maximumLevel: 14,
+      });
+      // 独立 TerrainLayer 供分析预载（不与视锥调度争抢同一份 LRU）
+      const terrainLayer = new engine.TerrainLayer({ provider, cacheCapacity: 96 });
+      if (terrainOk) viewer.globe.setTerrainProvider(provider);
+
+      // 合成盆地 DEM：以选区为中心的碗型（中心 -80 m，边缘 +300 m），
+      // 离线演示水位涨落 / 水深色带的完整链路
+      const synthDEM = (lon, lat) => {
+        const dx = (lon - (deg.west + deg.east) / 2) / (deg.east - deg.west);
+        const dy = (lat - (deg.south + deg.north) / 2) / (deg.north - deg.south);
+        return -80 + 380 * Math.min(1, Math.hypot(dx, dy) / 0.32);
+      };
+      const sampler = terrainOk
+        ? (lon, lat) => terrainLayer.sampleHeight(lon, lat)
+        : synthDEM;
+
+      const flood = new engine.FloodAnalysis(terrainLayer, { gridN: 96, heightSampler: sampler });
+
+      // ── 2. 预载分析区瓦片（真地形才需要；离线合成 DEM 无瓦片可载）─────
+      let terrainMin = -80, terrainMax = 300;
+      if (terrainOk) {
+        setMode('预载地形瓦片…');
+        await flood.prepareRegion(deg, 8); // 预载 + pin（幂等；失败向上抛走统一兜底）
+      }
+      // 高程范围：网格扫一遍（滑杆上限 = max + 10）
+      {
+        const grid = flood.heightGrid(deg, 64);
+        terrainMin = Infinity; terrainMax = -Infinity;
+        for (const h of grid) { terrainMin = Math.min(terrainMin, h); terrainMax = Math.max(terrainMax, h); }
+      }
+      if (!terrainOk) result.textContent = '（地形离线：合成盆地 DEM 模式）\n';
+
+      // ── 3. 水面特效：FloodWater（水位走 uniform，零重建）───────────────
+      const water = viewer.scene.effects.add(new engine.FloodWater(viewer.scene.context, {
+        bounds: deg,
+        heightSampler: sampler,
+        gridNX: 48, gridNY: 32,
+        waterLevel: 500,
+        camera: viewer.scene.camera,
+      }));
+
+      // ── 4. 水位联动：500ms 防抖 → setWaterLevel + computeFlooded + 8892 ─
+      const levelSlider = document.getElementById('levelSlider');
+      const levelVal    = document.getElementById('levelVal');
+      const waterLevelEl = document.getElementById('waterLevel');
+      const waterSub    = document.getElementById('waterSub');
+
+      const API_BASE = 'http://localhost:8892/api/v1/spatial';
+      async function postAnalysis(body, ctrl) {
+        const timer = setTimeout(() => ctrl.abort(), 30_000); // 30s 超时
+        try {
+          const resp = await fetch(`${API_BASE}/submerge`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const json = await resp.json();
+          if (!json || !json.result) throw new Error('响应缺少 result 字段');
+          return json.result;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      let backendAreaKm2 = null;
+      let debounceTimer = 0;
+      let pendingCtrl = null;
+
+      function refreshBackend(levelM) {
+        if (pendingCtrl) pendingCtrl.abort(); // 只保留最后一次请求
+        pendingCtrl = new AbortController();
+        const ctrl = pendingCtrl;
+        backendAreaKm2 = null;
+        postAnalysis({
+          bounds: { west: deg.west, south: deg.south, east: deg.east, north: deg.north },
+          level: levelM,
+        }, ctrl).then((res) => {
+          if (ctrl !== pendingCtrl) return; // 已被新请求取代
+          backendAreaKm2 = typeof res.water_area_km2 === 'number' ? res.water_area_km2 : null;
+          renderResult(levelM, null);
+        }).catch((err) => {
+          if (ctrl !== pendingCtrl) return;
+          if (ctrl.signal.aborted && String(err && err.name) === 'AbortError') return;
+          console.warn('[92] 后台 /submerge 失败（对照显示 —）：', err.message);
+          backendAreaKm2 = null;
+          renderResult(levelM, `后台对照不可用（${err.message}）`);
+        });
+      }
+
+      function renderResult(levelM, note) {
+        const res = flood.computeFlooded(deg, levelM); // 纯内存，可高频调用
+        const front = `前端 ${Math.round(res.areaKm2).toLocaleString()} km²（${res.polygons.length} 环）`;
+        const back = backendAreaKm2 === null ? '—' : `${Math.round(backendAreaKm2).toLocaleString()} km²`;
+        waterSub.textContent = `面积 ${Math.round(res.areaKm2).toLocaleString()} km²`;
+        result.textContent =
+          `分析区 ${deg.west.toFixed(2)}-${deg.east.toFixed(2)}°E / ${deg.south.toFixed(2)}-${deg.north.toFixed(2)}°N\n` +
+          `地形高程 ${terrainMin.toFixed(0)} ~ ${terrainMax.toFixed(0)} m，水位 ${levelM} m\n` +
+          `淹没面积：${front}\n` +
+          `后台对照（8892 /submerge）：${back}` +
+          (note ? `\n⚠ ${note}` : '');
+      }
+
+      function apply(levelM, immediate = false) {
+        levelM = Math.round(levelM);
+        levelSlider.value = String(levelM);
+        levelVal.textContent = String(levelM);
+        waterLevelEl.textContent = `${levelM} m`;
+        water.setWaterLevel(levelM);       // uniform 直改，下帧生效
+        const note = terrainOk ? null : '合成 DEM（离线演示）';
+        if (immediate) { renderResult(levelM, note); refreshBackend(levelM); return; }
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          renderResult(levelM, note);
+          refreshBackend(levelM);
+        }, 500); // 防抖 500ms
+      }
+
+      levelSlider.addEventListener('input', () => apply(levelSlider.valueAsNumber));
+      levelSlider.addEventListener('change', () => apply(levelSlider.valueAsNumber, true));
+
+      // ── 5. 矩形框选分析区：DrawHandler → bounds → 预载 → 重建水面 ──────
+      const btnDraw = document.getElementById('btnDraw');
+      btnDraw.addEventListener('click', () => {
+        btnDraw.classList.add('active');
+        setMode('矩形框选：点击两对角点');
+      });
+      const draw = new engine.DrawHandler(viewer);
+      draw.drawEnd.addListener(async ({ positions }) => {
+        if (btnDraw.classList.contains('active')) btnDraw.classList.remove('active');
+        if (!positions || positions.length < 3) return; // 非矩形（防御）
+        try {
+          const ll = positions.map(lonLatOf);
+          const next = {
+            west:  Math.min(...ll.map((p) => p[0])),
+            east:  Math.max(...ll.map((p) => p[0])),
+            south: Math.min(...ll.map((p) => p[1])),
+            north: Math.max(...ll.map((p) => p[1])),
+          };
+          // 面积过小的框（误点）直接忽略
+          if ((next.east - next.west) < 0.01 || (next.north - next.south) < 0.01) {
+            setMode('选区过小，已忽略'); return;
+          }
+          setMode(terrainOk ? '预载新选区地形…' : '切换分析区…');
+          Object.assign(deg, next);
+          if (terrainOk) await flood.prepareRegion(deg, 8); // 失败向上抛（不静默）
+          water.setBounds(deg); // 重建水面网格（新选区地形）
+          const grid = flood.heightGrid(deg, 64);
+          terrainMin = Infinity; terrainMax = -Infinity;
+          for (const h of grid) { terrainMin = Math.min(terrainMin, h); terrainMax = Math.max(terrainMax, h); }
+          levelSlider.min = String(Math.floor(Math.min(0, terrainMin)));
+          levelSlider.max = String(Math.ceil(terrainMax + 10));
+          setMode(terrainOk ? '前端水深模拟（真地形）' : '前端水深模拟（合成 DEM）');
+          apply(Math.min(levelSlider.valueAsNumber, Number(levelSlider.max)), true);
+        } catch (err) {
+          setMode('选区处理失败');
+          result.textContent += `\n⚠ 选区处理失败：${err.message}`;
+          console.error('[92] 选区处理失败：', err);
+        }
+      });
+      document.getElementById('btnReset').addEventListener('click', () => {
+        Object.assign(deg, DEFAULT_DEG);
+        water.setBounds(deg);
+        levelSlider.min = '0';
+        levelSlider.max = String(Math.ceil(terrainMax + 10));
+        apply(500, true);
+      });
+
+      // ── 6. 初始视角 + 首次水位 ────────────────────────────────────────
+      viewer.camera.flyTo({
+        destination: { lon: (deg.west + deg.east) / 2, lat: (deg.south + deg.north) / 2 - 0.15, height: 90_000 },
+        orientation: { heading: 0, pitch: -0.7 },
+      });
+      levelSlider.min = '0';
+      levelSlider.max = String(Math.ceil(terrainMax + 10));
+      setMode(terrainOk ? '前端水深模拟（真地形）' : '前端水深模拟（合成 DEM）');
+      apply(500, true); // 首个水面网格构建 + 面积读数（__DEMO_OK 前置条件）
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [110.7, 31.0, 120_000],
+          imagery: 'gaode-sat',
+          title: '92 · 水深/淹没模拟 FloodSim',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '92 水深/淹没模拟 · 核心代码');
+        window.__DEMO_OK = true; // 初始化 + 首个水面网格构建成功（离线合成 DEM 路径同样抵达此处）
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>
