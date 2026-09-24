@@ -549,13 +549,18 @@
       }, 200);
 
       // ── 3) 传感器相机 + 录制器 ──
+      // pickIdToSemantic：伴飞盒 → 5=wingman（palette-v0.2 防撞训练目标类，
+      // bbox-from-seg 自动出伴飞机框）；建筑 → 1；其余（globe/瓦片）→ 3=ground
+      const wingmanPickIds = new Set([...wingmanPrims.values()].map((p) => p.pickId));
       const sensorCam = new SensorCam(viewer.scene, {
         fovYDeg: 45,
         width: viewer.context.drawingBufferWidth,
         height: viewer.context.drawingBufferHeight,
         nearM: 1,
         farM: 2000,
-        pickIdToSemantic: (id) => (id & INSTANCE_FLAG) ? 1 : (buildingPickIds.has(id) ? 1 : 3),
+        pickIdToSemantic: (id) => (id & INSTANCE_FLAG) ? 1
+          : (wingmanPickIds.has(id) ? 5
+          : (buildingPickIds.has(id) ? 1 : 3)),
       });
 
       let episode = null;
