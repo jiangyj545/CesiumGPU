@@ -51,6 +51,8 @@ export class CameraFlightPath {
   private readonly _tangent1: Cartesian3;    // great-circle tangent at end   (× arc angle)
   private readonly _h0: number;              // start height, normalised units
   private readonly _h1: number;              // end height,   normalised units
+  private readonly _r0: number;              // start position magnitude（含椭球深度的真实矢长）
+  private readonly _r1: number;              // end   position magnitude
   private readonly _peak: number;            // parabolic arch height, normalised units
 
   // ── Orientation path ──────────────────────────────────────────────────────
@@ -85,6 +87,12 @@ export class CameraFlightPath {
 
     this._h0 = startCarto.height;
     this._h1 = endCarto.height;
+    // 起终点真实矢长（resolveDestination 的椭球 ECEF 线性归一化在中纬度
+    // 地表 ≈ 0.999x，即球面下数 km）。飞行半径必须插值真实矢长而非
+    // 「1 + 大地高」，否则 flyTo 落点被抬到单位球面、与 setView /
+    // tileset 等椭球世界错位数 km（94 示例 root 被视锥剔除的根因）。
+    this._r0 = Cartesian3.magnitude(startPos);
+    this._r1 = Cartesian3.magnitude(endPos);
 
     // ── Great-circle geometry ───────────────────────────────────────────────
     this._u0 = Cartesian3.normalize(startPos, new Cartesian3());
@@ -170,15 +178,19 @@ export class CameraFlightPath {
     );
     Cartesian3.normalize(dir, dir);
 
-    // Altitude: linear lerp + parabolic arch, floored above the surface.
-    // The floor is blended by sin(π·t) so both endpoints stay exact.
+    // Altitude: interpolate the endpoints' true position magnitudes (which
+    // carry the ellipsoid depth of the linear-ECEF/R convention) plus the
+    // parabolic arch, floored above the unit sphere. The floor is blended by
+    // sin(π·t) so both endpoints stay exact (t = 0/1 land precisely on
+    // start/end positions in the same coordinate convention as setView).
     const dome = Math.sin(Math.PI * t);
-    const height = Math.max(
-      CesiumMath.lerp(this._h0, this._h1, t) + this._peak * dome,
-      MIN_ALTITUDE * dome,
+    const base = CesiumMath.lerp(this._r0, this._r1, t);
+    // 地板取 min(base, 1)：端点（dome=0）不被钳制、精确落位；飞行中段
+    // 相对「max(端点深度, 单位球面)」保底 MIN_ALTITUDE 净空
+    const radius = Math.max(
+      base + this._peak * dome,
+      Math.min(base, 1.0) + MIN_ALTITUDE * dome,
     );
-
-    const radius = 1.0 + height;
     camera.position.x = dir.x * radius;
     camera.position.y = dir.y * radius;
     camera.position.z = dir.z * radius;
