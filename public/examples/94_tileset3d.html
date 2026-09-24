@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 94：3DTiles 瓦片加载 - CesiumGPU</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:420px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #stats{font:12px/1.8 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-top:6px;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>94 · 3DTiles 瓦片加载（自制离线数据）</h1>
+    <p class="desc">调度与集成层演示：SSE 驱动的树遍历细分
+      （geometricError → 屏幕误差）、视锥 6 平面剔除、并发 8 的内容请求队列、
+      LRU 容量缓存 + 两段式延迟销毁、refine 状态机（本数据 root 为 ADD：
+      父子同显，L1 为隔行丢索引的抽稀版，顶点与 L0 逐位相同故无闪烁）。
+      数据由 <code>node scripts/buildTileset.mjs</code> 生成，两级 LOD，
+      ENU 摆放在武汉附近 (114.3°E, 30.5°N)，米制 ECEF transform 由加载层
+      归一化。</p>
+    <div id="stats">初始化中…</div>
+    <p class="warn">滚轮拉近到 300m 以内可触发 L0→L1 细分；
+      KTX2 解码器初始化失败会降级跳过（本数据无 KTX2 纹理）。</p>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const statsEl = document.getElementById('stats');
+
+      // ── 1. KTX2 解码器：失败降级（自制数据无 KTX2，不阻塞演示）──────
+      try {
+        await engine.Ktx2Decoder.initialize();
+      } catch (err) {
+        console.warn('[94] Ktx2Decoder 初始化失败（无 KTX2 纹理可继续）', err);
+      }
+
+      // ── 2. Tileset3D：自制离线数据 ─────────────────────────────────
+      const tileset = new engine.Tileset3D({
+        url: '/data/tilesets/demo/tileset.json',
+        scene: viewer.scene,
+        maximumSseError: 16,
+        cacheCapacity: 64,
+      });
+      await tileset.ready(); // 文件缺失 / 非法 JSON → 向上抛 → 错误面板
+
+      // ── 3. 每帧调度 + stats 面板（Viewer.preRender 每帧钩子）────────
+      let lastPanel = 0;
+      viewer.preRender = () => {
+        tileset.update(viewer.camera, viewer.canvas.height);
+        const now = performance.now();
+        if (now - lastPanel > 250) { // 面板 4Hz 刷新，避免 DOM 抖动
+          lastPanel = now;
+          const s = tileset.stats;
+          statsEl.textContent =
+            `selected ${s.selected} · requested ${s.requested}\n` +
+            `cached   ${s.cached} · failed    ${s.failed}\n` +
+            `drawn    ${s.drawn}`;
+        }
+      };
+
+      // ── 4. 飞到 tileset 区域上空（1200m 俯视三模型）────────────────
+      viewer.camera.flyTo({
+        destination: { lon: 114.3, lat: 30.4965, height: 1200 },
+        orientation: { heading: 0, pitch: -0.9 },
+      });
+
+      // __DEMO_OK 前置：等待内容实际上屏（drawn>0），20s 超时判失败
+      const t0 = Date.now();
+      await new Promise((resolveProbe) => {
+        const timer = setInterval(() => {
+          if (tileset.stats.drawn > 0 || Date.now() - t0 > 20000) {
+            clearInterval(timer);
+            resolveProbe();
+          }
+        }, 300);
+      });
+      if (tileset.stats.drawn === 0) {
+        throw new Error('tileset 已就绪但 20s 内无瓦片上屏（drawn=0）');
+      }
+      return { tileset };
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // QA 探针钩子
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [114.3, 30.4965, 1200],
+          imagery: 'gaode-sat',
+          title: '94 · 3DTiles 瓦片加载',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer;
+        const { tileset } = await demo(viewer, engine);
+        window.__tileset = tileset; // QA 探针：stats 断言用
+        DemoUtils.showCode(demo, '94 3DTiles 瓦片加载 · 核心代码');
+        window.__DEMO_OK = true; // ready + drawn>0
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('3DTiles 加载失败（tileset 文件缺失或非法）', err);
+        console.error('[94]', err);
+      }
+    })();
+  </script>
+</body>
+</html>

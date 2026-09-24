@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 95：Google 摄影实景 3DTiles - CesiumGPU</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:320px;max-width:460px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel #keyInput{width:100%;box-sizing:border-box;padding:6px 8px;font-size:12px;
+      color:#cfe4ff;background:rgba(20,40,70,.6);border:1px solid rgba(90,160,255,.4);
+      border-radius:6px;}
+    .cg-panel #controls{margin-top:8px;}
+    .cg-panel #controls button{padding:6px 14px;font-size:12px;cursor:pointer;color:#cfe4ff;
+      background:rgba(40,80,150,.55);border:1px solid rgba(90,160,255,.4);border-radius:6px;}
+    .cg-panel #controls button:hover{background:rgba(60,110,180,.8);}
+    .cg-panel #controls button.active{background:rgba(30,140,90,.85);border-color:#4ade80;}
+    .cg-panel #stats{font:12px/1.8 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-top:8px;}
+    .cg-panel .err{font-size:12px;line-height:1.6;color:#ff9d9d;margin-top:8px;
+      white-space:pre-wrap;}
+    .cg-panel .warn{font-size:11px;line-height:1.6;color:#ffd479;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>95 · Google 摄影实景 3DTiles</h1>
+    <p class="desc">Google Photorealistic 3D Tiles 接入：root.json 取回后
+      所有子请求自动经 <code>urlDecorator</code> 注入 <code>key=</code>
+      query（Google 子请求 URI 不带 key，缺 key 即 401/403），调度语义与
+      示例 94 的 <code>Tileset3D</code> 完全一致。</p>
+    <label>Google Maps API key（需启用 Map Tiles API；仅存于本页内存）</label>
+    <input id="keyInput" type="password" placeholder="AIza..." autocomplete="off" />
+    <div id="controls">
+      <button id="btnLoad">加载 3DTiles</button>
+    </div>
+    <div id="stats">输入 key 后点击加载；离线环境属预期失败。</div>
+    <div id="error" class="err"></div>
+    <p class="warn">需要有效 key + 外网连通（tile.googleapis.com）。
+      403 = key 无效或未启用 Map Tiles API；TypeError/超时 = 无外网。</p>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      const keyInput = document.getElementById('keyInput');
+      const btnLoad  = document.getElementById('btnLoad');
+      const statsEl  = document.getElementById('stats');
+      const errorEl  = document.getElementById('error');
+
+      let google = null;
+      let loaded = false;
+
+      function startFrameLoop() {
+        let lastPanel = 0;
+        viewer.preRender = () => {
+          google.update(viewer.camera, viewer.canvas.height);
+          const now = performance.now();
+          if (now - lastPanel > 250) {
+            lastPanel = now;
+            const s = google.stats;
+            statsEl.textContent =
+              `selected ${s.selected} · requested ${s.requested}\n` +
+              `cached   ${s.cached} · failed    ${s.failed}\n` +
+              `drawn    ${s.drawn}`;
+          }
+        };
+      }
+
+      btnLoad.addEventListener('click', () => {
+        const key = keyInput.value.trim();
+        errorEl.textContent = '';
+        if (!key) {
+          // 空 key 不算失败：提示即止（离线 / 无 key 环境可预期）
+          statsEl.textContent = '未加载（等待有效 key）';
+          errorEl.textContent = '请先输入 Google Maps API key（AIza 开头）。';
+          return;
+        }
+        btnLoad.disabled = true;
+        btnLoad.textContent = '加载中…';
+        statsEl.textContent = '请求 root.json…';
+
+        try {
+          google = new engine.GoogleTiles3D(key, viewer.scene, {
+            maximumSseError: 16,
+            cacheCapacity: 64,
+          });
+        } catch (err) {
+          btnLoad.disabled = false;
+          btnLoad.textContent = '加载 3DTiles';
+          errorEl.textContent = err.message;
+          return;
+        }
+
+        google.ready()
+          .then(() => {
+            loaded = true;
+            btnLoad.textContent = '已加载';
+            btnLoad.classList.add('active');
+            startFrameLoop();
+            // 定位到有摄影实景覆盖的城市（上海陆家嘴）
+            viewer.camera.flyTo({
+              destination: { lon: 121.4985, lat: 31.2360, height: 900 },
+              orientation: { heading: 0, pitch: -0.6 },
+            });
+            console.info('[95] Google 3DTiles root 就绪');
+          })
+          .catch((err) => {
+            // 403/网络失败：明确报错，但不按页面失败处理（离线可预期）
+            btnLoad.disabled = false;
+            btnLoad.textContent = '加载 3DTiles';
+            statsEl.textContent = '未加载（等待有效 key + 外网）';
+            errorEl.textContent =
+              '加载失败：需要有效 Google Maps API key + 外网。\n' +
+              '403/401 = key 无效或未启用 Map Tiles API；' +
+              'TypeError/超时 = 无外网。\n详情见控制台。';
+            console.error('[95] Google 3DTiles 加载失败', err);
+          });
+      });
+
+      // 等待一次用户操作窗口（探针不阻塞页面就绪语义）
+      await new Promise((r) => setTimeout(r, 100));
+      return { isLoaded: () => loaded, getGoogle: () => google };
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // QA 探针钩子
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [121.4985, 31.2300, 6000],
+          imagery: 'gaode-sat',
+          title: '95 · Google 摄影实景 3DTiles',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer;
+        const state = await demo(viewer, engine);
+        window.__googleTiles = state; // QA 探针
+        DemoUtils.showCode(demo, '95 Google 摄影实景 3DTiles · 核心代码');
+        // key 无效 / 离线不算页面失败（显示提示即可）→ 此处置 true；
+        // 加载成功路径同样抵达此处（loaded 状态由面板区分展示）。
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+        console.error('[95]', err);
+      }
+    })();
+  </script>
+</body>
+</html>

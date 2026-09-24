@@ -528,6 +528,12 @@
           indices: WINGMAN_BOX.indices,
           color: new engine.Color(0.95, 0.15, 0.15, 1.0),
           unlit: true,
+          //【调试实验 F26b】instanceIds 走城市同款 pick 路径（非 instance
+          // fallback 分支盒不显影的定界实验：若 seg 出现实例位像素 →
+          // else 分支损坏实锤）。id 取 0x100+id 高段避开建筑序号；输入须
+          // < 0x800000（pick shader 输出时自加 bit23）。语义会判 building
+          //（实例位恒 building）——仅实验用，定界后回退。
+          instanceIds: new Uint32Array(24).fill(0x100 + id),
         });
         wp.show = false;                 // 无对应机时隐藏
         viewer.scene.addPrimitive(wp);   // 预建入场（安全路径）

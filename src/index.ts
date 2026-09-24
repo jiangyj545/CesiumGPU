@@ -237,3 +237,37 @@ export type {
 } from './postprocessing/PostProcessConfig';
 export { RenderTexture } from './renderer/RenderTexture';
 export { acesFilmic, reinhard, toneMapFunction } from './postprocessing/ToneMapping';
+
+// 3DTiles 调度与集成层（P3：树遍历 / SSE / LRU / b3dm / Google 数据源）
+export { Tileset3D, computeTileSse, shouldRefine } from './tileset/Tileset3D';
+export type { Tileset3DOptions, Tileset3DStats } from './tileset/Tileset3D';
+export { GoogleTiles3D } from './tileset/GoogleTilesProvider';
+export type { GoogleTiles3DOptions } from './tileset/GoogleTilesProvider';
+export {
+  fetchTilesetJson,
+  parseTileset,
+  TILESET_EARTH_SCALE,
+} from './tileset/TilesetContentLoader';
+export type {
+  TileNode,
+  TileContent,
+  TileRefine,
+  TileContentKind,
+  TileUrlDecorator,
+  LoadTilesetOptions,
+} from './tileset/TilesetContentLoader';
+export { TilesetTileCache } from './tileset/TilesetTileCache';
+export type {
+  TileCacheEntry,
+  TilesetTileCacheOptions,
+  TilesetTileCacheStats,
+} from './tileset/TilesetTileCache';
+export { loadTileContent, buildTilePrimitives } from './tileset/TilesetPrimitive';
+export type { BuiltTileContent, TileContentLoader } from './tileset/TilesetPrimitive';
+export {
+  extractGlb,
+  computeGlbOffset,
+  parseFeatureTableJson,
+  parseRtcCenter,
+} from './tileset/B3dmDecoder';
+export type { RtcCenter } from './tileset/B3dmDecoder';

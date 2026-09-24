@@ -169,6 +169,8 @@ window.EXAMPLES_CONFIG = {
         { name: '点云渲染（近似）', fileName: '38_loadPointCloud.html' },
         { name: '模型剖切（近似）', fileName: '39_planeClip.html' },
         { name: '倾斜摄影加载（占位）', fileName: '40_e3mProxy.html' },
+        { name: '3DTiles 瓦片加载', fileName: '94_tileset3d.html' },
+        { name: 'Google 摄影实景 3DTiles', fileName: '95_googleTiles.html' },
       ],
     },
   ],
