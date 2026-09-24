@@ -163,6 +163,9 @@
     //              body→ENU, vel_e, ang_rate_e, motor[4]归一化, events[], battery}
     let sseLatest = null;          // 最新帧缓存（页面驱动循环消费，只保留最新）
     let sseMsgCount = 0;
+    // F24 伴飞机位姿缓存：id ≥1 各机最新帧（驱动翼机实体渲染——防撞
+    // 训练目标可见化；单机场景恒空 = 零开销）
+    const wingmenLatest = {};
     window.__POSE_DONE = false;    // done 事件置位（farm/录制窗口用）
     window.__POSE_MANIFEST = null; // done 事件携带的 manifest
     window.__POSE_DEBUG = {        // 联调诊断出口
@@ -187,8 +190,9 @@
         // F23 多机帧流（vehicle_id 0..N-1 帧点轮询）：v1 只渲染长机（id 0，
         // 单机帧无 vehicle_id 键 = undefined 同道通过——跟随视角）；不过滤
         // 会导致 sseLatest 在两机间跳变（渲染抖动 + 录制真值错乱）。
-        // sseMsgCount 仍计全部帧（多视口渲染属后续）。
+        // sseMsgCount 仍计全部帧；F24：id ≥1 位姿进伴飞机缓存（实体渲染）。
         if (f.vehicle_id === undefined || f.vehicle_id === 0) sseLatest = f;
+        else if (typeof f.vehicle_id === 'number') wingmenLatest[f.vehicle_id] = f;
       });
       es.addEventListener('done', (ev) => {
         window.__POSE_MANIFEST = JSON.parse(ev.data);
@@ -484,6 +488,65 @@
       const INSTANCE_FLAG = 0x800000;
       const buildingPickIds = new Set(primitives.map((p) => p.pickId));
       for (const p of primitives) viewer.scene.addPrimitive(p);
+
+      // ── F24 伴飞机实体：id ≥1 机作为 3D 实体入画（防撞训练目标可见化）──
+      // 单位盒（±0.5 局部系）+ modelMatrix = T(pos_ecef/R)·S(机体尺寸/R)——
+      // 世界系为归一化 ECEF（R=1，与城市顶点同系）；pos_ecef 帧内自带（米制
+      // 零转换）；unlit 亮红便于 RGB/bbox 标注辨识。v1 不做朝向（轴对齐盒）。
+      // 必须经 scene.addPrimitive 入场（补建 opaque bind group——直接
+      // primitives.add 会被 drawOpaque 静默跳过）。单机场景 wingmenLatest
+      // 恒空 → 不建实体零开销。
+      const WINGMAN_BOX = (() => {
+        const faces = [
+          { n: [0, 0, 1], v: [[-.5,-.5,.5],[.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5]] },
+          { n: [0, 0, -1], v: [[.5,-.5,-.5],[-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5]] },
+          { n: [1, 0, 0], v: [[.5,-.5,.5],[.5,-.5,-.5],[.5,.5,-.5],[.5,.5,.5]] },
+          { n: [-1, 0, 0], v: [[-.5,-.5,-.5],[-.5,-.5,.5],[-.5,.5,.5],[-.5,.5,-.5]] },
+          { n: [0, 1, 0], v: [[-.5,.5,.5],[.5,.5,.5],[.5,.5,-.5],[-.5,.5,-.5]] },
+          { n: [0, -1, 0], v: [[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],[-.5,-.5,.5]] },
+        ];
+        const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+        const verts = [], idx = [];
+        faces.forEach((fc, fi) => {
+          fc.v.forEach((p, i) => verts.push(...p, ...fc.n, uv[i][0], uv[i][1]));
+          const b = fi * 4;
+          idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+        });
+        return { vertices: new Float32Array(verts), indices: new Uint32Array(idx) };
+      })();
+      const WING_SIZE_M = 2.5;
+      const R_EARTH = engine.Cartesian3.EARTH_RADIUS;
+      //【重要】实体在渲染循环启动前预建（与城市 primitives 同时机
+      // addPrimitive——安全路径），运行中只切 show / 写 modelMatrix。
+      // 曾尝试渲染中途动态 addPrimitive——页面静默卡死（__DEMO_OK 永不
+      // 置位、零 JS 异常，疑似 GPU 提交间隙资源竞争），A/B 二分定位后
+      // 回退预建。v1 上限 8 机 → 预建 7 盒（id 1..7），单机恒隐藏零开销。
+      const wingmanPrims = new Map();
+      for (let id = 1; id <= 7; id++) {
+        const wp = new engine.Primitive(viewer.context, {
+          vertices: WINGMAN_BOX.vertices,
+          indices: WINGMAN_BOX.indices,
+          color: new engine.Color(0.95, 0.15, 0.15, 1.0),
+          unlit: true,
+        });
+        wp.show = false;                 // 无对应机时隐藏
+        viewer.scene.addPrimitive(wp);   // 预建入场（安全路径）
+        wingmanPrims.set(id, wp);
+      }
+      window.__WINGMEN = {               // 诊断/探针出口：可见实体计数
+        get visible() { let n = 0; for (const p of wingmanPrims.values()) if (p.show) n++; return n; },
+      };
+      setInterval(() => {
+        for (const [id, p] of wingmanPrims) {
+          const f = wingmenLatest[id];
+          if (!f || !Array.isArray(f.pos_ecef)) { p.show = false; continue; }
+          const t = engine.Matrix4.fromTranslation(
+            new engine.Cartesian3(f.pos_ecef[0] / R_EARTH, f.pos_ecef[1] / R_EARTH, f.pos_ecef[2] / R_EARTH));
+          const s = engine.Matrix4.fromUniformScale(WING_SIZE_M / R_EARTH);
+          p.modelMatrix = engine.Matrix4.multiply(t, s, new engine.Matrix4());
+          p.show = true;
+        }
+      }, 200);
 
       // ── 3) 传感器相机 + 录制器 ──
       const sensorCam = new SensorCam(viewer.scene, {
