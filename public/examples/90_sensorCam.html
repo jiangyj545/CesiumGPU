@@ -163,6 +163,10 @@
     //              body→ENU, vel_e, ang_rate_e, motor[4]归一化, events[], battery}
     let sseLatest = null;          // 最新帧缓存（页面驱动循环消费，只保留最新）
     let sseMsgCount = 0;
+    // F32 事件锁存队列：SSE 帧到达即收集长机 events（near_miss_swarm 等
+    // 边缘触发事件只挂产生帧，sseLatest 覆盖式缓存会在 5Hz 录制采样前
+    // 丢失——锁存后 patchWithSse 在采样帧 splice 取走，零丢失窗口）。
+    const pendingEvents = [];
     // F24 伴飞机位姿缓存：id ≥1 各机最新帧（驱动翼机实体渲染——防撞
     // 训练目标可见化；单机场景恒空 = 零开销）
     const wingmenLatest = {};
@@ -191,7 +195,12 @@
         // 单机帧无 vehicle_id 键 = undefined 同道通过——跟随视角）；不过滤
         // 会导致 sseLatest 在两机间跳变（渲染抖动 + 录制真值错乱）。
         // sseMsgCount 仍计全部帧；F24：id ≥1 位姿进伴飞机缓存（实体渲染）。
-        if (f.vehicle_id === undefined || f.vehicle_id === 0) sseLatest = f;
+        if (f.vehicle_id === undefined || f.vehicle_id === 0) {
+          sseLatest = f;
+          // F32：锁存长机帧事件（伴飞帧事件跳过——near_miss 两机对称挂，
+          // 收长机侧即完整；全收会重复）。advanceWpCursor 照旧读 sseLatest。
+          if (Array.isArray(f.events) && f.events.length) pendingEvents.push(...f.events);
+        }
         else if (typeof f.vehicle_id === 'number') wingmenLatest[f.vehicle_id] = f;
       });
       es.addEventListener('done', (ev) => {
@@ -610,6 +619,9 @@
           params: { ...(w.gust_params || {}) },
         };
         rec.environment.gnss = { sv_visible: 18, hdop: 0.9, nlos_masked: [], noise_std_m: 1.5 };
+        // F32：取走锁存事件（含采样窗口内到达的全部瞬态事件——near_miss/
+        // waypoint_reached/gnss_degraded/done；splice 清空，下帧窗口重新累计）
+        rec.events = pendingEvents.splice(0);
       }
       const depthCv = document.getElementById('prevDepth');
       const segCv = document.getElementById('prevSeg');
