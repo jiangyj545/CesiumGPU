@@ -4,6 +4,7 @@ import { Primitive } from './Primitive';
 import { Matrix4 } from '../math/Matrix4';
 import { Color } from '../math/Color';
 import { GltfLoader, ParsedMeshPrimitive } from '../loader/GltfLoader';
+import { Ktx2Decoder } from '../loader/Ktx2Decoder';
 
 // ── Options ───────────────────────────────────────────────────────────────────
 
@@ -200,11 +201,11 @@ export class Model {
   private async _load(url: string): Promise<void> {
     const parsed = await GltfLoader.load(url);
     for (const meshPrim of parsed.primitives) {
-      this._createPrimitive(meshPrim);
+      await this._createPrimitive(meshPrim);
     }
   }
 
-  private _createPrimitive(meshPrim: ParsedMeshPrimitive): void {
+  private async _createPrimitive(meshPrim: ParsedMeshPrimitive): Promise<void> {
     const mat  = meshPrim.material;
     const rgba = mat.baseColorFactor;
 
@@ -241,6 +242,16 @@ export class Model {
       );
       prim.setTexture(texture);
       this._textures.push(texture);
+    } else if (mat.baseColorKtx2) {
+      // KHR_texture_basisu：压缩纹理不可走 copyExternalImageToTexture /
+      // RENDER_ATTACHMENT；mipLevelCount 由解码结果决定，绑定用法与 PNG 一致
+      const decoder = Ktx2Decoder.instance;
+      if (!decoder) {
+        throw new Error('Model: KTX2 texture requires Ktx2Decoder.initialize() before loading the model');
+      }
+      const decoded = await decoder.decodeToGpuTexture(this._context.device, mat.baseColorKtx2);
+      prim.setTexture(decoded.texture);
+      this._textures.push(decoded.texture);
     }
 
     // Register with the scene

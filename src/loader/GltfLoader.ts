@@ -9,7 +9,11 @@
  *  - Node hierarchy (TRS and matrix transforms)
  *  - PBR metallic-roughness materials
  *  - Textures: embedded in GLB buffer views, external URLs, or data URIs
+ *  - KTX2 textures via KHR_texture_basisu (bytes kept for GPU-side Ktx2Decoder)
+ *  - extensionsRequired gate: unknown required extensions hard-fail with names
  */
+
+import { isKtx2 } from './Ktx2Decoder';
 
 // ── GLTF JSON type definitions ────────────────────────────────────────────────
 
@@ -26,6 +30,8 @@ interface GltfJson {
   accessors?: GltfAccessor[];
   bufferViews?: GltfBufferView[];
   buffers?: GltfBuffer[];
+  extensionsUsed?: string[];
+  extensionsRequired?: string[];
 }
 
 interface GltfNode {
@@ -120,6 +126,11 @@ export interface ParsedMaterial {
   baseColorFactor: [number, number, number, number];
   /** Optional decoded image for the base-colour texture. */
   baseColorTexture?: ImageBitmap;
+  /**
+   * KHR_texture_basisu：KTX2 原始字节。解码需要 GPUDevice，加载器无法完成，
+   * 由渲染侧（Model）经 Ktx2Decoder.decodeToGpuTexture 产出压缩 GPUTexture。
+   */
+  baseColorKtx2?: ArrayBuffer;
   metallicFactor: number;
   roughnessFactor: number;
   alphaMode: 'OPAQUE' | 'MASK' | 'BLEND';
@@ -158,6 +169,12 @@ const ACCESSOR_TYPE_COUNT: Record<string, number> = {
   MAT2: 4, MAT3: 9, MAT4: 16,
 };
 
+/**
+ * 已支持的 glTF 扩展白名单（extensionsRequired 门禁依据）。
+ * required 里有白名单之外的扩展 → 抛错列名；仅 used → console.warn 降级。
+ */
+const SUPPORTED_EXTENSIONS = ['KHR_texture_basisu'];
+
 // ── GltfLoader ────────────────────────────────────────────────────────────────
 
 /**
@@ -177,7 +194,21 @@ export class GltfLoader {
     }
 
     const buffer = await response.arrayBuffer();
+    const baseUrl = new URL(url, (typeof document !== 'undefined' && document.baseURI) || 'http://localhost/').href;
+    return GltfLoader._parseGltfBuffer(buffer, baseUrl);
+  }
 
+  /**
+   * 从 ArrayBuffer 解析 GLB（供 b3dm 剥壳等无 URL 场景复用）。
+   * 外部 buffer / image 引用相对 document.baseURI 解析。
+   */
+  static async parseGlbBuffer(buffer: ArrayBuffer): Promise<ParsedGltfModel> {
+    const baseUrl = (typeof document !== 'undefined' && document.baseURI) || 'http://localhost/';
+    return GltfLoader._parseGltfBuffer(buffer, baseUrl);
+  }
+
+  /** GLB/.gltf 共用解析管线：JSON 解出 → 扩展门禁 → buffer → image → 场景图。 */
+  private static async _parseGltfBuffer(buffer: ArrayBuffer, baseUrl: string): Promise<ParsedGltfModel> {
     // Detect GLB by checking the magic number 0x46546C67 ('glTF' in little-endian)
     const magic = new DataView(buffer).getUint32(0, true);
     const isGlb  = magic === 0x46546C67;
@@ -191,17 +222,35 @@ export class GltfLoader {
       json = JSON.parse(new TextDecoder().decode(buffer)) as GltfJson;
     }
 
+    // extensionsRequired 门禁：未知 required 直接拒绝（未知 used 仅 warn）
+    GltfLoader._checkExtensions(json);
+
     // Resolve all buffers (embedded or external)
-    // Normalise to an absolute URL first: relative page URLs (e.g. "/data/x.gltf")
-    // cannot act as a base for new URL() when the gltf references external .bin files.
-    const baseUrl = new URL(url, (typeof document !== 'undefined' && document.baseURI) || 'http://localhost/').href;
     const buffers = await GltfLoader._resolveBuffers(json, baseUrl, embeddedBinary);
 
-    // Load all images referenced by materials
-    const images = await GltfLoader._resolveImages(json, buffers, baseUrl);
+    // Load all images referenced by materials（KTX2 字节单独收集，交给 GPU 侧解码）
+    const { images, ktx2Sources } = await GltfLoader._resolveImages(json, buffers, baseUrl);
 
     // Walk the scene graph and collect mesh primitives
-    return GltfLoader._buildModel(json, buffers, images);
+    return GltfLoader._buildModel(json, buffers, images, ktx2Sources);
+  }
+
+  /**
+   * extensionsUsed / extensionsRequired 门禁。
+   * required 里有白名单之外的扩展 → 抛错并列出全名；
+   * used 里有白名单之外的扩展 → console.warn 降级（尽力解析）。
+   */
+  private static _checkExtensions(json: GltfJson): void {
+    const required = json.extensionsRequired ?? [];
+    const unsupportedRequired = required.filter((ext) => !SUPPORTED_EXTENSIONS.includes(ext));
+    if (unsupportedRequired.length > 0) {
+      throw new Error(`GltfLoader: Unsupported glTF extensions: ${unsupportedRequired.join(', ')}`);
+    }
+    for (const ext of (json.extensionsUsed ?? [])) {
+      if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+        console.warn(`GltfLoader: glTF uses unsupported extension "${ext}" – ignoring (degraded)`);
+      }
+    }
   }
 
   // ── GLB parsing ─────────────────────────────────────────────────────────────
@@ -283,8 +332,9 @@ export class GltfLoader {
     json: GltfJson,
     buffers: ArrayBuffer[],
     baseUrl: string
-  ): Promise<(ImageBitmap | null)[]> {
-    if (!json.images) return [];
+  ): Promise<{ images: (ImageBitmap | null)[]; ktx2Sources: Map<number, ArrayBuffer> }> {
+    const ktx2Sources = new Map<number, ArrayBuffer>();
+    if (!json.images) return { images: [], ktx2Sources };
 
     const promises = json.images.map(async (img, imageIndex): Promise<ImageBitmap | null> => {
       try {
@@ -299,6 +349,12 @@ export class GltfLoader {
             throw new Error(`GltfLoader: image ${imageIndex} bufferView ${img.bufferView} references missing buffer ${bv.buffer}`);
           }
           const arr = new Uint8Array(buf, bv.byteOffset ?? 0, bv.byteLength);
+          // KTX2（KHR_texture_basisu）：createImageBitmap 必抛 InvalidStateError，
+          // 这里只摘出原始字节，GPU 侧由 Ktx2Decoder 解码
+          if (img.mimeType === 'image/ktx2' || isKtx2(arr)) {
+            ktx2Sources.set(imageIndex, arr.slice().buffer);
+            return null;
+          }
           const blob = new Blob([arr], { type: img.mimeType ?? 'image/jpeg' });
           return createImageBitmap(blob);
         } else if (img.uri) {
@@ -309,6 +365,10 @@ export class GltfLoader {
             const bytes    = new Uint8Array(binary.length);
             for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
             const mimeType = img.uri.slice(5, commaIdx).split(';')[0];
+            if (mimeType === 'image/ktx2' || isKtx2(bytes)) {
+              ktx2Sources.set(imageIndex, bytes.slice().buffer);
+              return null;
+            }
             const blob = new Blob([bytes], { type: mimeType });
             return createImageBitmap(blob);
           }
@@ -316,7 +376,12 @@ export class GltfLoader {
           const imgUrl = new URL(img.uri, baseUrl).href;
           const res = await fetch(imgUrl);
           if (!res.ok) return null;
-          const blob = await res.blob();
+          const extBytes = new Uint8Array(await res.arrayBuffer());
+          if (img.mimeType === 'image/ktx2' || isKtx2(extBytes)) {
+            ktx2Sources.set(imageIndex, extBytes.slice().buffer);
+            return null;
+          }
+          const blob = new Blob([extBytes]);
           return createImageBitmap(blob);
         }
       } catch (err) {
@@ -325,7 +390,7 @@ export class GltfLoader {
       return null;
     });
 
-    return Promise.all(promises);
+    return { images: await Promise.all(promises), ktx2Sources };
   }
 
   // ── Scene graph traversal ────────────────────────────────────────────────────
@@ -333,7 +398,8 @@ export class GltfLoader {
   private static _buildModel(
     json: GltfJson,
     buffers: ArrayBuffer[],
-    images: (ImageBitmap | null)[]
+    images: (ImageBitmap | null)[],
+    ktx2Sources: Map<number, ArrayBuffer>
   ): ParsedGltfModel {
     const result: ParsedGltfModel = { primitives: [] };
 
@@ -349,7 +415,7 @@ export class GltfLoader {
     ]);
 
     for (const nodeIndex of (scene.nodes ?? [])) {
-      GltfLoader._visitNode(json, buffers, images, nodeIndex, identityMatrix, result);
+      GltfLoader._visitNode(json, buffers, images, ktx2Sources, nodeIndex, identityMatrix, result);
     }
 
     return result;
@@ -359,6 +425,7 @@ export class GltfLoader {
     json: GltfJson,
     buffers: ArrayBuffer[],
     images: (ImageBitmap | null)[],
+    ktx2Sources: Map<number, ArrayBuffer>,
     nodeIndex: number,
     parentWorldMatrix: Float32Array,
     result: ParsedGltfModel
@@ -382,7 +449,7 @@ export class GltfLoader {
       const mesh = json.meshes?.[node.mesh];
       if (mesh) {
         for (const prim of mesh.primitives) {
-          const parsed = GltfLoader._parsePrimitive(json, buffers, images, prim);
+          const parsed = GltfLoader._parsePrimitive(json, buffers, images, ktx2Sources, prim);
           if (parsed) {
             result.primitives.push({ ...parsed, nodeMatrix: worldMatrix });
           }
@@ -392,7 +459,7 @@ export class GltfLoader {
 
     // Recurse into children
     for (const childIndex of (node.children ?? [])) {
-      GltfLoader._visitNode(json, buffers, images, childIndex, worldMatrix, result);
+      GltfLoader._visitNode(json, buffers, images, ktx2Sources, childIndex, worldMatrix, result);
     }
   }
 
@@ -402,6 +469,7 @@ export class GltfLoader {
     json: GltfJson,
     buffers: ArrayBuffer[],
     images: (ImageBitmap | null)[],
+    ktx2Sources: Map<number, ArrayBuffer>,
     prim: GltfPrimitive
   ): Omit<ParsedMeshPrimitive, 'nodeMatrix'> | null {
     // Only triangle-list primitives are supported (mode 4, or absent)
@@ -465,7 +533,7 @@ export class GltfLoader {
     }
 
     // Material
-    const material = GltfLoader._parseMaterial(json, images, prim.material);
+    const material = GltfLoader._parseMaterial(json, images, ktx2Sources, prim.material);
 
     return { vertices, indices, material };
   }
@@ -622,6 +690,7 @@ export class GltfLoader {
   private static _parseMaterial(
     json: GltfJson,
     images: (ImageBitmap | null)[],
+    ktx2Sources: Map<number, ArrayBuffer>,
     materialIndex?: number
   ): ParsedMaterial {
     const defaults: ParsedMaterial = {
@@ -644,17 +713,23 @@ export class GltfLoader {
     const alphaMode       = mat.alphaMode  ?? 'OPAQUE';
     const doubleSided     = mat.doubleSided ?? false;
 
-    // Resolve base-colour texture
+    // Resolve base-colour texture（KTX2 优先：同 source 不可能有 ImageBitmap）
     let baseColorTexture: ImageBitmap | undefined;
+    let baseColorKtx2: ArrayBuffer | undefined;
     if (pbr.baseColorTexture !== undefined && json.textures) {
       const texEntry = json.textures[pbr.baseColorTexture.index];
       if (texEntry?.source !== undefined) {
-        const bmp = images[texEntry.source];
-        if (bmp) baseColorTexture = bmp;
+        const ktx2 = ktx2Sources.get(texEntry.source);
+        if (ktx2) {
+          baseColorKtx2 = ktx2;
+        } else {
+          const bmp = images[texEntry.source];
+          if (bmp) baseColorTexture = bmp;
+        }
       }
     }
 
-    return { baseColorFactor, metallicFactor, roughnessFactor, alphaMode, doubleSided, baseColorTexture };
+    return { baseColorFactor, metallicFactor, roughnessFactor, alphaMode, doubleSided, baseColorTexture, baseColorKtx2 };
   }
 
   // ── Normal generation ────────────────────────────────────────────────────────
