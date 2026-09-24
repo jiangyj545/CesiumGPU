@@ -216,10 +216,14 @@ function resolveContent(
 ): TileContent | null {
   if (!raw || typeof raw.uri !== 'string' || raw.uri.length === 0) return null;
   const uri = raw.uri;
-  // 相对 tileset.json URL 解析为绝对 URL，再过 urlDecorator（key 注入等）
+  // 相对 tileset.json URL 解析为绝对 URL，再过 urlDecorator（key 注入等）。
+  // baseUrl 可能本身是根相对路径（'/data/.../tileset.json'，无 origin）——
+  // 直接 new URL(uri, baseUrl) 会抛 TypeError 落入保底分支，导致相对 uri
+  // 被相对「页面」解析而 404。先对 baseUrl 补全页面 origin 再解析。
   let resolvedUrl: string;
   try {
-    resolvedUrl = new URL(uri, baseUrl).href;
+    const base = new URL(baseUrl, typeof location !== 'undefined' ? location.href : 'http://localhost/').href;
+    resolvedUrl = new URL(uri, base).href;
   } catch {
     resolvedUrl = uri; // 非法 URL 时保底原样（请求时再报错，不静默）
   }

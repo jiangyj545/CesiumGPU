@@ -192,6 +192,21 @@ describe('parseTileset – content 解析与 urlDecorator', () => {
     });
     expect(node.content?.resolvedUrl).toBe('http://test/dir/root.b3dm?key=K');
   });
+
+  it('根相对 baseUrl（无 origin，浏览器常见传法）不落入原样保底分支', () => {
+    // 回归：new URL(uri, '/data/…/tileset.json') 会抛 TypeError，
+    // 曾导致相对 uri 相对「页面」解析而 404（94 示例 failed 6）
+    const nodes = flattenTree(parseTileset({
+      root: {
+        geometricError: 100,
+        boundingVolume: { sphere: [0, 0, 0, 1] },
+        content: { uri: 'CesiumAir_l0.glb' },
+      },
+    }, '/data/tilesets/demo/tileset.json'));
+
+    // node 无 location → 以 http://localhost/ 兜底补全 origin
+    expect(nodes[0].content?.resolvedUrl).toBe('http://localhost/data/tilesets/demo/CesiumAir_l0.glb');
+  });
 });
 
 describe('fetchTilesetJson', () => {
