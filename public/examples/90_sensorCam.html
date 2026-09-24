@@ -528,12 +528,13 @@
           indices: WINGMAN_BOX.indices,
           color: new engine.Color(0.95, 0.15, 0.15, 1.0),
           unlit: true,
-          //【调试实验 F26b】instanceIds 走城市同款 pick 路径（非 instance
-          // fallback 分支盒不显影的定界实验：若 seg 出现实例位像素 →
-          // else 分支损坏实锤）。id 取 0x100+id 高段避开建筑序号；输入须
-          // < 0x800000（pick shader 输出时自加 bit23）。语义会判 building
-          //（实例位恒 building）——仅实验用，定界后回退。
-          instanceIds: new Uint32Array(24).fill(0x100 + id),
+          //【F26b 定界实验转正】非 instanceIds 图元在 PickPass else 分支
+          // 不显影（G-Buffer 画/pick 无——instance 路径正常，实测定界；
+          // 引擎 PickPass._pipeline 分支缺陷待修）。绕法：伴飞盒走 instance
+          // 路径，实例 id 用 bit22 段（0x400000|id，低 22 位为伴飞序号）——
+          // 与建筑实例序号（<0x400000，城市网格 2000 级）彻底隔离；
+          // 输入须 <0x800000（shader 输出自加 bit23）。
+          instanceIds: new Uint32Array(24).fill(0x400000 | id),
         });
         wp.show = false;                 // 无对应机时隐藏
         viewer.scene.addPrimitive(wp);   // 预建入场（安全路径）
@@ -555,18 +556,24 @@
       }, 200);
 
       // ── 3) 传感器相机 + 录制器 ──
-      // pickIdToSemantic：伴飞盒 → 5=wingman（palette-v0.2 防撞训练目标类，
-      // bbox-from-seg 自动出伴飞机框）；建筑 → 1；其余（globe/瓦片）→ 3=ground
-      const wingmanPickIds = new Set([...wingmanPrims.values()].map((p) => p.pickId));
+      // pickIdToSemantic：实例位像素按实例段判类——伴飞段（bit22 置位，
+      // 即 0xC00000|id）→ 5=wingman（palette-v0.2 防撞目标类）；建筑实例
+      // 段（bit22 清零，序号 <0x400000）→ 1=building。非实例位：建筑图元
+      // → 1、其余（globe/瓦片）→ 3=ground。
+      //【背景】伴飞盒经 instanceIds 路径进 pick（非 instance fallback 分支
+      // 引擎缺陷不显影——见上方定界注记）。
       const sensorCam = new SensorCam(viewer.scene, {
         fovYDeg: 45,
         width: viewer.context.drawingBufferWidth,
         height: viewer.context.drawingBufferHeight,
         nearM: 1,
         farM: 2000,
-        pickIdToSemantic: (id) => (id & INSTANCE_FLAG) ? 1
-          : (wingmanPickIds.has(id) ? 5
-          : (buildingPickIds.has(id) ? 1 : 3)),
+        pickIdToSemantic: (id) => {
+          if (id & INSTANCE_FLAG) {
+            return (id & 0x400000) !== 0 ? 5 : 1;
+          }
+          return buildingPickIds.has(id) ? 1 : 3;
+        },
       });
 
       let episode = null;
