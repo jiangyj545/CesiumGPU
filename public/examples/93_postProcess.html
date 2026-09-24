@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 93：独立后处理管线 PostProcess - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:340px;max-width:400px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.4);
+      font:13px/1.6 system-ui,sans-serif}
+    .cg-panel h1{font-size:15px;margin:0 0 8px;color:#9fd0ff}
+    .cg-panel label{display:flex;align-items:center;gap:8px;margin:4px 0}
+    .cg-panel input[type=range]{flex:1}
+    .cg-panel select{background:#12233a;color:#d8e8ff;border:1px solid rgba(120,180,255,.3);border-radius:4px;padding:2px 6px}
+    .cg-panel .val{min-width:44px;text-align:right;color:#8fc7ff;font-variant-numeric:tabular-nums}
+    .cg-panel fieldset{border:1px solid rgba(120,180,255,.2);border-radius:6px;margin:8px 0;padding:6px 10px}
+    .cg-panel legend{padding:0 6px;color:#8fc7ff}
+    #cg-status{margin-top:8px;color:#9fe0b0}
+  </style>
+</head>
+<body style="margin:0;background:#000">
+  <div id="cesiumContainer" style="position:absolute;inset:0"></div>
+  <div class="cg-panel">
+    <h1>93 独立后处理管线（Bloom / LensFlare / HDR）</h1>
+    <label><input type="checkbox" id="ppEnabled" /> 启用后处理（关闭 = 旧 swapChain 直渲）</label>
+    <fieldset>
+      <legend>Bloom</legend>
+      <label>threshold<input type="range" id="bThreshold" min="0" max="2" step="0.05" value="0.8" /><span class="val" id="bThresholdV">0.80</span></label>
+      <label>intensity<input type="range" id="bIntensity" min="0" max="3" step="0.05" value="1" /><span class="val" id="bIntensityV">1.00</span></label>
+      <label>levels&nbsp;&nbsp;&nbsp;&nbsp;<input type="range" id="bLevels" min="4" max="6" step="1" value="5" /><span class="val" id="bLevelsV">5</span></label>
+      <label><input type="checkbox" id="bEnabled" checked /> bloom 叠加</label>
+    </fieldset>
+    <fieldset>
+      <legend>LensFlare（太阳入屏时可见）</legend>
+      <label>intensity<input type="range" id="fIntensity" min="0" max="2" step="0.05" value="0.8" /><span class="val" id="fIntensityV">0.80</span></label>
+      <label>ghosts&nbsp;&nbsp;&nbsp;<input type="range" id="fGhosts" min="4" max="8" step="1" value="5" /><span class="val" id="fGhostsV">5</span></label>
+    </fieldset>
+    <label>toneMapping
+      <select id="toneMode">
+        <option value="aces" selected>aces</option>
+        <option value="reinhard">reinhard</option>
+        <option value="none">none</option>
+      </select>
+    </label>
+    <div id="cg-status">初始化中…</div>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    /** 太阳方向（太阳→地球，DirectionalLight 语义）驱动日照。 */
+    function applySun(viewer) {
+      const sunDir = engine.SunPosition.computeSunDirection(engine.JulianDate.now());
+      const light = viewer.scene.lights[0];
+      if (light) {
+        light.direction = sunDir;
+        light.intensity = 1.6;
+        light.ambientIntensity = 0.06;
+      }
+    }
+
+    async function demo(viewer) {
+      // ── 发光主体：上海圆形扫描（bloom 阈值提取的明显目标）─────────────
+      const scan = new engine.CircleScan(viewer.context, {
+        center: { lon: 121.47, lat: 31.23 },
+        radius: 60_000,
+        color: [1.0, 0.85, 0.3, 1.0],
+        speed: 3,
+        rings: 2,
+      });
+      viewer.scene.effects.add(scan);
+
+      applySun(viewer);
+
+      // ── UI 面板 ⇄ postProcess 直改（下一帧生效，无需重建资源）────────
+      const pp = viewer.scene.postProcess;
+      const $ = (id) => document.getElementById(id);
+      const bind = (id, vid, fmt, apply) => {
+        const el = $(id);
+        el.addEventListener('input', () => {
+          const v = parseFloat(el.value);
+          apply(v);
+          if (vid) $(vid).textContent = fmt(v);
+        });
+      };
+
+      $('ppEnabled').checked = pp.enabled;
+      $('ppEnabled').addEventListener('change', (e) => {
+        pp.enabled = e.target.checked;
+      });
+      $('bEnabled').checked = pp.bloom.enabled;
+      $('bEnabled').addEventListener('change', (e) => { pp.bloom.enabled = e.target.checked; });
+
+      bind('bThreshold', 'bThresholdV', (v) => v.toFixed(2), (v) => { pp.bloom.threshold = v; });
+      bind('bIntensity', 'bIntensityV', (v) => v.toFixed(2), (v) => { pp.bloom.intensity = v; });
+      bind('bLevels', 'bLevelsV', (v) => String(v), (v) => { pp.bloom.levels = v; });
+      bind('fIntensity', 'fIntensityV', (v) => v.toFixed(2), (v) => { pp.lensFlare.intensity = v; });
+      bind('fGhosts', 'fGhostsV', (v) => String(v), (v) => { pp.lensFlare.ghosts = v; });
+
+      $('toneMode').value = pp.toneMapping;
+      $('toneMode').addEventListener('change', (e) => { pp.toneMapping = e.target.value; });
+
+      $('cg-status').textContent =
+        `后处理就绪（enabled=${pp.enabled}）· 勾选总开关查看 Bloom/Flare/ACES`;
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [121.47, 31.23, 900_000],
+          imagery: 'gaode-sat',
+          title: '93 · 独立后处理管线 PostProcess',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer);
+        DemoUtils.showCode(demo, '93 独立后处理管线 · 核心代码');
+        window.__DEMO_OK = true; // 初始化 + 特效挂载 + UI 绑定全部成功
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

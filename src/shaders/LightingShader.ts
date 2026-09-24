@@ -2,8 +2,14 @@
  * Deferred lighting pass shader.
  * Reads G-Buffer textures and computes PBR-style directional lighting.
  * Full-screen triangle approach.
+ *
+ * P2 后处理双路径（见 LightingPass.setHdrOutput）：
+ *  - LIGHTING_SHADER     LDR：内嵌 Reinhard + gamma（旧路径，WGSL 逐字节不变）。
+ *  - LIGHTING_SHADER_HDR HDR：线性直通（Reinhard/gamma 交给后处理
+ *    ToneMappingPass），供 postProcess.enabled 时使用。
+ * 两变体共享 SHADER_CORE —— 主体只有一份，尾段分叉。
  */
-export const LIGHTING_SHADER = /* wgsl */`
+const SHADER_CORE = /* wgsl */`
 // ── Uniforms ──────────────────────────────────────────────────────────────────
 
 // 256B camera UBO — layout single source of truth: src/renderer/CameraUniforms.ts
@@ -131,7 +137,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let haze = vec3<f32>(0.1, 0.2, 0.4) * pow(limbFactor, 3.0) * 0.8;
 
   color = color + haze;
+`;
 
+// ── LDR 尾段：旧内嵌 Reinhard + gamma（与拆分前逐字节一致）─────────────────
+const TAIL_LDR = /* wgsl */`
   // Tone mapping (Reinhard)
   color = color / (color + vec3<f32>(1.0));
 
@@ -141,5 +150,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(color, 1.0);
 }
 `;
+
+// ── HDR 尾段：线性直通（后处理 ToneMappingPass 负责映射 + gamma）────────────
+const TAIL_HDR = /* wgsl */`
+  // P2 HDR passthrough: tone mapping + gamma move to ToneMappingPass
+  return vec4<f32>(color, 1.0);
+}
+`;
+
+export const LIGHTING_SHADER = SHADER_CORE + TAIL_LDR;
+
+export const LIGHTING_SHADER_HDR = SHADER_CORE + TAIL_HDR;
 
 export default LIGHTING_SHADER;

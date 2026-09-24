@@ -228,3 +228,12 @@ export type {
   TerrainRenderTile,
   TerrainTileBounds,
 } from './terrain/TerrainLayer';
+
+// 独立后处理管线（P2：Bloom / LensFlare / HDR ToneMapping）
+export { PostProcessManager } from './postprocessing/PostProcessManager';
+export type {
+  PostProcessConfig,
+  ToneMappingMode,
+} from './postprocessing/PostProcessConfig';
+export { RenderTexture } from './renderer/RenderTexture';
+export { acesFilmic, reinhard, toneMapFunction } from './postprocessing/ToneMapping';

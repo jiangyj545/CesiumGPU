@@ -4,7 +4,7 @@ import { DirectionalLight } from '../DirectionalLight';
 import { Camera } from '../Camera';
 import type { IPass } from './IPass';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../../renderer/CameraUniforms';
-import { LIGHTING_SHADER } from '../../shaders/LightingShader';
+import { LIGHTING_SHADER, LIGHTING_SHADER_HDR } from '../../shaders/LightingShader';
 
 /** Maximum directional lights supported in the WGSL shader. */
 const MAX_LIGHTS = 8;
@@ -31,6 +31,12 @@ export class LightingPass implements IPass {
   private _gbufferPass: GBufferPass;
   private _outputFormat: GPUTextureFormat;
 
+  /**
+   * P2 后处理开关：true = 输出线性 HDR（跳过 Reinhard+gamma，交给
+   * ToneMappingPass）。默认 false —— 旧 LDR 路径行为逐字节不变。
+   */
+  private _hdr = false;
+
   constructor(context: Context, gbufferPass: GBufferPass, outputFormat: GPUTextureFormat) {
     this._context      = context;
     this._gbufferPass  = gbufferPass;
@@ -55,10 +61,24 @@ export class LightingPass implements IPass {
     });
   }
 
+  /**
+   * P2 后处理开关（Scene.render 每帧同步 postProcess.enabled）。
+   * 仅在状态变化时重建 pipeline（bindGroup 与 shader 布局无关，沿用）。
+   */
+  setHdrOutput(hdr: boolean): void {
+    if (hdr === this._hdr) return;
+    this._hdr = hdr;
+    this._pipeline = null;
+    this.prepare();
+  }
+
   /** Build or rebuild the render pipeline and bind groups. */
   prepare(): void {
     const device = this._context.device;
-    const shader = device.createShaderModule({ code: LIGHTING_SHADER, label: 'LightingShader' });
+    const shader = device.createShaderModule({
+      code: this._hdr ? LIGHTING_SHADER_HDR : LIGHTING_SHADER,
+      label: 'LightingShader',
+    });
 
     const bindGroupLayout0 = device.createBindGroupLayout({
       label: 'Lighting.BGL0',
@@ -197,8 +217,11 @@ export class LightingPass implements IPass {
     const pass = encoder.beginRenderPass({
       label: 'Lighting Pass',
       colorAttachments: [{
-        view:       outputView,
-        clearValue: { r: 0.0, g: 0.0, b: 0.05, a: 1.0 },
+        view: outputView,
+        // HDR 路径背景更暗（(0,0,0.02,1)）：后续 bloom 阈值提取不被背景抬亮
+        clearValue: this._hdr
+          ? { r: 0.0, g: 0.0, b: 0.02, a: 1.0 }
+          : { r: 0.0, g: 0.0, b: 0.05, a: 1.0 },
         loadOp:     'clear',
         storeOp:    'store',
       }],

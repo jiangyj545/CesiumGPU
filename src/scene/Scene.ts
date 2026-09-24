@@ -18,6 +18,8 @@ import type { IPass } from './passes/IPass';
 import { EntityVisualizer } from './EntityVisualizer';
 import { EntityCollection } from '../dataSource/EntityCollection';
 import { EffectManager } from '../effect/EffectManager';
+import { PostProcessManager } from '../postprocessing/PostProcessManager';
+import { RenderTexture } from '../renderer/RenderTexture';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 
 /**
@@ -39,6 +41,23 @@ export class Scene {
 
   /** 特效统一挂载点（T3.1）：Transparent composite 之后逐个 execute。 */
   readonly effects: EffectManager = new EffectManager();
+
+  /**
+   * P2 独立后处理管线（Bloom/LensFlare/HDR ToneMapping）。
+   * 惰性创建（首次访问时 device 已就绪）。enabled=false（默认）时
+   * render() 走旧 swapChain 直渲路径，本对象不被触碰。
+   */
+  get postProcess(): PostProcessManager {
+    if (!this._postProcess) {
+      this._postProcess = new PostProcessManager(
+        this._context.device,
+        this._context.preferredFormat,
+        this._width,
+        this._height,
+      );
+    }
+    return this._postProcess;
+  }
 
   /**
    * Entities in the scene.  Polygon/polyline visuals are rendered as
@@ -68,6 +87,14 @@ export class Scene {
 
   private _context: Context;
   // GPU resources are created lazily in initialize(), after context.initialize().
+  private _postProcess: PostProcessManager | null = null;
+  /**
+   * 场景离屏颜色 RT（postProcess.enabled 时作为 pass 循环的输出目标）。
+   * 格式跟随交换链（preferredFormat）：Overlay/Transparent/特效管线的
+   * 目标格式锁定为 preferredFormat，写入 rgba16float 会触发 WebGPU 校验
+   * 错误 —— 故 HDR 范围受 8bit 限制（已知限制，见 P2 报告）。
+   */
+  private _sceneColorRT: RenderTexture | null = null;
   private _gbufferPass: GBufferPass | null = null;
   private _lightingPass: LightingPass | null = null;
   private _transparentPass: TransparentPass | null = null;
@@ -249,6 +276,8 @@ export class Scene {
     // LightingPass rebuilds its bind group against the new views.
     for (const pass of this._renderPasses) pass.resize?.(width, height);
     this.effects.resize(width, height);
+    // P2：仅在后处理已被创建时转发（未启用不分配任何资源）
+    this._postProcess?.resize(width, height);
     this.camera.setAspectRatio(width / height);
   }
 
@@ -304,16 +333,40 @@ export class Scene {
     // ── Pass loop: gbuffer → lighting → overlay → transparent ─────────────
     const swapChainView = ctx.getCurrentTextureView();
     const time = performance.now() / 1000;
+
+    // ── P2 后处理 target 分叉（唯一回归敏感点）─────────────────────────────
+    // enabled=false：target === swapChainView，后续所有调用与旧路径完全一致；
+    // enabled=true ：场景写离屏 _sceneColorRT，frameHooks 后由后处理链输出。
+    let target = swapChainView;
+    if (this.postProcess.enabled) {
+      if (!this._sceneColorRT) {
+        this._sceneColorRT = new RenderTexture(
+          ctx.device, ctx.preferredFormat, 'Scene.SceneColorRT');
+      }
+      this._sceneColorRT.ensure(this._width, this._height);
+      target = this._sceneColorRT.view!;
+      // LightingShader 双路径同步：HDR 直通 vs 旧 Reinhard+gamma
+      this._lightingPass.setHdrOutput(true);
+    } else {
+      this._lightingPass.setHdrOutput(false);
+    }
+
     for (const pass of this._renderPasses) {
       pass.updateCamera?.(this.camera);
-      pass.execute(encoder, swapChainView, time);
+      pass.execute(encoder, target, time);
     }
 
     // ── Effects (additive / emissive overlays, drawn last) ────────────────
-    this.effects.execute(encoder, swapChainView, time);
+    this.effects.execute(encoder, target, time);
 
     // ── Frame hooks (extra compute / render passes on the same encoder) ───
-    for (const hook of this.frameHooks) hook(encoder, swapChainView);
+    for (const hook of this.frameHooks) hook(encoder, target);
+
+    // ── P2 后处理链：sceneColor → bloom/flare/toneMapping → swapChain ──────
+    if (this.postProcess.enabled) {
+      this.postProcess.execute(encoder, target, swapChainView, time, this.camera);
+      this._sceneColorRT!.onFrameEnd();
+    }
 
     // ── Submit ────────────────────────────────────────────────────────────
     ctx.submit([encoder.finish()]);
@@ -322,6 +375,10 @@ export class Scene {
   destroy(): void {
     this._pickPass?.destroy();
     this._pickPass = null;
+    this._postProcess?.destroy();
+    this._postProcess = null;
+    this._sceneColorRT?.destroy();
+    this._sceneColorRT = null;
     this._entityVisualizer?.destroy();
     this._entityVisualizer = null;
     for (const pass of this._renderPasses) pass.destroy();

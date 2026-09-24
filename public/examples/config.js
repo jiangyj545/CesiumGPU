@@ -114,6 +114,7 @@ window.EXAMPLES_CONFIG = {
       items: [
         { name: 'mapV 迁徙图近似', fileName: '87_mapVMigrate.html' },
         { name: 'echarts 飞线近似', fileName: '88_echartsFlow.html' },
+        { name: '独立后处理管线', fileName: '93_postProcess.html' },
       ],
     },
     {
