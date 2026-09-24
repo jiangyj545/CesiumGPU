@@ -193,7 +193,9 @@ export class FloodWater implements IPass {
       const bindGroupLayout = device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-          { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+          // vs_main 里读 flood.waterLevel 布置顶点半径（k = max(kTerrain, waterLevel)），
+          // visibility 必须含 VERTEX，否则管线验证失败并污染整帧 Frame Encoder
+          { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         ],
       });
 
