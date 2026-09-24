@@ -171,6 +171,9 @@
       scenarioLen: SCENARIO_PATH.length,
       spec: !!SCENARIO_SPEC,
       seed: URL_SEED,
+      // F23 探针对账：SSE 收到的全部帧计数（多机=含全部 vehicle_id 帧；
+      // sseLatest 只保留长机——见 frame 监听器注释）
+      get sseMsgCount() { return sseMsgCount; },
     };
     if (POSE_SSE && SCENARIO_PATH) {
       // 注意必须用 SimKernel 绝对地址（SIM_URL）：相对 /stream 会打到 vite(3599)；
@@ -179,8 +182,13 @@
         `${SIM_URL}/stream?scenario=${encodeURIComponent(SCENARIO_PATH)}` +
         (URL_SEED ? `&seed=${encodeURIComponent(URL_SEED)}` : ''));
       es.addEventListener('frame', (ev) => {
-        sseLatest = JSON.parse(ev.data);
+        const f = JSON.parse(ev.data);
         sseMsgCount += 1;
+        // F23 多机帧流（vehicle_id 0..N-1 帧点轮询）：v1 只渲染长机（id 0，
+        // 单机帧无 vehicle_id 键 = undefined 同道通过——跟随视角）；不过滤
+        // 会导致 sseLatest 在两机间跳变（渲染抖动 + 录制真值错乱）。
+        // sseMsgCount 仍计全部帧（多视口渲染属后续）。
+        if (f.vehicle_id === undefined || f.vehicle_id === 0) sseLatest = f;
       });
       es.addEventListener('done', (ev) => {
         window.__POSE_MANIFEST = JSON.parse(ev.data);
