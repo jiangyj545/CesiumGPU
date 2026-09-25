@@ -154,6 +154,10 @@ export type { DynamicWaterOptions } from './effect/DynamicWater';
 export { FloodWater } from './effect/FloodWater';
 export type { FloodWaterOptions, HeightGridData } from './effect/FloodWater';
 
+// FFT 谱海洋特效（移植 tidewater：JONSWAP 谱 + 多级联 IFFT + Jacobian 泡沫）
+export { OceanFFTWater, OCEAN_FFT_SIZE } from './effect/OceanFFTWater';
+export type { OceanFFTWaterOptions } from './effect/OceanFFTWater';
+
 // Ground heatmap overlay effect (对齐 EV_Heatmap)
 export { HeatmapLayer } from './effect/HeatmapLayer';
 export type { HeatmapLayerOptions, HeatPoint, HeatGradientStop } from './effect/HeatmapLayer';

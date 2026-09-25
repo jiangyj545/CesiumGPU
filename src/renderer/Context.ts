@@ -67,6 +67,16 @@ export class Context {
 
     this._device = await this._adapter.requestDevice({
       requiredFeatures,
+      // 提升每着色阶段 storage texture 上限（默认 4）：FFT 海洋的 mip
+      // 归约 kernel 一次写出 level1-5 共 5 个级联纹理。Math.min 收敛到
+      // adapter 真实能力——requestDevice 超限会直接 reject（规范行为），
+      // 不满足时各 pass 仍按默认限制走。
+      requiredLimits: {
+        maxStorageTexturesPerShaderStage: Math.min(
+          8,
+          this._adapter.limits.maxStorageTexturesPerShaderStage
+        ),
+      },
     });
 
     this._device.lost.then((info) => {

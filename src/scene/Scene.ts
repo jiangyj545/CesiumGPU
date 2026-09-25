@@ -357,6 +357,9 @@ export class Scene {
     }
 
     // ── Effects (additive / emissive overlays, drawn last) ────────────────
+    // 与 _renderPasses 对齐：execute 前注入相机，供依赖相机矩阵的特效
+    // （如 OceanFFTWater）写 camera UBO；不依赖的特效不受影响（可选协议）。
+    for (const effect of this.effects.list) effect.updateCamera?.(this.camera);
     this.effects.execute(encoder, target, time);
 
     // ── Frame hooks (extra compute / render passes on the same encoder) ───
