@@ -106,6 +106,9 @@ export class Camera {
   /** Scale factor: 1 internal unit = EARTH_SCALE metres */
   static readonly EARTH_SCALE = 6378137.0;
 
+  /** WGS84 极半径比 b/a：引擎线性归一化世界中 y/z 的压扁系数（同 Globe/EllipsoidGeometry/TerrainProvider）。 */
+  static readonly WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
+
   constructor() {
     // Start above the equator at ~3× Earth radius
     this.position  = new Cartesian3(0, 0, 3.0);
@@ -486,16 +489,26 @@ export class Camera {
   // ── Private helpers ────────────────────────────────────────────────────────
 
   /**
-   * WGS84 椭球地表矢长（归一化单位）在给定方向上的快速近似：
-   * 1 − (e²/2)·sin²φ，误差 < 20 m。引擎的「椭球 ECEF 线性归一化」世界中
-   * 纬度 30.5° 地表 ≈ 0.99914（单位球面下方 ~5.5 km）——任何「地表高度」
-   * 判断（滚轮下限、拖拽钳制）都必须用它，严禁假设地表 = 1。
+   * 引擎世界（单位球方向向量，y/z × WGS84_POLAR_RATIO 线性归一化）中，
+   * 位置所在经纬度的地表矢长。先把压扁位置还原成单位方向 u，再取
+   * √(ux² + ρ²(1−ux²))（地表点 = (ux, uy·ρ, uz·ρ)）。
+   *
+   * 此前的近似 1 − (e²/2)·sin²φ 是「旋转椭球」公式，而本引擎世界不是旋转
+   * 椭球——y 压扁使地表矢长随经度变化（如 121.65°E/31.14°N 实际 0.99732，
+   * 旧公式给 0.99910，偏高 ~11.3 km），会让 zoom/拖拽下限与缩放锚点整体
+   * 悬空。严禁假设地表 = 1，也严禁用旋转椭球近似。
    */
   static surfaceRadius(position: Cartesian3): number {
     const r = Cartesian3.magnitude(position);
     if (r < 1e-9) return 1.0;
-    const sinLat = CesiumMath.clamp(position.z / r, -1.0, 1.0);
-    return 1.0 - 0.003349 * sinLat * sinLat;
+    const rho = Camera.WGS84_POLAR_RATIO;
+    const inv = 1.0 / r;
+    const ux = position.x * inv;
+    const uy = (position.y * inv) / rho;
+    const uz = (position.z * inv) / rho;
+    const n = Math.sqrt(ux * ux + uy * uy + uz * uz); // ≈1，消浮点漂移
+    const cx2 = ((ux / n) * (ux / n));                // cosφcosλ 分量的平方
+    return Math.sqrt(cx2 + rho * rho * (1.0 - cx2));
   }
 
   /**
@@ -508,14 +521,22 @@ export class Camera {
     if ('x' in destination && 'y' in destination && 'z' in destination) {
       return Cartesian3.multiplyByScalar(destination, scale, new Cartesian3());
     }
-    // { lon, lat, height } — route through the WGS84 cartographic conversion
-    // so it matches `Cartesian3.fromDegrees` exactly.
-    const metres = Cartographic.fromDegrees(
-      destination.lon,
-      destination.lat,
-      (destination.height ?? 0.0) / Camera.EARTH_SCALE,
-    ).toCartesian();
-    return Cartesian3.multiplyByScalar(metres, scale, new Cartesian3());
+    // { lon, lat, height } — 与引擎世界地表同约定：Globe/EllipsoidGeometry/
+    // ecefFromLonLatHeight/OceanFFT/FloodWater 全是「单位球方向向量 ×
+    // (1 + h/a)，y/z 再乘 WGS84 极半径比」的线性归一化世界。此前走
+    // Cartographic.toCartesian（真 WGS84 大地转换），其地表悬在压扁世界
+    // 地表上方 ~11 km（随经度变化）：setView/flyTo 的 height 全被抬到
+    // 等效 ~12 km——96/92 示例低空海面出画的根因。
+    const lonRad = CesiumMath.toRadians(destination.lon);
+    const latRad = CesiumMath.toRadians(destination.lat);
+    const hScale = 1.0 + (destination.height ?? 0.0) / Camera.EARTH_SCALE;
+    const cosLat = Math.cos(latRad);
+    const rho = Camera.WGS84_POLAR_RATIO;
+    return new Cartesian3(
+      cosLat * Math.cos(lonRad) * hScale,
+      cosLat * Math.sin(lonRad) * rho * hScale,
+      Math.sin(latRad) * rho * hScale,
+    );
   }
 
   /**
