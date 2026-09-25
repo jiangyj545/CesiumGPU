@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 95：FFT 海洋仿真 OceanFFT - CesiumGPU</title>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:340px;max-width:460px;
+      padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
+      border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel label{display:block;font-size:12px;color:#9db4d0;margin:6px 0 2px;}
+    .cg-panel label b{color:#8ee6ff;font-weight:600;}
+    .cg-panel input[type=range]{width:100%;}
+    .cg-panel .checkline{display:flex;align-items:center;gap:6px;margin-top:10px;
+      font-size:12px;color:#9db4d0;cursor:pointer;user-select:none;}
+    .cg-panel .checkline input{cursor:pointer;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>95 FFT 海洋仿真</h1>
+    <p class="desc">基于 <b>JONSWAP 谱 + GPU FFT</b>（Tessendorf 多级联）的真实感海面，
+      借鉴 tidewater：频域逆 FFT 生成位移/梯度/雅可比纹理，片元侧由雅可比
+      提取波峰白沫，choppiness 控制水平挤压的卷浪形态。风场（风速/风向）
+      实时重塑谱参数，时间尺度缩放海况演化速度。</p>
+    <label>风速 <b id="windSpeedVal">8.0</b> m/s</label>
+    <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="8" />
+    <label>风向 <b id="windDirVal">20</b>°</label>
+    <input id="windDir" type="range" min="0" max="360" step="5" value="20" />
+    <label>choppiness 卷浪度 <b id="choppinessVal">0.90</b></label>
+    <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="0.9" />
+    <label>foamBias 白沫阈值 <b id="foamBiasVal">0.65</b></label>
+    <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.65" />
+    <label>时间尺度 <b id="timeScaleVal">1.0</b>×</label>
+    <input id="timeScale" type="range" min="0" max="3" step="0.1" value="1" />
+    <label class="checkline">
+      <input id="showToggle" type="checkbox" checked /> 显示海面
+    </label>
+  </div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer, engine) {
+      // ── 1. 海面特效：OceanFFTWater（JONSWAP 谱 + GPU FFT 多级联）──────
+      const ocean = new engine.OceanFFTWater(viewer.scene.context, {
+        center: [121.65, 31.15],   // [lon, lat] 海域中心（东海）
+        extentKm: 2.5,
+        segments: 256,
+        waterLevel: 0,
+        windSpeed: 8,              // m/s
+        windDirection: 20,         // deg
+        choppiness: 0.9,
+        timeScale: 1,
+        sunDirection: [0.4, 0.5, 0.77],
+      });
+      viewer.scene.effects.add(ocean);
+
+      // ── 2. 滑杆 → setter 联动（uniform 直改，下帧生效）───────────────
+      function bindSlider(sliderId, valId, fmt, apply) {
+        const slider = document.getElementById(sliderId);
+        const valEl = document.getElementById(valId);
+        const update = () => {
+          valEl.textContent = fmt(slider.valueAsNumber);
+          apply(slider.valueAsNumber);
+        };
+        slider.addEventListener('input', update);
+        update(); // 初始化显示值与实际状态一致
+      }
+      bindSlider('windSpeed', 'windSpeedVal', (v) => v.toFixed(1), (v) => ocean.setWindSpeed(v));
+      bindSlider('windDir', 'windDirVal', (v) => String(Math.round(v)), (v) => ocean.setWindDirection(v));
+      bindSlider('choppiness', 'choppinessVal', (v) => v.toFixed(2), (v) => ocean.setChoppiness(v));
+      bindSlider('foamBias', 'foamBiasVal', (v) => v.toFixed(2), (v) => ocean.setFoamBias(v));
+      bindSlider('timeScale', 'timeScaleVal', (v) => v.toFixed(1), (v) => ocean.setTimeScale(v));
+
+      // ── 3. 显示/隐藏 ─────────────────────────────────────────────────
+      document.getElementById('showToggle').addEventListener('change', (e) => {
+        ocean.show = e.target.checked;
+      });
+
+      // ── 4. 初始视角：海域中心上空 450 m，俯角约 -25° ─────────────────
+      viewer.camera.flyTo({
+        destination: { lon: 121.65, lat: 31.1413, height: 450 },
+        orientation: { heading: 0, pitch: -25 * Math.PI / 180 },
+      });
+    }
+
+    // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
+    (async () => {
+      let viewer;
+      window.viewer = null; // debug hook for QA probes
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [121.65, 31.15, 450],
+          imagery: 'gaode-sat',
+          title: '95 · FFT 海洋仿真',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        window.viewer = viewer; // debug hook for QA probes
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '95 FFT 海洋仿真 · 核心代码');
+        window.__DEMO_OK = true; // 海面特效挂载成功
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

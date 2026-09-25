@@ -151,6 +151,7 @@ window.EXAMPLES_CONFIG = {
         { name: '云集合', fileName: '68_cloudCollection.html' },
         { name: '体积圆柱', fileName: '69_volumeCylinder.html' },
         { name: '建筑特效', fileName: '70_bulidingEffect.html' },
+        { name: 'FFT 海洋仿真', fileName: '96_oceanFFT.html' },
       ],
     },
     {
