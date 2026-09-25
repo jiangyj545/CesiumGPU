@@ -69,9 +69,11 @@
       };
 
       // ── 4. 飞到 tileset 区域上空（1200m 俯视三模型）────────────────
+      // pitch 对准模型（atan2(1200, 390) ≈ -1.2568）：滚轮是锚定缩放，
+      // 只保持「视线中心点」的画位——模型必须居中，拉近时才恒在画面内
       viewer.camera.flyTo({
         destination: { lon: 114.3, lat: 30.4965, height: 1200 },
-        orientation: { heading: 0, pitch: -0.9 },
+        orientation: { heading: 0, pitch: -1.2568 },
       });
 
       // __DEMO_OK 前置：等待内容实际上屏（drawn>0），20s 超时判失败

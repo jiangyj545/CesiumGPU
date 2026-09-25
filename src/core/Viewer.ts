@@ -356,8 +356,9 @@ export class Viewer {
       if (this._isRightDragging) {
         const dy = pos.y - this._lastRightMouseY;
         this._lastRightMouseY = pos.y;
-        // Right-drag down → zoom in (matches Cesium: drag toward globe = move closer)
-        camera.zoom(-dy * r * 0.002);
+        // Right-drag down → zoom in (matches Cesium: drag toward globe = move closer).
+        // zoom 吃 ln 缩放因子：拖 100px ≈ ×1.35
+        camera.zoom(-dy * 0.003);
       }
     }, 'MOUSE_MOVE');
 
@@ -396,17 +397,16 @@ export class Viewer {
     // ── Scroll wheel → proportional zoom (Cesium-compatible) ──────────────
     handler.setInputAction((pos: WheelPosition) => {
       camera.cancelFlight(); // user input interrupts flyTo (T2.6)
-      const r = Cartesian3.magnitude(camera.position);
-      // Scroll up (deltaY < 0) → zoom in; scroll down → zoom out
-      camera.zoom(pos.deltaY * r * 0.0002);
+      // Scroll up (deltaY < 0) → zoom in; scroll down → zoom out.
+      // zoom 吃 ln 缩放因子：一格(±100) ≈ ×0.8 / ×1.25，锚定构图不滑出画面
+      camera.zoom(pos.deltaY * 0.0022);
     }, 'WHEEL');
 
     // ── Two-finger pinch → proportional zoom ───────────────────────────────
     handler.setInputAction((pos: PinchPosition) => {
       camera.cancelFlight(); // user input interrupts flyTo (T2.6)
-      const r = Cartesian3.magnitude(camera.position);
       // Pinch apart → zoom in (negative delta), pinch together → zoom out
-      camera.zoom((pos.lastDist - pos.dist) * r * 0.002);
+      camera.zoom((pos.lastDist - pos.dist) * 0.004);
     }, 'PINCH');
 
     // ── GPU pick on left click (only when a consumer registered onPick) ─────

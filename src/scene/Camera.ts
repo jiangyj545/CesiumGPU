@@ -216,23 +216,68 @@ export class Camera {
   }
 
   /**
-   * Zoom the camera toward/away from Earth centre.
-   * @param delta - negative = zoom in, positive = zoom out
+   * Zoom the camera, anchored at the surface point under the view centre.
+   *
+   * The camera moves along the anchor→camera line by an exponential factor,
+   * so the screen composition is preserved while zooming — targets stay in
+   * frame and simply grow. A purely radial (toward-Earth-centre) zoom keeps
+   * pitch fixed and slides the target off the top of the screen as the
+   * camera descends (94 示例「一缩放就看不到」的根因).
+   *
+   * @param delta - natural-log zoom factor: exp(delta) is the distance ratio
+   *                (e.g. -0.22 ≈ move to 80 % = zoom in one notch)
    */
   zoom(delta: number): void {
-    // 下限贴「当前纬度椭球地表」+ ~127m 余量（近似公式误差 <20m）。椭球
-    // 线性归一化世界中纬度地表矢长 ≈0.999x（单位球面下方数 km）——绝对
-    // 值 1.05 会让滚轮第一步就把相机钳到球面上方 319km；余量过大（km 级）
-    // 则用户永远滚不进模型尺度（94 示例拉近全黑的滚轮路径根因与残留）。
-    const minRadius = Camera.surfaceRadius(this.position) + 0.00002;
-    const maxRadius = 50.0;
-    const radius = Cartesian3.magnitude(this.position);
-    const newRadius = CesiumMath.clamp(radius + delta, minRadius, maxRadius);
-    const scale = newRadius / radius;
-    this.position.x *= scale;
-    this.position.y *= scale;
-    this.position.z *= scale;
+    const pos = this.position;
+    const s = Math.exp(delta);
+    // 锚 = 视线中心与「当前纬度地表球」的交点；看天空未命中时退回径向缩放
+    const anchor = this._pickSurfaceCentre();
+    let next: Cartesian3;
+    if (anchor) {
+      next = new Cartesian3(
+        anchor.x + (pos.x - anchor.x) * s,
+        anchor.y + (pos.y - anchor.y) * s,
+        anchor.z + (pos.z - anchor.z) * s,
+      );
+    } else {
+      next = Cartesian3.multiplyByScalar(pos, s, new Cartesian3());
+    }
+    // 贴地/上限钳制：沿径向抬回安全高度（触底时锚已近在脚下，跳变可忽略）
+    const r2 = Cartesian3.magnitude(next);
+    const minR = Camera.surfaceRadius(next) + 0.00002;
+    const clamped = CesiumMath.clamp(r2, minR, 50.0);
+    if (clamped !== r2) {
+      const k = clamped / r2;
+      next.x *= k;
+      next.y *= k;
+      next.z *= k;
+    }
+    this.position.x = next.x;
+    this.position.y = next.y;
+    this.position.z = next.z;
     this._viewDirty = true;
+  }
+
+  /**
+   * Intersection of the view-centre ray with the "surface-radius sphere" at
+   * the camera's latitude (WGS84 fast approximation). Used as the zoom
+   * anchor; null when the view centre misses the ground.
+   */
+  private _pickSurfaceCentre(): Cartesian3 | null {
+    const dir = Cartesian3.normalize(this.direction, new Cartesian3());
+    const surface = Camera.surfaceRadius(this.position);
+    // |o + t·d|² = surface² → t² + 2(o·d)t + (|o|² − surface²) = 0
+    const b = 2.0 * Cartesian3.dot(this.position, dir);
+    const c = Cartesian3.magnitudeSquared(this.position) - surface * surface;
+    const disc = b * b - 4.0 * c;
+    if (disc < 0.0) return null;
+    const t = (-b - Math.sqrt(disc)) * 0.5;
+    if (t <= 0.0) return null;
+    return new Cartesian3(
+      this.position.x + dir.x * t,
+      this.position.y + dir.y * t,
+      this.position.z + dir.z * t,
+    );
   }
 
   /**
