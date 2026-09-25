@@ -220,7 +220,11 @@ export class Camera {
    * @param delta - negative = zoom in, positive = zoom out
    */
   zoom(delta: number): void {
-    const minRadius = 1.05; // just above surface
+    // 下限贴「当前纬度椭球地表」+ ~127m 余量（近似公式误差 <20m）。椭球
+    // 线性归一化世界中纬度地表矢长 ≈0.999x（单位球面下方数 km）——绝对
+    // 值 1.05 会让滚轮第一步就把相机钳到球面上方 319km；余量过大（km 级）
+    // 则用户永远滚不进模型尺度（94 示例拉近全黑的滚轮路径根因与残留）。
+    const minRadius = Camera.surfaceRadius(this.position) + 0.00002;
     const maxRadius = 50.0;
     const radius = Cartesian3.magnitude(this.position);
     const newRadius = CesiumMath.clamp(radius + delta, minRadius, maxRadius);
@@ -420,10 +424,12 @@ export class Camera {
     this.position.y = pivot.y + arm.y;
     this.position.z = pivot.z + arm.z;
 
-    // Clamp to minimum altitude (1.05 = Earth radius + 5 % safety margin above surface)
+    // Clamp to minimum altitude：贴当前纬度椭球地表 + ~127m 余量
+    // （绝对 1.05 是单位球假设，椭球世界一拖拽就会把相机推到球面上方 319km）
+    const minR = Camera.surfaceRadius(this.position) + 0.00002;
     const r = Cartesian3.magnitude(this.position);
-    if (r < 1.05) {
-      const scale = 1.05 / r;
+    if (r < minR) {
+      const scale = minR / r;
       this.position.x *= scale;
       this.position.y *= scale;
       this.position.z *= scale;
@@ -433,6 +439,19 @@ export class Camera {
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  /**
+   * WGS84 椭球地表矢长（归一化单位）在给定方向上的快速近似：
+   * 1 − (e²/2)·sin²φ，误差 < 20 m。引擎的「椭球 ECEF 线性归一化」世界中
+   * 纬度 30.5° 地表 ≈ 0.99914（单位球面下方 ~5.5 km）——任何「地表高度」
+   * 判断（滚轮下限、拖拽钳制）都必须用它，严禁假设地表 = 1。
+   */
+  static surfaceRadius(position: Cartesian3): number {
+    const r = Cartesian3.magnitude(position);
+    if (r < 1e-9) return 1.0;
+    const sinLat = CesiumMath.clamp(position.z / r, -1.0, 1.0);
+    return 1.0 - 0.003349 * sinLat * sinLat;
+  }
 
   /**
    * Normalise a destination to internal ECEF units (Earth radius = 1).
