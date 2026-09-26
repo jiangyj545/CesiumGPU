@@ -9,6 +9,8 @@
  *    ToneMappingPass），供 postProcess.enabled 时使用。
  * 两变体共享 SHADER_CORE —— 主体只有一份，尾段分叉。
  */
+import { SHADOW_RECEIVER_MODULE } from './ShadowShader';
+
 const SHADER_CORE = /* wgsl */`
 // ── Uniforms ──────────────────────────────────────────────────────────────────
 
@@ -161,5 +163,49 @@ const TAIL_HDR = /* wgsl */`
 export const LIGHTING_SHADER = SHADER_CORE + TAIL_LDR;
 
 export const LIGHTING_SHADER_HDR = SHADER_CORE + TAIL_HDR;
+
+// ── A1 CSSM 级联阴影变体 ─────────────────────────────────────────────────────
+//
+// 以锚点替换把 SHADOW_RECEIVER_MODULE 注入 SHADER_CORE，形成 4 变体中的
+// 带阴影 2 个（LDR / HDR 尾段复用）。无阴影的 LIGHTING_SHADER / _HDR 逐字节
+// 不变 —— LightingPass 走原管线变体即零回归。
+
+/** 光照循环锚点：唯一匹配 fs_main 中的 directional 光累加循环。 */
+const LOOP_ANCHOR = `  for (var i: u32 = 0u; i < lighting.lightCount; i++) {
+    color += computeDirectionalLight(lighting.lights[i], normal, viewDir, albedo);
+  }`;
+
+/** 带阴影的循环：仅第 0 盏光（太阳）乘 CSSM 阴影因子。 */
+const LOOP_SHADOWED = `  let viewDist = length(worldPos - camera.cameraPosition.xyz);
+  for (var i: u32 = 0u; i < lighting.lightCount; i++) {
+    var shadowFactor = 1.0;
+    if (i == 0u) {
+      shadowFactor = cssmShadowFactor(worldPos, normal, viewDist);
+    }
+    color += shadowFactor * computeDirectionalLight(lighting.lights[i], normal, viewDir, albedo);
+  }`;
+
+/** fs_main 前插入锚点：阴影 uniform/采样器/辅助函数声明插入点。 */
+const FRAGMENT_ANCHOR = `@fragment
+fn fs_main(in: VSOut)`;
+
+/**
+ * 把 CSSM receiver 模块注入光照核心。
+ * 两个锚点都必须恰好命中，否则抛错（禁止静默产出错误 shader）。
+ */
+export function injectShadowCore(core: string): string {
+  if (!core.includes(FRAGMENT_ANCHOR) || !core.includes(LOOP_ANCHOR)) {
+    throw new Error('LightingShader.injectShadowCore: SHADER_CORE anchors drifted — update LOOP_ANCHOR/FRAGMENT_ANCHOR');
+  }
+  return core
+    .replace(FRAGMENT_ANCHOR, SHADOW_RECEIVER_MODULE + FRAGMENT_ANCHOR)
+    .replace(LOOP_ANCHOR, LOOP_SHADOWED);
+}
+
+/** CSSM 阴影 + LDR 尾段（旧内嵌 Reinhard + gamma）。 */
+export const LIGHTING_SHADER_SHADOW = injectShadowCore(SHADER_CORE) + TAIL_LDR;
+
+/** CSSM 阴影 + HDR 直通尾段（配 ToneMappingPass）。 */
+export const LIGHTING_SHADER_SHADOW_HDR = injectShadowCore(SHADER_CORE) + TAIL_HDR;
 
 export default LIGHTING_SHADER;

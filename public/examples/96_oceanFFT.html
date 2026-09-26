@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>示例 96：FFT 海洋 L2 五件套（焦散/大气/泡沫/船迹/折射）- CesiumGPU</title>
+  <title>示例 96：FFT 海洋 L3（五件套 + CSSM 船体阴影 + 水下模式）- CesiumGPU</title>
   <style>
     .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:340px;max-width:460px;
       padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
@@ -22,10 +22,10 @@
 <body>
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
-    <h1>96 FFT 海洋 · L2 五件套</h1>
-    <p class="desc">FFT 谱海面 + <b>L2 集成五件套</b>：物理大气（Hillaire LUT）、
-      浅滩沙洲焦散（OceanCaustics+CausticsFloor）、程序泡沫图案（阈值化）、
-      船迹波场（Havelock 压力 + 开尔文尾迹）与水面折射（场景颜色历史采样）。
+    <h1>96 FFT 海洋 · L3（五件套 + 阴影 + 水下）</h1>
+    <p class="desc">FFT 谱海面 + <b>L2 五件套</b>（物理大气 / 沙洲焦散 / 程序泡沫 /
+      船迹波场 / 水面折射）+ <b>L3</b>：CSSM 级联船体阴影（海面 PCF 软边接收，
+      太阳方向与大气/海洋同源）与水下模式（海面双面视角 + 水下观感叠加）。
       巡航船沿椭圆航线自动航行，船体随航向转向。</p>
     <label>风速 <b id="windSpeedVal">8.0</b> m/s</label>
     <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="8" />
@@ -45,7 +45,11 @@
       <label class="checkline"><input id="wakeToggle" type="checkbox" checked /> 船迹波场</label>
       <label class="checkline"><input id="skyToggle" type="checkbox" checked /> 物理大气</label>
       <label class="checkline"><input id="refractionToggle" type="checkbox" checked /> 水面折射</label>
+      <label class="checkline"><input id="shadowToggle" type="checkbox" checked /> 船体阴影</label>
     </div>
+    <button id="diveBtn" style="margin-top:10px;width:100%;padding:6px 0;cursor:pointer;
+      background:#12395c;color:#8ee6ff;border:1px solid rgba(120,180,255,.4);border-radius:6px;
+      font-size:13px;">潜水（海面下 3 m）</button>
   </div>
   <script src="./js/demo-utils.js"></script>
   <script type="module">
@@ -58,6 +62,10 @@
       const METERS_PER_DEG = 111320;
       const R_EARTH = engine.Cartesian3.EARTH_RADIUS; // 6378137
       const context = viewer.scene.context;
+
+      // L3 太阳方向同源联动：DirectionalLight.direction 是光传播方向
+      //（太阳→场景，即 -SUN）。CSSM 阴影取 lights[0]，与海洋高光/大气同源。
+      viewer.scene.lights[0].direction = [-SUN[0], -SUN[1], -SUN[2]];
 
       // ── 1. 后处理开启（折射需要 _sceneColorRT 路径；海面高光吃 bloom）──
       viewer.scene.postProcess.enabled = true;
@@ -116,12 +124,21 @@
       floor.bindCaustics(caustics);
 
       // ── 6. effects 挂载顺序即执行顺序：wake(数据) → sky(背景) → ocean
-      //      → caustics(纹理生成) → floor(半透明叠画在水面上) ────────────
+      //      → caustics(纹理生成) → floor(半透明叠画在水面上) → uwFog(全屏罩)
+      const uwFog = new engine.UnderwaterFog(context, {
+        intensity: 1.15,
+        waterColor: [0.05, 0.24, 0.27],
+        particleDensity: 0.6,
+      });
       viewer.scene.effects.add(wakeField);
       viewer.scene.effects.add(sky);
       viewer.scene.effects.add(ocean);
       viewer.scene.effects.add(caustics);
       viewer.scene.effects.add(floor);
+      viewer.scene.effects.add(uwFog); // L3 水下观感：罩在所有场景效果之上
+
+      // ── 6b. L3 海面阴影接收：每帧从 scene.shadow 拉取最新级联绑定 ─────
+      ocean.setShadowSource(() => viewer.scene.shadow.receiverBinding());
 
       // ── 7. 滑杆 → setter 联动 ─────────────────────────────────────────
       function bindSlider(sliderId, valId, fmt, apply) {
@@ -177,6 +194,11 @@
       viewer.scene.addPrimitive(hull);   // 预建入场（渲染中途动态 add 曾静默卡死）
       viewer.scene.addPrimitive(cabin);
 
+      // ── 8b. L3 CSSM 船体阴影：开启级联 + 双图元注册 caster ────────────
+      viewer.scene.shadow.enabled = true;
+      viewer.scene.shadow.addCaster(hull);
+      viewer.scene.shadow.addCaster(cabin);
+
       // 局部平面（东/北米）→ 经纬度（与 ocean planeXZ 同域同原点）
       function planeToLonLat(px, pz) {
         return [
@@ -231,6 +253,50 @@
       let boatSpeed = 6;
       let lastT = performance.now() / 1000;
       const lastBoat = { planeX: 0, planeZ: 0, heading: 0, speed: 0 };
+
+      // ── 9b. L3 潜水：水上机位 ↔ 海面下 3 m 机位互切 ────────────────────
+      // 归一化 ECEF → [lon, lat, heightM]。引擎 ecefFromLonLatHeight 的归一化
+      // 世界是「x 不压、y/z 双乘 ρ」的线性约定（非绕极轴旋转椭球！），逆解
+      // 必须逐分量除回 ρ：
+      //   p = (cl·co, cl·si·ρ, sl·ρ)·s，s = 1 + h/R
+      //   → lon = atan2(p1/ρ, p0)，lat = atan2(p2/ρ, hypot(p0, p1/ρ))，
+      //     s = hypot(p0, p1/ρ, p2/ρ)（与正向公式严格互逆）。
+      const POLAR_RATIO = 6356752.3142 / 6378137;
+      function ecefToLonLatHeight(p) {
+        const y = p[1] / POLAR_RATIO, z = p[2] / POLAR_RATIO;
+        const lon = Math.atan2(y, p[0]) * 180 / Math.PI;
+        const lat = Math.atan2(z, Math.hypot(p[0], y)) * 180 / Math.PI;
+        return [lon, lat, (Math.hypot(p[0], y, z) - 1) * R_EARTH];
+      }
+      // 海面模长（中心纬度椭球面）：水下判定基准
+      const seaP = [0, 0, 0];
+      engine.ecefFromLonLatHeight(CEN_LON, CEN_LAT, 0, seaP);
+      const seaLen = Math.hypot(seaP[0], seaP[1], seaP[2]);
+
+      let uwMode = false;
+      let savedAbove = null; // 潜水前水上机位快照 { lon, lat, height }
+      function setDive(on) {
+        if (on === uwMode) return;
+        uwMode = on;
+        const pos = viewer.camera.position; // 归一化 ECEF
+        const [lon, lat, height] = ecefToLonLatHeight([pos.x, pos.y, pos.z]);
+        if (on) {
+          savedAbove = { lon, lat, height };
+          viewer.camera.flyTo({
+            destination: { lon, lat, height: -3 },   // 海面下 3 m（保持经纬）
+            orientation: { heading: 0, pitch: 15 * Math.PI / 180 }, // 上仰看水面
+          });
+        } else if (savedAbove) {
+          viewer.camera.flyTo({
+            destination: { lon: savedAbove.lon, lat: savedAbove.lat, height: savedAbove.height },
+            orientation: { heading: 0, pitch: -25 * Math.PI / 180 },
+          });
+        }
+        const btn = document.getElementById('diveBtn');
+        if (btn) btn.textContent = on ? '上浮（恢复水上机位）' : '潜水（海面下 3 m）';
+      }
+      document.getElementById('diveBtn').addEventListener('click', () => { setDive(!uwMode); });
+
       function tick() {
         const now = performance.now() / 1000;
         const dt = Math.min(0.1, Math.max(0, now - lastT));
@@ -248,6 +314,13 @@
         hull.modelMatrix = m;
         cabin.modelMatrix = m;
         lastBoat.planeX = px; lastBoat.planeZ = pz; lastBoat.heading = heading; lastBoat.speed = boatSpeed;
+
+        // L3：相机模长 < 海面模长 → 水下（自动联动 UnderwaterFog + 海面双面视角，
+        // 用户手动飞入/飞出水层时无需点按钮）
+        const cp = viewer.camera.position;
+        const under = Math.hypot(cp.x, cp.y, cp.z) < seaLen;
+        uwFog.setUnderwater(under);
+        ocean.setUnderwaterView(under);
         requestAnimationFrame(tick);
       }
       requestAnimationFrame(tick);
@@ -267,6 +340,9 @@
       document.getElementById('refractionToggle').addEventListener('change', (e) => {
         ocean.setRefraction(e.target.checked);
       });
+      document.getElementById('shadowToggle').addEventListener('change', (e) => {
+        viewer.scene.shadow.enabled = e.target.checked;
+      });
 
       // ── 11. QA 钩子（CDP 终验用：等效于面板操作）──────────────────────
       const ck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
@@ -283,6 +359,27 @@
         setRefraction(b) { ocean.setRefraction(b); ck('refractionToggle', b); },
         setFoamPattern(b) { ocean.bindFoamPattern(b ? foamPattern : null); },
         getBoat: () => ({ ...lastBoat }),
+        // ── L3 探针扩展 ────────────────────────────────────────────────
+        setShadow(b) { viewer.scene.shadow.enabled = b; ck('shadowToggle', b); },
+        setTimeScale(v) {
+          ocean.setTimeScale(v);
+          const el = document.getElementById('timeScale');
+          if (el) { el.value = String(v); document.getElementById('timeScaleVal').textContent = v.toFixed(1); }
+        },
+        setDive: (b) => setDive(b),
+        getUnderwater: () => ({ fog: uwFog.underwater, view: ocean.underwaterView, mode: uwMode }),
+        shadowInfo: () => ({
+          enabled: viewer.scene.shadow.enabled,
+          casters: viewer.scene.shadow.casterCount,
+          splitsM: viewer.scene.shadow.splitEndsMetres,
+        }),
+        focusBoat() { // 近景对准船体（阴影终验用）
+          const [blon, blat] = planeToLonLat(lastBoat.planeX, lastBoat.planeZ);
+          viewer.camera.flyTo({
+            destination: { lon: blon, lat: blat - 0.00028, height: 42 },
+            orientation: { heading: 0, pitch: -38 * Math.PI / 180 },
+          });
+        },
       };
 
       // ── 12. 初始视角：海域南缘上空 450 m，俯角约 -25° 望向中心 ────────

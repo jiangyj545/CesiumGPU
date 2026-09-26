@@ -293,6 +293,28 @@ export class Primitive {
     pass.drawIndexed(this._indexCount);
   }
 
+  /**
+   * A1 CSSM：把本图元绘制进级联深度 pass（depth-only，无颜色目标）。
+   * 组 1 复用 `_opaqueModelBindGroup` —— 阴影管线必须以
+   * `opaquePipeline.getBindGroupLayout(1)`（同一身份）构建管线，本方法
+   * 才能跨管线共用该 bind group（先例 buildUnlitPipeline）。
+   *
+   * @param pass              - 激活中的级联深度 render pass encoder
+   * @param shadowCameraGroup - 该级联的光源 view-proj bind group（组 0）
+   */
+  drawShadow(pass: GPURenderPassEncoder, shadowCameraGroup: GPUBindGroup): void {
+    if (!this.show || this._translucent) return;
+    if (!this._opaqueModelBindGroup) return;
+
+    this._updateModelUBO();
+
+    pass.setBindGroup(0, shadowCameraGroup);
+    pass.setBindGroup(1, this._opaqueModelBindGroup);
+    pass.setVertexBuffer(0, this._vertexBuffer);
+    pass.setIndexBuffer(this._indexBuffer, 'uint32');
+    pass.drawIndexed(this._indexCount);
+  }
+
   // ── Transparent rendering ──────────────────────────────────────────────────
 
   private _transparentModelBindGroup: GPUBindGroup | null = null;

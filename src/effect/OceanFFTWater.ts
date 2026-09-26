@@ -17,6 +17,8 @@ import {
   OCEAN_RENDER_PARAMS_UBO_BYTES,
 } from '../shaders/OceanFFTShader';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
+import { SHADOW_RECEIVER_UBO_SIZE } from '../shadow/ShadowMap';
+import type { ShadowReceiverBinding } from '../shadow/ShadowMap';
 import type { FoamPatternTexture } from './FoamPatternTexture';
 import type { WakeField } from './WakeField';
 import type { FFTDataSource } from './OceanCaustics';
@@ -156,6 +158,10 @@ export class OceanFFTWater implements IPass {
   private _refraction: boolean;
   /** 场景颜色历史来源（Scene.sceneColorHistory），null = 折射不混色。 */
   private _sceneHistorySource: (() => GPUTextureView | null) | null = null;
+  /** L3：CSSM 阴影源 getter（`() => scene.shadow.receiverBinding()`）。null = 无阴影。 */
+  private _shadowSource: (() => ShadowReceiverBinding | null) | null = null;
+  /** L3：水下视角（从下看水面：法线翻转 + 透射青绿 + 高光弱化）。 */
+  private _underwaterView = false;
   /** 导数纹理全 mip 2d-array 视图（FFTDataSource 公开 + 渲染绑定共用）。 */
   private _derivTextureView: GPUTextureView | null = null;
   /** 折射/船迹用 linear clamp 采样器（repeat 主采样器不适合非平铺纹理）。 */
@@ -191,6 +197,13 @@ export class OceanFFTWater implements IPass {
   private _bgFoam: GPUTextureView | null = null;
   private _bgWake: GPUTextureView | null = null;
   private _bgHist: GPUTextureView | null = null;
+  /** L3 阴影缓存键：源 UBO 身份（ShadowMap 重建 GPU 资源后引用会换）。 */
+  private _bgShadow: GPUBuffer | null = null;
+  /** L3：阴影未激活时的占位资源（1×1 depth 2d-array + 全零 UBO + comparison）。 */
+  private _shadowFallbackTex: GPUTexture | null = null;
+  private _shadowFallbackView: GPUTextureView | null = null;
+  private _shadowFallbackUBO: GPUBuffer | null = null;
+  private _shadowCmpSampler: GPUSampler | null = null;
   private _sampler: GPUSampler | null = null;
   private _vertexBuffer: GPUBuffer | null = null;
   private _indexBuffer: GPUBuffer | null = null;
@@ -351,6 +364,28 @@ export class OceanFFTWater implements IPass {
     this._sceneHistorySource = source;
   }
 
+  // ── L3 集成 API（海面阴影接收 / 水下双面视角）──────────────────────────
+
+  /**
+   * 注入 CSSM 阴影源（L3：`() => scene.shadow.receiverBinding()`）。
+   * getter 每帧惰性求值——阴影关闭 / 未就绪 / 失败时返回 null，海面绑定
+   * 占位资源（全零 UBO），shader 侧 params.x=0 短路，阴影因子恒 1（零回归）。
+   * 级联矩阵在共享 UBO 内由 ShadowMap.execute 每帧更新，相机移动自动跟随。
+   */
+  setShadowSource(source: (() => ShadowReceiverBinding | null) | null): void {
+    this._shadowSource = source;
+  }
+
+  /** 水下视角（从下看水面）：法线翻转 + 透射青绿 + 高光弱化 + 菲涅尔反转。 */
+  setUnderwaterView(on: boolean): void {
+    this._underwaterView = on;
+  }
+
+  /** 当前是否处于水下视角（验证探针用）。 */
+  get underwaterView(): boolean {
+    return this._underwaterView;
+  }
+
   /** 导数纹理视图（rgba16float 2d-array 全 mip）——{@link FFTDataSource}。 */
   get derivativeTexture(): GPUTextureView | null {
     return this._derivTextureView;
@@ -439,6 +474,7 @@ export class OceanFFTWater implements IPass {
     RP[13] = this._wake && this._wake.fieldView ? 1 : 0;
     RP[14] = this._refraction ? 1 : 0;
     RP[15] = 0.045; // 折射扰动强度（NDC 域，∝法线水平分量）
+    RP[20] = this._underwaterView ? 1 : 0; // L3 水下视角
     if (this._wake && this._wake.fieldView) {
       // uv = planeXZ * scale + offset；offset = -windowOrigin / windowSizeM
       const winM = this._wake.gridN * this._wake.cellM;
@@ -454,7 +490,14 @@ export class OceanFFTWater implements IPass {
     const foamView = this._foamPattern?.view ?? this._fallbackView!;
     const wakeView = (this._wake && RP[13] > 0.5) ? this._wake.fieldView! : this._fallbackView!;
     const histView = this._refraction ? (this._sceneHistorySource?.() ?? this._fallbackView!) : this._fallbackView!;
-    if (!this._renderBindGroup || foamView !== this._bgFoam || wakeView !== this._bgWake || histView !== this._bgHist) {
+    // L3：每帧惰性求值阴影源（Scene.render 中 shadow.execute 已先于 effects
+    // 更新共享 UBO → 级联矩阵随相机移动自动最新）；null 换占位资源。
+    const shadowSrc = this._shadowSource?.() ?? null;
+    const shUbo = shadowSrc?.ubo ?? this._shadowFallbackUBO!;
+    const shView = shadowSrc?.textureView ?? this._shadowFallbackView!;
+    const shSmp = shadowSrc?.comparisonSampler ?? this._shadowCmpSampler!;
+    if (!this._renderBindGroup || foamView !== this._bgFoam || wakeView !== this._bgWake
+      || histView !== this._bgHist || shUbo !== this._bgShadow) {
       this._renderBindGroup = this._context.device.createBindGroup({
         layout: this._renderBindGroupLayout,
         entries: [
@@ -468,11 +511,15 @@ export class OceanFFTWater implements IPass {
           { binding: 7, resource: wakeView },
           { binding: 8, resource: histView },
           { binding: 9, resource: this._clampSampler! },
+          { binding: 10, resource: { buffer: shUbo } },
+          { binding: 11, resource: shView },
+          { binding: 12, resource: shSmp },
         ],
       });
       this._bgFoam = foamView;
       this._bgWake = wakeView;
       this._bgHist = histView;
+      this._bgShadow = shUbo;
     }
 
     const camData = new Float32Array(CAMERA_UBO_SIZE / 4);
@@ -518,6 +565,13 @@ export class OceanFFTWater implements IPass {
     this._bgFoam = null;
     this._bgWake = null;
     this._bgHist = null;
+    this._bgShadow = null;
+    this._shadowFallbackTex?.destroy();
+    this._shadowFallbackUBO?.destroy();
+    this._shadowFallbackTex = null;
+    this._shadowFallbackView = null;
+    this._shadowFallbackUBO = null;
+    this._shadowCmpSampler = null;
     this._clampSampler = null;
     this._vertexBuffer = null;
     this._indexBuffer = null;
@@ -710,6 +764,29 @@ export class OceanFFTWater implements IPass {
         );
         this._fallbackView = this._fallbackTex.createView();
       }
+
+      // L3 阴影占位资源：1×1 depth32float 2d-array + 全零 UBO + comparison 采样器。
+      // UBO 不写即全零 → params.x=0 → cssmShadowFactor 短路返回 1（阴影零回归）。
+      if (!this._shadowFallbackTex) {
+        this._shadowFallbackTex = device.createTexture({
+          label: 'OceanFFTShadowFallback',
+          size: [1, 1, 1],
+          format: 'depth32float',
+          usage: GPUTextureUsage.TEXTURE_BINDING,
+        });
+        this._shadowFallbackView = this._shadowFallbackTex.createView({
+          label: 'OceanFFTShadowFallbackView',
+          dimension: '2d-array',
+          arrayLayerCount: 1,
+        });
+      }
+      this._shadowFallbackUBO ??= device.createBuffer({
+        label: 'OceanFFTShadowFallbackUBO',
+        size: SHADOW_RECEIVER_UBO_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this._shadowCmpSampler ??= this._context.createSampler({ compare: 'less' });
+
       this._derivTextureView ??= this._derivTex!.createView({ dimension: '2d-array' });
 
       const module = this._context.createShaderModule(OCEAN_FFT_RENDER_SHADER, 'OceanFFTRenderShader');
@@ -729,6 +806,11 @@ export class OceanFFTWater implements IPass {
           { binding: 7, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }, // wake field（VS 采样高度）
           { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },            // scene color history
           { binding: 9, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }, // clamp
+          // L3 CSSM 阴影接收（FRAGMENT 专用）：级联 UBO + depth2d-array + comparison。
+          // 未激活阴影时绑占位资源（BGL 恒全绑定；全零 UBO → shader 因子恒 1）。
+          { binding: 10, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: SHADOW_RECEIVER_UBO_SIZE } },
+          { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', viewDimension: '2d-array', multisampled: false } },
+          { binding: 12, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
         ],
       });
 

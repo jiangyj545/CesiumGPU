@@ -169,6 +169,10 @@ export { FoamPatternTexture } from './effect/FoamPatternTexture';
 export type { FoamPatternTextureOptions } from './effect/FoamPatternTexture';
 export { WakeField } from './effect/WakeField';
 export type { WakeFieldOptions, WakeSource } from './effect/WakeField';
+
+// L3 水下观感全屏叠加（蓝绿深度雾 + 浮游颗粒 + 焦散缓动）
+export { UnderwaterFog } from './effect/UnderwaterFog';
+export type { UnderwaterFogOptions } from './effect/UnderwaterFog';
 // 归一化 ECEF 单一来源：示例层（96 船体定位）与引擎共用同一换算
 export { ecefFromLonLatHeight } from './terrain/TerrainProvider';
 
@@ -289,3 +293,21 @@ export {
   parseRtcCenter,
 } from './tileset/B3dmDecoder';
 export type { RtcCenter } from './tileset/B3dmDecoder';
+
+// A1 CSSM 级联阴影（太阳方向平行光 3 级联正交阴影）
+export { ShadowMap } from './shadow/ShadowMap';
+export type { ShadowReceiverBinding } from './shadow/ShadowMap';
+export {
+  SHADOW_RECEIVER_UBO_SIZE,
+  SHADOW_CASCADE_COUNT,
+  computeCascadeSplitEnds,
+  computeLightBasis,
+  computeCascadeCorners,
+  fitLightOrtho,
+} from './shadow/ShadowMap';
+export { SHADOW_DEPTH_SHADER, SHADOW_RECEIVER_MODULE } from './shaders/ShadowShader';
+export {
+  LIGHTING_SHADER_SHADOW,
+  LIGHTING_SHADER_SHADOW_HDR,
+  injectShadowCore,
+} from './shaders/LightingShader';

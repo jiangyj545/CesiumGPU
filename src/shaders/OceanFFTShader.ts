@@ -519,13 +519,14 @@ struct CameraUniforms {
   nearFar         : vec2<f32>,     // @224 (8B)
 }
 
-// 80B 渲染侧参数（B1 集成扩展：flags + 船迹窗口 uv 映射）
+// 96B 渲染侧参数（B1 flags/船迹 + L3 水下视角）
 struct OceanRenderParams {
-  sunDir    : vec4<f32>,  // 指向太阳（归一化，归一化 ECEF 空间）
-  deepColor : vec4<f32>,  // 深水基色
-  skyColor  : vec4<f32>,  // 天空/雾色
-  flags     : vec4<f32>,  // x 泡沫图案开 / y 船迹开 / z 折射开 / w 折射强度
-  wakeUv    : vec4<f32>,  // 船迹 uv = planeXZ*zw + xy（窗口米 → [0,1)）
+  sunDir     : vec4<f32>,  // 指向太阳（归一化，归一化 ECEF 空间）
+  deepColor  : vec4<f32>,  // 深水基色
+  skyColor   : vec4<f32>,  // 天空/雾色
+  flags      : vec4<f32>,  // x 泡沫图案开 / y 船迹开 / z 折射开 / w 折射强度
+  wakeUv     : vec4<f32>,  // 船迹 uv = planeXZ*zw + xy（窗口米 → [0,1)）
+  underwater : vec4<f32>,  // L3 x 水下视角开（从下看水面，其余保留）
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
@@ -538,6 +539,65 @@ struct OceanRenderParams {
 @group(0) @binding(7) var wakeTex : texture_2d<f32>;        // A4 船迹波场（VS 采样高度）
 @group(0) @binding(8) var sceneHistTex : texture_2d<f32>;   // 场景颜色历史（折射）
 @group(0) @binding(9) var clampSmp : sampler;               // 非平铺纹理用 clamp 采样
+
+// ── A1 CSSM 级联阴影接收（L3：组 0 内 10-12，布局同 LightingPass 组 2）──────
+// ShadowUniforms 布局（256B，单一来源 ShadowMap._rxData 写入端）：
+//   cascadeMatrix @0（3×光源 view-proj）/ splitEnds @192 / texelSizes @208 /
+//   params @224（x=enabled y=depthBias z=normalOffsetScale w=mapSize）。
+// 未注入 scene.shadow 时 CPU 侧绑定占位资源（全零 UBO → params.x=0 短路恒 1）。
+struct ShadowUniforms {
+  cascadeMatrix : array<mat4x4<f32>, 3>,
+  splitEnds     : vec4<f32>,
+  texelSizes    : vec4<f32>,
+  params        : vec4<f32>,
+}
+
+@group(0) @binding(10) var<uniform> shadow     : ShadowUniforms;
+@group(0) @binding(11) var           shadowTex : texture_depth_2d_array;
+@group(0) @binding(12) var           shadowCmp : sampler_comparison;
+
+// 按视距（归一化单位）选级联；超出覆盖范围返回 -1（无阴影）。
+fn cssmSelectCascade(viewDist: f32) -> i32 {
+  if (viewDist < shadow.splitEnds.x) { return 0; }
+  if (viewDist < shadow.splitEnds.y) { return 1; }
+  if (viewDist < shadow.splitEnds.z) { return 2; }
+  return -1;
+}
+
+// PCF 3×3 comparison 采样（与 LightingShader 注入的 SHADOW_RECEIVER_MODULE
+// 同款级联选择 + normal-offset + bias）。返回 1 = 全光照，0 = 全影。
+fn cssmShadowFactor(worldPos: vec3<f32>, normal: vec3<f32>, viewDist: f32) -> f32 {
+  if (shadow.params.x < 0.5) { return 1.0; }
+
+  let ci = cssmSelectCascade(viewDist);
+  if (ci < 0) { return 1.0; }
+
+  let texelW = select(
+    select(shadow.texelSizes.x, shadow.texelSizes.y, ci == 1),
+    shadow.texelSizes.z,
+    ci == 2);
+  let offsetPos = worldPos + normal * (texelW * shadow.params.z);
+
+  let lp   = shadow.cascadeMatrix[ci] * vec4<f32>(offsetPos, 1.0);
+  let proj = lp.xyz / lp.w;
+
+  if (proj.x < -1.0 || proj.x > 1.0 || proj.y < -1.0 || proj.y > 1.0 || proj.z < 0.0 || proj.z >= 1.0) {
+    return 1.0;
+  }
+
+  let uv = vec2<f32>(proj.x * 0.5 + 0.5, 0.5 - 0.5 * proj.y);
+  // 'ref' 是 WGSL 保留字 —— 比较参考深度命名 refDepth。
+  let refDepth = proj.z - shadow.params.y;
+  let texelUV  = 1.0 / shadow.params.w;
+  var sum = 0.0;
+  for (var dy: i32 = -1; dy <= 1; dy++) {
+    for (var dx: i32 = -1; dx <= 1; dx++) {
+      let tap = uv + vec2<f32>(f32(dx), f32(dy)) * texelUV;
+      sum += textureSampleCompareLevel(shadowTex, shadowCmp, tap, ci, refDepth);
+    }
+  }
+  return sum / 9.0;
+}
 
 const EARTH_SCALE : f32 = 6378137.0;
 const OCEAN_CASCADES : i32 = ${CASCADES};
@@ -653,16 +713,28 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let distM = distN * EARTH_SCALE;
   let viewDir = toCam / max( distN, 1e-9 );
 
-  // Schlick 菲涅尔（F0 ≈ 0.02 水面）
-  let ndv = clamp( dot( n, viewDir ), 0.0, 1.0 );
-  let fresnel = 0.02 + 0.98 * pow( 1.0 - ndv, 5.0 );
+  // 水下视角（L3）：从下看水面 → 光照法线翻转（几何法线 n 仍朝上，供阴影采样）
+  let uw = renderParams.underwater.x > 0.5;
+  let nLit = select( n, -n, uw );
 
-  // 太阳高光：高指数锐主瓣 + 宽 glitter 次瓣；波面压缩处略增粗糙
+  // 菲涅尔：水上 Schlick（F0 ≈ 0.02）；水下反转近似全内反射（掠射亮带更宽更陡）
+  let ndv = clamp( dot( nLit, viewDir ), 0.0, 1.0 );
+  let fresnel = select(
+    0.02 + 0.98 * pow( 1.0 - ndv, 5.0 ),
+    0.06 + 0.94 * pow( 1.0 - ndv, 1.6 ),
+    uw );
+
+  // 太阳高光：高指数锐主瓣 + 宽 glitter 次瓣；波面压缩处略增粗糙；水下弱化
   let sunDir = normalize( renderParams.sunDir.xyz );
   let hv = normalize( viewDir + sunDir );
-  let ndh = max( dot( n, hv ), 0.0 );
+  let ndh = max( dot( nLit, hv ), 0.0 );
   let rough = clamp( 1.0 + divg * 0.35, 0.6, 1.6 );
-  let spec = ( pow( ndh, 500.0 / rough ) * 2.2 + pow( ndh, 48.0 / rough ) * 0.30 ) * ( 0.25 + fresnel );
+  var spec = ( pow( ndh, 500.0 / rough ) * 2.2 + pow( ndh, 48.0 / rough ) * 0.30 ) * ( 0.25 + fresnel );
+  spec = select( spec, spec * 0.35, uw );
+
+  // CSSM 阴影因子（L3）：太阳直射贡献（太阳高光 + 天光反射）同乘，软边船影；
+  // 未绑定 scene.shadow / 已关闭时 params.x=0 短路恒 1（零回归）；水下不采样。
+  let shadowF = select( cssmShadowFactor( input.worldPos, n, distN ), 1.0, uw );
 
   // 船迹泡沫（A4 G 通道）叠加进 foam 累计值
   var wakeFoam = 0.0;
@@ -687,16 +759,19 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     albedoJit = 1.0 + ( p.b - 0.5 ) * 0.2;
   }
 
-  // 水色：深水 → 地平线浅色（距离混合）
+  // 水色：深水 → 地平线浅色（距离混合）；水下切换透射青绿（透光增强）
   let shallow = vec3<f32>( 0.075, 0.19, 0.27 );
   let baseCol = mix( renderParams.deepColor.rgb, shallow, smoothstep( 150.0, 5000.0, distM ) );
-  var col = baseCol * ( 0.82 + 0.18 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
-    + renderParams.skyColor.rgb * fresnel * 0.9
-    + vec3<f32>( spec );
+  let uwWater = vec3<f32>( 0.10, 0.46, 0.42 );
+  let waterTint = select( baseCol, uwWater, uw );
+  var col = waterTint * ( 0.82 + 0.18 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
+    + renderParams.skyColor.rgb * fresnel * 0.9 * shadowF
+    + vec3<f32>( spec ) * shadowF;
 
   // 折射：法线水平分量扰动采样场景颜色历史（水体下方背景），
-  // 混合权重 ∝ (1-菲涅尔)；history 缺省绑 1×1 零纹理 → 采样为黑但不走此分支
-  if ( renderParams.flags.z > 0.5 ) {
+  // 混合权重 ∝ (1-菲涅尔)；history 缺省绑 1×1 零纹理 → 采样为黑但不走此分支；
+  // 水下视角跳过（历史为水上画面，语义不成立）
+  if ( renderParams.flags.z > 0.5 && !uw ) {
     let roff = vec2<f32>( nLocal.x, nLocal.z ) * renderParams.flags.w;
     let ruv = clamp( input.screenUV + roff, vec2<f32>( 0.001 ), vec2<f32>( 0.999 ) );
     let under = textureSampleLevel( sceneHistTex, clampSmp, ruv, 0.0 ).rgb;
@@ -705,12 +780,14 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     col = mix( col, underCol + vec3<f32>( spec ), refrW );
   }
 
-  let foamWhite = vec3<f32>( 0.90, 0.94, 0.97 ) * ( 0.75 + 0.25 * fN + fineGlow );
+  var foamWhite = vec3<f32>( 0.90, 0.94, 0.97 ) * ( 0.75 + 0.25 * fN + fineGlow );
+  foamWhite = select( foamWhite, foamWhite * vec3<f32>( 0.35, 0.60, 0.62 ), uw ); // 水下泡沫偏暗青
   col = mix( col, foamWhite * albedoJit, foamMask * 0.92 );
 
-  // 距离雾：远处融入天空色（弱化网格边缘接缝）
+  // 距离雾：远处融入天空色（弱化网格边缘接缝）；水下远景融入水色
+  let fogCol = select( renderParams.skyColor.rgb, uwWater, uw );
   let fog = 1.0 - exp( - distM / FOG_DIST );
-  col = mix( col, renderParams.skyColor.rgb, fog * 0.95 );
+  col = mix( col, fogCol, fog * 0.95 );
 
   return vec4<f32>( col, 1.0 );
 }
@@ -718,5 +795,5 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 
 /** OceanParams uniform buffer 字节数（288B，见 struct 注释）。 */
 export const OCEAN_PARAMS_UBO_BYTES = 288;
-/** OceanRenderParams uniform buffer 字节数（80B：sunDir/deep/sky/flags/wakeUv）。 */
-export const OCEAN_RENDER_PARAMS_UBO_BYTES = 80;
+/** OceanRenderParams uniform buffer 字节数（96B：sunDir/deep/sky/flags/wakeUv/underwater）。 */
+export const OCEAN_RENDER_PARAMS_UBO_BYTES = 96;

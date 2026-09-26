@@ -4,7 +4,13 @@ import { DirectionalLight } from '../DirectionalLight';
 import { Camera } from '../Camera';
 import type { IPass } from './IPass';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../../renderer/CameraUniforms';
-import { LIGHTING_SHADER, LIGHTING_SHADER_HDR } from '../../shaders/LightingShader';
+import {
+  LIGHTING_SHADER,
+  LIGHTING_SHADER_HDR,
+  LIGHTING_SHADER_SHADOW,
+  LIGHTING_SHADER_SHADOW_HDR,
+} from '../../shaders/LightingShader';
+import type { ShadowReceiverBinding } from '../../shadow/ShadowMap';
 
 /** Maximum directional lights supported in the WGSL shader. */
 const MAX_LIGHTS = 8;
@@ -36,6 +42,14 @@ export class LightingPass implements IPass {
    * ToneMappingPass）。默认 false —— 旧 LDR 路径行为逐字节不变。
    */
   private _hdr = false;
+
+  /**
+   * A1 CSSM 阴影源（ShadowMap.receiverBinding()）。null = 无阴影管线
+   * 变体（LIGHTING_SHADER / _HDR 逐字节原样 —— 关闭时零回归）。
+   */
+  private _shadowSource: ShadowReceiverBinding | null = null;
+  private _shadowActive = false;
+  private _shadowBindGroup: GPUBindGroup | null = null;
 
   constructor(context: Context, gbufferPass: GBufferPass, outputFormat: GPUTextureFormat) {
     this._context      = context;
@@ -72,11 +86,33 @@ export class LightingPass implements IPass {
     this.prepare();
   }
 
+  /**
+   * A1 CSSM：接入 / 切换 / 摘除阴影源（Scene.render 每帧传入
+   * `shadow.receiverBinding()`；同一对象引用时零开销早退）。
+   * 非空 → 管线切到带阴影变体并建组 2；null → 回到原双组管线。
+   */
+  setShadowSource(source: ShadowReceiverBinding | null): void {
+    if (source === this._shadowSource) return;
+    this._shadowSource = source;
+    this._shadowActive = source !== null;
+    this._pipeline = null;
+    this.prepare();
+  }
+
   /** Build or rebuild the render pipeline and bind groups. */
   prepare(): void {
     const device = this._context.device;
+
+    // A1 CSSM：阴影开关 × HDR 开关 → 4 个 shader 变体。
+    const src = this._shadowSource;
+    const shadowReady = this._shadowActive &&
+      src !== null && !!src.ubo && !!src.textureView && !!src.comparisonSampler;
+    const shaderCode = this._hdr
+      ? (shadowReady ? LIGHTING_SHADER_SHADOW_HDR : LIGHTING_SHADER_HDR)
+      : (shadowReady ? LIGHTING_SHADER_SHADOW     : LIGHTING_SHADER);
+
     const shader = device.createShaderModule({
-      code: this._hdr ? LIGHTING_SHADER_HDR : LIGHTING_SHADER,
+      code: shaderCode,
       label: 'LightingShader',
     });
 
@@ -98,9 +134,28 @@ export class LightingPass implements IPass {
       ],
     });
 
+    // 组 2 仅在阴影激活时存在（无阴影管线保持 2 组，零回归）。
+    let bindGroupLayout2: GPUBindGroupLayout | null = null;
+    if (shadowReady && src) {
+      bindGroupLayout2 = device.createBindGroupLayout({
+        label: 'Lighting.BGL2',
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+          {
+            binding: 1,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: 'depth', viewDimension: '2d-array', multisampled: false },
+          },
+          { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
+        ],
+      });
+    }
+
     this._pipeline = device.createRenderPipeline({
       label:  'LightingPipeline',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout0, bindGroupLayout1] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: bindGroupLayout2
+        ? [bindGroupLayout0, bindGroupLayout1, bindGroupLayout2]
+        : [bindGroupLayout0, bindGroupLayout1] }),
       vertex:   { module: shader, entryPoint: 'vs_main' },
       fragment: {
         module:  shader,
@@ -132,6 +187,20 @@ export class LightingPass implements IPass {
         { binding: 3, resource: this._gbufferPass.sampler },
       ],
     });
+
+    // Group 2: CSSM 级联阴影（uniform + depth 数组纹理 + comparison 采样器）。
+    this._shadowBindGroup = null;
+    if (shadowReady && src && bindGroupLayout2) {
+      this._shadowBindGroup = device.createBindGroup({
+        label:  'Lighting.BG2',
+        layout: bindGroupLayout2,
+        entries: [
+          { binding: 0, resource: { buffer: src.ubo } },
+          { binding: 1, resource: src.textureView },
+          { binding: 2, resource: src.comparisonSampler },
+        ],
+      });
+    }
   }
 
   /**
@@ -230,6 +299,10 @@ export class LightingPass implements IPass {
     pass.setPipeline(this._pipeline);
     pass.setBindGroup(0, this._cameraBindGroup);
     pass.setBindGroup(1, this._gbufferBindGroup);
+    // A1 CSSM：阴影激活时补组 2（管线布局已含 BGL2）。
+    if (this._shadowActive && this._shadowBindGroup) {
+      pass.setBindGroup(2, this._shadowBindGroup);
+    }
     pass.draw(3); // full-screen triangle
     pass.end();
   }

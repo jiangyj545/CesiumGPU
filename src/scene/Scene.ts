@@ -21,6 +21,7 @@ import { EffectManager } from '../effect/EffectManager';
 import { PostProcessManager } from '../postprocessing/PostProcessManager';
 import { RenderTexture } from '../renderer/RenderTexture';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
+import { ShadowMap } from '../shadow/ShadowMap';
 
 /**
  * Scene - Orchestrates all rendering passes.
@@ -68,6 +69,14 @@ export class Scene {
 
   /** Directional lights in the scene (max 8). */
   readonly lights: DirectionalLight[] = [];
+
+  /**
+   * A1 CSSM 级联阴影管理器。默认 `enabled = false`（全链路零开销、零回归）。
+   * 开启：`scene.shadow.enabled = true` 后用 `scene.shadow.addCaster(primitive)`
+   * 注册投射体（Primitive 系）。深度 pass 在 Lighting 之前同 encoder 执行，
+   * LightingPass 以组 2 采样级联阴影图。
+   */
+  readonly shadow: ShadowMap;
 
   /**
    * Toggles per-primitive frustum culling (G-Buffer opaque loop, transparent
@@ -135,6 +144,7 @@ export class Scene {
     this._context = context;
 
     // None of these touch context.device — safe to call before initialize().
+    this.shadow = new ShadowMap(context);
     this.camera     = new Camera();
     this.globe      = new Globe(context);
     // Terrain-aware picking: pickGlobe snaps hits via globe.terrainLayer.
@@ -339,6 +349,15 @@ export class Scene {
     // No-op while globe.layers is empty (legacy single-texture path).
     this.globe.update(this.camera);
 
+    // ── A1 CSSM 阴影挂点 ──────────────────────────────────────────────────
+    // 深度 pass 必须先于 Lighting（receiver 同帧同 encoder 采样阴影图），
+    // frameHooks 在全部 pass 之后执行、来不及喂 Lighting —— 故在此以
+    // 最小挂点接入（渲染顺序不动；关阴影时 execute/receiverBinding 均为
+    // no-op/null，LightingPass 保持原双组管线逐字节回归安全）。
+    this.shadow.updateFrame(this.camera, this.lights);
+    this.shadow.execute(encoder, () => this.getOpaquePipeline());
+    this._lightingPass.setShadowSource(this.shadow.receiverBinding());
+
     // ── Pass loop: gbuffer → lighting → overlay → transparent ─────────────
     const swapChainView = ctx.getCurrentTextureView();
     const time = performance.now() / 1000;
@@ -406,6 +425,7 @@ export class Scene {
   }
 
   destroy(): void {
+    this.shadow.destroy();
     this._pickPass?.destroy();
     this._pickPass = null;
     this._postProcess?.destroy();
