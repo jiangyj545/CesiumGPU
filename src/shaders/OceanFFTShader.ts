@@ -519,11 +519,13 @@ struct CameraUniforms {
   nearFar         : vec2<f32>,     // @224 (8B)
 }
 
-// 48B 渲染侧参数
+// 80B 渲染侧参数（B1 集成扩展：flags + 船迹窗口 uv 映射）
 struct OceanRenderParams {
   sunDir    : vec4<f32>,  // 指向太阳（归一化，归一化 ECEF 空间）
   deepColor : vec4<f32>,  // 深水基色
   skyColor  : vec4<f32>,  // 天空/雾色
+  flags     : vec4<f32>,  // x 泡沫图案开 / y 船迹开 / z 折射开 / w 折射强度
+  wakeUv    : vec4<f32>,  // 船迹 uv = planeXZ*zw + xy（窗口米 → [0,1)）
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
@@ -532,10 +534,16 @@ struct OceanRenderParams {
 @group(0) @binding(3) var derivTex : texture_2d_array<f32>;
 @group(0) @binding(4) var smp : sampler;
 @group(0) @binding(5) var<uniform> renderParams : OceanRenderParams;
+@group(0) @binding(6) var foamTex : texture_2d<f32>;        // A3 泡沫图案（未绑定 1×1 占位）
+@group(0) @binding(7) var wakeTex : texture_2d<f32>;        // A4 船迹波场（VS 采样高度）
+@group(0) @binding(8) var sceneHistTex : texture_2d<f32>;   // 场景颜色历史（折射）
+@group(0) @binding(9) var clampSmp : sampler;               // 非平铺纹理用 clamp 采样
 
 const EARTH_SCALE : f32 = 6378137.0;
 const OCEAN_CASCADES : i32 = ${CASCADES};
 const FOG_DIST : f32 = 12000.0;
+// 泡沫图案世界平铺周期（米）：中频级联量级，图案不糊也不高频闪烁
+const FOAM_TILE_M : f32 = 28.0;
 // 遮挡球半径²：必须低于海面最小模长²。海面在纬度 φ 处
 // |p|² = cos²φ + sin²φ·polarRatio² ≥ polarRatio² ≈ 0.99331（极点最小），
 // 旧值 0.998² = 0.996004 会在中高纬（|φ| ≳ 39°）把海面划进球内——相机
@@ -569,6 +577,7 @@ struct VSOut {
   @builtin(position) clipPos : vec4<f32>,
   @location(0) worldPos : vec3<f32>,
   @location(1) planeXZ : vec2<f32>,
+  @location(2) screenUV : vec2<f32>,  // 折射采样场景颜色历史用（NDC → [0,1]）
 }
 
 @vertex
@@ -579,6 +588,13 @@ fn vs_main( input : VSIn ) -> VSOut {
     let d = textureSampleLevel( dispTex, smp, input.planeXZ / ocean.sizes[ c ].x, c, 0.0 );
     disp += d.xyz;
   }
+  // 船迹波高（A4，米）：planeXZ → 跟随窗口 uv，R 通道波高直接入竖直位移。
+  // textureSampleLevel 在分支内合法（仅 textureSample 受 uniform control flow 限制）
+  if ( renderParams.flags.y > 0.5 ) {
+    let wuv = input.planeXZ * renderParams.wakeUv.zw + renderParams.wakeUv.xy;
+    let wh = textureSampleLevel( wakeTex, clampSmp, wuv, 0.0 ).r;
+    disp.y += wh;
+  }
   // eastDir/northDir/upDir 是「每米归一化 ECEF 增量」（CPU 侧已除米数），
   // 位移纹理单位为米 → 直接线性组合；λ 已在 column kernel 写纹理时乘过
   let dispVec = ocean.eastDir * disp.x + ocean.upDir * disp.y + ocean.northDir * disp.z;
@@ -587,11 +603,13 @@ fn vs_main( input : VSIn ) -> VSOut {
   // 与 |worldPos|~0.5 直接相加会掉进 f32 ulp——先各自过 viewProj 再相加
   let clipBase = camera.viewProjMatrix * vec4<f32>( input.ecef, 1.0 );
   let clipDisp = camera.viewProjMatrix * vec4<f32>( dispVec, 0.0 );
+  let clip = clipBase + clipDisp;
 
   var out : VSOut;
-  out.clipPos = clipBase + clipDisp;
+  out.clipPos = clip;
   out.worldPos = input.ecef + dispVec;
   out.planeXZ = input.planeXZ;
+  out.screenUV = ( clip.xy / max( clip.w, 1e-6 ) ) * 0.5 + 0.5;
   return out;
 }
 
@@ -646,19 +664,49 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let rough = clamp( 1.0 + divg * 0.35, 0.6, 1.6 );
   let spec = ( pow( ndh, 500.0 / rough ) * 2.2 + pow( ndh, 48.0 / rough ) * 0.30 ) * ( 0.25 + fresnel );
 
-  // 泡沫：级联累计 × 双频程序噪声调制 → 白色覆盖
+  // 船迹泡沫（A4 G 通道）叠加进 foam 累计值
+  var wakeFoam = 0.0;
+  if ( renderParams.flags.y > 0.5 ) {
+    let wuv = input.planeXZ * renderParams.wakeUv.zw + renderParams.wakeUv.xy;
+    wakeFoam = textureSampleLevel( wakeTex, clampSmp, wuv, 0.0 ).g;
+  }
+  let coverage = clamp( foam + wakeFoam, 0.0, 1.0 );
+
+  // 泡沫遮罩：A3 图案阈值化（绑定图案且开关开启）或原 hash 噪声调制（零回归回退）
   let fN = vnoise( input.planeXZ * 1.7 ) * 0.6 + vnoise( input.planeXZ * 5.3 ) * 0.4;
-  let foamMask = clamp( foam * ( 0.45 + 1.1 * fN ), 0.0, 1.0 );
+  var foamMask = clamp( foam * ( 0.45 + 1.1 * fN ), 0.0, 1.0 );
+  var fineGlow = 0.0;
+  var albedoJit = 1.0;
+  if ( renderParams.flags.x > 0.5 ) {
+    // A3 阈值方案：coverage 驱动阈值 t，R 密度场 smoothstep 软边；
+    // G 细泡亮度 0.3-0.5、B 斑驳反照率 ±10%、A 条纹 ±0.1 偏置
+    let p = textureSampleLevel( foamTex, smp, input.planeXZ * ( 1.0 / FOAM_TILE_M ), 0.0 );
+    let t = 1.0 - coverage * 0.85;
+    foamMask = clamp( smoothstep( t - 0.04, t + 0.04, p.r ) + ( p.a - 0.5 ) * 0.2, 0.0, 1.0 );
+    fineGlow = p.g * coverage;
+    albedoJit = 1.0 + ( p.b - 0.5 ) * 0.2;
+  }
 
   // 水色：深水 → 地平线浅色（距离混合）
   let shallow = vec3<f32>( 0.075, 0.19, 0.27 );
   let baseCol = mix( renderParams.deepColor.rgb, shallow, smoothstep( 150.0, 5000.0, distM ) );
-  var col = baseCol * ( 0.82 + 0.18 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) )
+  var col = baseCol * ( 0.82 + 0.18 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
     + renderParams.skyColor.rgb * fresnel * 0.9
     + vec3<f32>( spec );
 
-  let foamWhite = vec3<f32>( 0.90, 0.94, 0.97 ) * ( 0.75 + 0.25 * fN );
-  col = mix( col, foamWhite, foamMask * 0.92 );
+  // 折射：法线水平分量扰动采样场景颜色历史（水体下方背景），
+  // 混合权重 ∝ (1-菲涅尔)；history 缺省绑 1×1 零纹理 → 采样为黑但不走此分支
+  if ( renderParams.flags.z > 0.5 ) {
+    let roff = vec2<f32>( nLocal.x, nLocal.z ) * renderParams.flags.w;
+    let ruv = clamp( input.screenUV + roff, vec2<f32>( 0.001 ), vec2<f32>( 0.999 ) );
+    let under = textureSampleLevel( sceneHistTex, clampSmp, ruv, 0.0 ).rgb;
+    let underCol = under * vec3<f32>( 0.60, 0.85, 0.90 ); // 水色吸收
+    let refrW = clamp( ( 1.0 - fresnel ) * 0.75, 0.0, 0.60 );
+    col = mix( col, underCol + vec3<f32>( spec ), refrW );
+  }
+
+  let foamWhite = vec3<f32>( 0.90, 0.94, 0.97 ) * ( 0.75 + 0.25 * fN + fineGlow );
+  col = mix( col, foamWhite * albedoJit, foamMask * 0.92 );
 
   // 距离雾：远处融入天空色（弱化网格边缘接缝）
   let fog = 1.0 - exp( - distM / FOG_DIST );
@@ -670,5 +718,5 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 
 /** OceanParams uniform buffer 字节数（288B，见 struct 注释）。 */
 export const OCEAN_PARAMS_UBO_BYTES = 288;
-/** OceanRenderParams uniform buffer 字节数（48B）。 */
-export const OCEAN_RENDER_PARAMS_UBO_BYTES = 48;
+/** OceanRenderParams uniform buffer 字节数（80B：sunDir/deep/sky/flags/wakeUv）。 */
+export const OCEAN_RENDER_PARAMS_UBO_BYTES = 80;

@@ -95,6 +95,15 @@ export class Scene {
    * 错误 —— 故 HDR 范围受 8bit 限制（已知限制，见 P2 报告）。
    */
   private _sceneColorRT: RenderTexture | null = null;
+  /**
+   * B1 折射用场景颜色历史：postProcess.enabled 时每帧把 _sceneColorRT
+   * copyTexture 进来（effects.execute 之前入队 → 特效采样到的是无特效的
+   * 底层场景色）。格式跟随交换链（与 _sceneColorRT 一致——copyTextureToTexture
+   * 要求源/目标同格式）。postProcess 未开启时保持 null（折射安全降级）。
+   * usage = RENDER_ATTACHMENT|TEXTURE_BINDING|COPY_DST（RenderTexture 固定
+   * 前两项，extraUsage 传 COPY_DST）。
+   */
+  private _sceneColorHistory: RenderTexture | null = null;
   private _gbufferPass: GBufferPass | null = null;
   private _lightingPass: LightingPass | null = null;
   private _transparentPass: TransparentPass | null = null;
@@ -340,13 +349,34 @@ export class Scene {
     let target = swapChainView;
     if (this.postProcess.enabled) {
       if (!this._sceneColorRT) {
+        // extraUsage COPY_SRC：折射需要把本 RT 拷入 history（原构造无 COPY_SRC，
+        // copyTextureToTexture 会触发 usage 校验错误）
         this._sceneColorRT = new RenderTexture(
-          ctx.device, ctx.preferredFormat, 'Scene.SceneColorRT');
+          ctx.device, ctx.preferredFormat, 'Scene.SceneColorRT', GPUTextureUsage.COPY_SRC);
       }
       this._sceneColorRT.ensure(this._width, this._height);
       target = this._sceneColorRT.view!;
       // LightingShader 双路径同步：HDR 直通 vs 旧 Reinhard+gamma
       this._lightingPass.setHdrOutput(true);
+
+      // ── B1 场景颜色历史（折射数据源）────────────────────────────────
+      // 在 effects.execute 之前入队 copy：特效（OceanFFTWater）采样到的是
+      // 本帧无特效的底层场景色。ensure 同步 resize；未开启 postProcess 时
+      // _sceneColorHistory 恒 null，特效侧折射自动降级为不混色。
+      if (!this._sceneColorHistory) {
+        this._sceneColorHistory = new RenderTexture(
+          ctx.device, ctx.preferredFormat, 'Scene.SceneColorHistory', GPUTextureUsage.COPY_DST);
+      }
+      this._sceneColorHistory.ensure(this._width, this._height);
+      const histSrc = this._sceneColorRT.texture;
+      const histDst = this._sceneColorHistory.texture;
+      if (histSrc && histDst) {
+        encoder.copyTextureToTexture(
+          { texture: histSrc },
+          { texture: histDst },
+          [this._width, this._height, 1],
+        );
+      }
     } else {
       this._lightingPass.setHdrOutput(false);
     }
@@ -382,6 +412,8 @@ export class Scene {
     this._postProcess = null;
     this._sceneColorRT?.destroy();
     this._sceneColorRT = null;
+    this._sceneColorHistory?.destroy();
+    this._sceneColorHistory = null;
     this._entityVisualizer?.destroy();
     this._entityVisualizer = null;
     for (const pass of this._renderPasses) pass.destroy();
@@ -445,6 +477,15 @@ export class Scene {
 
   /** The WebGPU context (null-safe only after Viewer.initialize()). */
   get context(): Context { return this._context; }
+
+  /**
+   * 场景颜色历史视图（B1 折射数据源）。仅 postProcess.enabled 时非 null；
+   * 特效以惰性 getter 读取（每帧重查，resize/开关自动跟随）。
+   */
+  get sceneColorHistory(): GPUTextureView | null {
+    if (!this.postProcess.enabled) return null;
+    return this._sceneColorHistory?.view ?? null;
+  }
 
   // ── Private ────────────────────────────────────────────────────────────────
 

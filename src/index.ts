@@ -158,6 +158,20 @@ export type { FloodWaterOptions, HeightGridData } from './effect/FloodWater';
 export { OceanFFTWater, OCEAN_FFT_SIZE } from './effect/OceanFFTWater';
 export type { OceanFFTWaterOptions } from './effect/OceanFFTWater';
 
+// B1 L2 五件套集成层（焦散 / 物理大气 / 泡沫图案 / 船迹波场）
+export { OceanCaustics } from './effect/OceanCaustics';
+export type { OceanCausticsOptions, FFTDataSource } from './effect/OceanCaustics';
+export { CausticsFloor } from './effect/CausticsFloor';
+export type { CausticsFloorOptions } from './effect/CausticsFloor';
+export { AtmosphereSky } from './effect/AtmosphereSky';
+export type { AtmosphereSkyOptions } from './effect/AtmosphereSky';
+export { FoamPatternTexture } from './effect/FoamPatternTexture';
+export type { FoamPatternTextureOptions } from './effect/FoamPatternTexture';
+export { WakeField } from './effect/WakeField';
+export type { WakeFieldOptions, WakeSource } from './effect/WakeField';
+// 归一化 ECEF 单一来源：示例层（96 船体定位）与引擎共用同一换算
+export { ecefFromLonLatHeight } from './terrain/TerrainProvider';
+
 // Ground heatmap overlay effect (对齐 EV_Heatmap)
 export { HeatmapLayer } from './effect/HeatmapLayer';
 export type { HeatmapLayerOptions, HeatPoint, HeatGradientStop } from './effect/HeatmapLayer';

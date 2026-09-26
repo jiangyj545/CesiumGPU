@@ -17,6 +17,9 @@ import {
   OCEAN_RENDER_PARAMS_UBO_BYTES,
 } from '../shaders/OceanFFTShader';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
+import type { FoamPatternTexture } from './FoamPatternTexture';
+import type { WakeField } from './WakeField';
+import type { FFTDataSource } from './OceanCaustics';
 
 /** FFT 边长（与 shader 内 N 一致）。 */
 export const OCEAN_FFT_SIZE = 256;
@@ -74,6 +77,12 @@ export interface OceanFFTWaterOptions {
   timeScale?: number;
   /** 太阳方向（指向太阳，归一化 ECEF）。Default: `[0.4, 0.5, 0.77]` */
   sunDirection?: [number, number, number];
+  /** 泡沫图案纹理（A3）。绑定后 FS 用图案阈值化替代 hash 噪声调制；null 回退 hash 路径。 */
+  foamPattern?: FoamPatternTexture;
+  /** 船迹波场（A4）。VS 位移叠加波高、FS 泡沫叠加；null 时不采样。须先于本效果 add 到 effects。 */
+  wake?: WakeField;
+  /** 折射：FS 扰动采样场景颜色历史混合进水色（需 Scene.sceneColorHistory 提供）。Default: `false` */
+  refraction?: boolean;
 }
 
 /** 一个 compute pipeline + 配套 bind group（每 kernel 一份）。 */
@@ -114,6 +123,11 @@ const P_UP = 68;
  * 用「基准与位移分别过 viewProj 再相加」避免 1m 波幅（~1.6e-7 归一化
  * 单位）在 f32 worldPos 上直接相加的精度损失。
  *
+ * B1 集成：本类同时是 {@link FFTDataSource}（A1 焦散数据源），并支持
+ * 泡沫图案（A3）/ 船迹波场（A4，须先于本效果 add 到 effects 以取当帧
+ * fieldView）/ 折射混色（Scene.sceneColorHistory）三条可选增强路径，
+ * 均可空缺、空缺时走原路径（零回归）。
+ *
  * @example
  * ```typescript
  * const ocean = scene.effects.add(new OceanFFTWater(scene.context, {
@@ -136,6 +150,21 @@ export class OceanFFTWater implements IPass {
   private _choppiness: number;
   private _timeScale: number;
   private readonly _sunDir: [number, number, number];
+  /** B1 集成：泡沫图案 / 船迹 / 折射（均可空，空 = 原路径零回归）。 */
+  private _foamPattern: FoamPatternTexture | null = null;
+  private _wake: WakeField | null = null;
+  private _refraction: boolean;
+  /** 场景颜色历史来源（Scene.sceneColorHistory），null = 折射不混色。 */
+  private _sceneHistorySource: (() => GPUTextureView | null) | null = null;
+  /** 导数纹理全 mip 2d-array 视图（FFTDataSource 公开 + 渲染绑定共用）。 */
+  private _derivTextureView: GPUTextureView | null = null;
+  /** 折射/船迹用 linear clamp 采样器（repeat 主采样器不适合非平铺纹理）。 */
+  private _clampSampler: GPUSampler | null = null;
+  /** 未绑定 foam/wake/history 时的 1×1 零纹理（BGL 恒全绑定的回退资源）。 */
+  private _fallbackTex: GPUTexture | null = null;
+  private _fallbackView: GPUTextureView | null = null;
+  /** 渲染参数暂存（每帧整体写入：静态段 + 动态 flags/wakeUv）。 */
+  private readonly _renderParamsF32: Float32Array;
   /** 双波浪系统：local 风浪 + 远场涌浪（tidewater 默认参数）。 */
   private readonly _local: WaveSystem;
   private readonly _swell: WaveSystem;
@@ -157,6 +186,11 @@ export class OceanFFTWater implements IPass {
   // ── 渲染侧 GPU 资源 ──
   private _renderPipeline: GPURenderPipeline | null = null;
   private _renderBindGroup: GPUBindGroup | null = null;
+  private _renderBindGroupLayout: GPUBindGroupLayout | null = null;
+  /** bind group 缓存键：foam/wake/history 视图身份变化时才重建（wake ping-pong）。 */
+  private _bgFoam: GPUTextureView | null = null;
+  private _bgWake: GPUTextureView | null = null;
+  private _bgHist: GPUTextureView | null = null;
   private _sampler: GPUSampler | null = null;
   private _vertexBuffer: GPUBuffer | null = null;
   private _indexBuffer: GPUBuffer | null = null;
@@ -204,6 +238,10 @@ export class OceanFFTWater implements IPass {
     this._choppiness = options.choppiness ?? 0.9;
     this._timeScale  = options.timeScale ?? 1;
     this._sunDir = OceanFFTWater._normalize(options.sunDirection ?? [0.4, 0.5, 0.77]);
+    this._refraction = options.refraction ?? false;
+    this._foamPattern = options.foamPattern ?? null;
+    this._wake = options.wake ?? null;
+    this._renderParamsF32 = new Float32Array(OCEAN_RENDER_PARAMS_UBO_BYTES / 4);
 
     this._local = {
       scale: 1, windSpeed: options.windSpeed ?? 8, windDirection: options.windDirection ?? 20,
@@ -288,6 +326,46 @@ export class OceanFFTWater implements IPass {
     this._camera = camera;
   }
 
+  // ── B1 集成 API（A1-A4 五件套接线）────────────────────────────────────
+
+  /** 绑定/解绑泡沫图案（A3）。null 回退原 hash 噪声调制路径。 */
+  bindFoamPattern(pattern: FoamPatternTexture | null): void {
+    this._foamPattern = pattern;
+  }
+
+  /** 绑定/解绑船迹波场（A4）。null 时 VS 不叠加波高、FS 不叠加泡沫。 */
+  bindWake(wake: WakeField | null): void {
+    this._wake = wake;
+  }
+
+  /** 开关折射混色（仍依赖 bindSceneHistory 提供的场景颜色历史）。 */
+  setRefraction(v: boolean): void {
+    this._refraction = v;
+  }
+
+  /**
+   * 注入场景颜色历史来源（B1：`() => scene.sceneColorHistory`）。
+   * getter 惰性求值——postProcess 未开启时返回 null，折射自动降级为不混色。
+   */
+  bindSceneHistory(source: (() => GPUTextureView | null) | null): void {
+    this._sceneHistorySource = source;
+  }
+
+  /** 导数纹理视图（rgba16float 2d-array 全 mip）——{@link FFTDataSource}。 */
+  get derivativeTexture(): GPUTextureView | null {
+    return this._derivTextureView;
+  }
+
+  /** 每级联平铺尺寸（米）——{@link FFTDataSource}。 */
+  get cascadeSizes(): readonly number[] {
+    return CASCADE_SIZES;
+  }
+
+  /** FFT 边长——{@link FFTDataSource}。 */
+  get fftSize(): number {
+    return N;
+  }
+
   /** @inheritdoc IPass - 幂等初始化（渲染管线 + compute 管线族）。 */
   prepare(): void {
     if (this._failed) return;
@@ -353,7 +431,49 @@ export class OceanFFTWater implements IPass {
 
     // ── render pass ──────────────────────────────────────────────────────
     const cam = this._camera;
-    if (!this._renderPipeline || !this._renderBindGroup || !cam || this._geometry.indexCount === 0) return;
+    if (!this._renderPipeline || !this._renderBindGroupLayout || !cam || this._geometry.indexCount === 0) return;
+
+    // ── 渲染参数动态段：flags + 船迹窗口 uv 映射（每帧写）────────────────
+    const RP = this._renderParamsF32;
+    RP[12] = this._foamPattern && this._foamPattern.view ? 1 : 0;
+    RP[13] = this._wake && this._wake.fieldView ? 1 : 0;
+    RP[14] = this._refraction ? 1 : 0;
+    RP[15] = 0.045; // 折射扰动强度（NDC 域，∝法线水平分量）
+    if (this._wake && this._wake.fieldView) {
+      // uv = planeXZ * scale + offset；offset = -windowOrigin / windowSizeM
+      const winM = this._wake.gridN * this._wake.cellM;
+      const org = this._wake.windowOrigin;
+      RP[16] = -org.x / winM;
+      RP[17] = -org.z / winM;
+      RP[18] = 1 / winM;
+      RP[19] = 1 / winM;
+    }
+    this._context.writeBuffer(this._renderParamsUBO!, 0, OceanFFTWater._asBytes(RP));
+
+    // ── bind group 缓存：视图身份变化才重建（wake ping-pong / history 就绪）──
+    const foamView = this._foamPattern?.view ?? this._fallbackView!;
+    const wakeView = (this._wake && RP[13] > 0.5) ? this._wake.fieldView! : this._fallbackView!;
+    const histView = this._refraction ? (this._sceneHistorySource?.() ?? this._fallbackView!) : this._fallbackView!;
+    if (!this._renderBindGroup || foamView !== this._bgFoam || wakeView !== this._bgWake || histView !== this._bgHist) {
+      this._renderBindGroup = this._context.device.createBindGroup({
+        layout: this._renderBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this._cameraUBO! } },
+          { binding: 1, resource: { buffer: this._oceanUBO! } },
+          { binding: 2, resource: this._dispTex!.createView({ dimension: '2d-array' }) },
+          { binding: 3, resource: this._derivTextureView! },
+          { binding: 4, resource: this._sampler! },
+          { binding: 5, resource: { buffer: this._renderParamsUBO! } },
+          { binding: 6, resource: foamView },
+          { binding: 7, resource: wakeView },
+          { binding: 8, resource: histView },
+          { binding: 9, resource: this._clampSampler! },
+        ],
+      });
+      this._bgFoam = foamView;
+      this._bgWake = wakeView;
+      this._bgHist = histView;
+    }
 
     const camData = new Float32Array(CAMERA_UBO_SIZE / 4);
     writeCameraUniforms(camData, {
@@ -390,6 +510,15 @@ export class OceanFFTWater implements IPass {
     }
     this._dispTex?.destroy();
     this._derivTex?.destroy();
+    this._fallbackTex?.destroy();
+    this._fallbackTex = null;
+    this._fallbackView = null;
+    this._derivTextureView = null;
+    this._renderBindGroupLayout = null;
+    this._bgFoam = null;
+    this._bgWake = null;
+    this._bgHist = null;
+    this._clampSampler = null;
     this._vertexBuffer = null;
     this._indexBuffer = null;
     this._cameraUBO = null;
@@ -518,9 +647,9 @@ export class OceanFFTWater implements IPass {
         tex(2, this._derivViews[6]), tex(3, this._derivViews[7]), tex(4, this._derivViews[8])]);
   }
 
-  /** 渲染侧：管线 / bindGroup / 网格缓冲 / 相机与参数 UBO（幂等）。 */
+  /** 渲染侧：管线 / 网格缓冲 / 相机与参数 UBO（幂等；bindGroup 每帧按视图身份缓存重建）。 */
   private _prepareRender(): void {
-    if (this._renderPipeline && this._vertexBuffer && this._indexBuffer && this._renderBindGroup) return;
+    if (this._renderPipeline && this._vertexBuffer && this._indexBuffer) return;
     const device = this._context.device;
 
     if (!this._renderPipeline) {
@@ -539,12 +668,12 @@ export class OceanFFTWater implements IPass {
         size: OCEAN_RENDER_PARAMS_UBO_BYTES,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
-      // 静态渲染参数：sunDir + 深水色(#04121f) + 天空/雾色
-      this._context.writeBuffer(this._renderParamsUBO, 0, new Float32Array([
-        this._sunDir[0], this._sunDir[1], this._sunDir[2], 0,
-        0.0157, 0.0706, 0.1216, 1,
-        0.55, 0.72, 0.88, 1,
-      ]));
+      // 静态渲染参数：sunDir + 深水色(#04121f) + 天空/雾色（flags/wakeUv 每帧写）
+      const RP = this._renderParamsF32;
+      RP[0] = this._sunDir[0]; RP[1] = this._sunDir[1]; RP[2] = this._sunDir[2]; RP[3] = 0;
+      RP[4] = 0.0157; RP[5] = 0.0706; RP[6] = 0.1216; RP[7] = 1;
+      RP[8] = 0.55; RP[9] = 0.72; RP[10] = 0.88; RP[11] = 1;
+      this._context.writeBuffer(this._renderParamsUBO, 0, OceanFFTWater._asBytes(RP));
 
       this._sampler ??= device.createSampler({
         label: 'OceanFFTSampler',
@@ -554,6 +683,34 @@ export class OceanFFTWater implements IPass {
         minFilter: 'linear',
         mipmapFilter: 'linear',
       });
+
+      this._clampSampler ??= device.createSampler({
+        label: 'OceanFFTClampSampler',
+        addressModeU: 'clamp-to-edge',
+        addressModeV: 'clamp-to-edge',
+        magFilter: 'linear',
+        minFilter: 'linear',
+        mipmapFilter: 'linear',
+      });
+
+      // 1×1 零纹理：foam/wake/history 任一未绑定时占位（BGL 恒全绑定，
+      // 采样结果为零 → shader 侧按 flags 走原路径，零回归）
+      if (!this._fallbackTex) {
+        this._fallbackTex = device.createTexture({
+          label: 'OceanFFTFallback1x1',
+          size: [1, 1],
+          format: 'rgba16float',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        device.queue.writeTexture(
+          { texture: this._fallbackTex },
+          new Float32Array([0, 0, 0, 0]),
+          { bytesPerRow: 16, rowsPerImage: 1 },
+          [1, 1, 1],
+        );
+        this._fallbackView = this._fallbackTex.createView();
+      }
+      this._derivTextureView ??= this._derivTex!.createView({ dimension: '2d-array' });
 
       const module = this._context.createShaderModule(OCEAN_FFT_RENDER_SHADER, 'OceanFFTRenderShader');
       const bgl = device.createBindGroupLayout({
@@ -566,9 +723,16 @@ export class OceanFFTWater implements IPass {
           { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
           { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
           { binding: 4, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-          { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: OCEAN_RENDER_PARAMS_UBO_BYTES } },
+          // renderParams：VS 读 flags/wakeUv（船迹位移），FS 读全部 → 两阶段都给
+          { binding: 5, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: OCEAN_RENDER_PARAMS_UBO_BYTES } },
+          { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },            // foam pattern
+          { binding: 7, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }, // wake field（VS 采样高度）
+          { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },            // scene color history
+          { binding: 9, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }, // clamp
         ],
       });
+
+      this._renderBindGroupLayout = bgl;
 
       this._renderPipeline = device.createRenderPipeline({
         label: 'OceanFFTPipeline',
@@ -599,18 +763,6 @@ export class OceanFFTWater implements IPass {
         },
         primitive: { topology: 'triangle-list', cullMode: 'none' },
         // 无深度附件：遮挡在片元内用射线-球求交处理（与 FloodWater 一致）
-      });
-
-      this._renderBindGroup = device.createBindGroup({
-        layout: bgl,
-        entries: [
-          { binding: 0, resource: { buffer: this._cameraUBO } },
-          { binding: 1, resource: { buffer: this._oceanUBO } },
-          { binding: 2, resource: this._dispTex!.createView({ dimension: '2d-array' }) },
-          { binding: 3, resource: this._derivTex!.createView({ dimension: '2d-array' }) },
-          { binding: 4, resource: this._sampler },
-          { binding: 5, resource: { buffer: this._renderParamsUBO } },
-        ],
       });
     }
 

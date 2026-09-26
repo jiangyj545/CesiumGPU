@@ -28,10 +28,7 @@ struct CompositeParams {
 @group(0) @binding(3) var samp      : sampler;
 @group(0) @binding(4) var<uniform> params : CompositeParams;
 
-struct VSOut {
-  @builtin(position) pos : vec4<f32>,
-  @location(0)       uv  : vec2<f32>,
-}
+// VSOut 由 FULLSCREEN_VS 前置声明（重复声明会使模块解析失败——真机 CDP 验证发现）
 
 // 单个 ghost：径向缩放回采样 + RGB 径向色散
 fn ghostSample(sceneUv: vec2<f32>, center: vec2<f32>, scale: f32, aspect: f32) -> vec3<f32> {

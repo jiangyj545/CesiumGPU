@@ -24,13 +24,11 @@ struct ToneMapParams {
 @group(0) @binding(1) var srcSamp : sampler;
 @group(0) @binding(2) var<uniform> params : ToneMapParams;
 
-struct VSOut {
-  @builtin(position) pos : vec4<f32>,
-  @location(0)       uv  : vec2<f32>,
-}
+// VSOut 由 FULLSCREEN_VS 前置声明（重复声明会使模块解析失败——真机 CDP 验证发现）
 
 // ACES filmic 拟合（有理多项式 + 线性 knee 段）
-fn acesFilmic(x: f32) -> vec3<f32> {
+// 参数须为 vec3<f32>（体内全按 vec3 运算；原 f32 签名致模块解析失败——真机 CDP 验证发现）
+fn acesFilmic(x: vec3<f32>) -> vec3<f32> {
   let l = max(x, vec3<f32>(0.0));
   var out = l * (l * 1.4 + vec3<f32>(1.0)) / (l * l * 0.7 + l * 1.274 + vec3<f32>(1.0));
   // 线性段（x < 0.0301）：斜率 1 直通

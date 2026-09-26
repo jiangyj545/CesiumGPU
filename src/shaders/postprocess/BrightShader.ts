@@ -19,10 +19,7 @@ struct BrightParams {
 @group(0) @binding(1) var srcSamp  : sampler;
 @group(0) @binding(2) var<uniform> params : BrightParams;
 
-struct VSOut {
-  @builtin(position) pos : vec4<f32>,
-  @location(0)       uv  : vec2<f32>,
-}
+// VSOut 由 FULLSCREEN_VS 前置声明（重复声明会使模块解析失败——真机 CDP 验证发现）
 
 fn luma(c: vec3<f32>) -> f32 {
   return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));

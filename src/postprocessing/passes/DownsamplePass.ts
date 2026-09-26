@@ -44,7 +44,9 @@ export class DownsamplePass {
 
     this._ubo = device.createBuffer({
       label: 'PostProcess.Down.UBO',
-      size:  16, // texel(vec2) + pad×2
+      // BlurParams = vec2 + 3×f32 = 20B（uniform 对齐后绑定要求 24B）；
+      // 原 16B 触发 too-small 校验错、整帧命令缓冲失效（真机 CDP 验证发现）
+      size:  32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
   }

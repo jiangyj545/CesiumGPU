@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>示例 95：FFT 海洋仿真 OceanFFT - CesiumGPU</title>
+  <title>示例 96：FFT 海洋 L2 五件套（焦散/大气/泡沫/船迹/折射）- CesiumGPU</title>
   <style>
     .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:340px;max-width:460px;
       padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
@@ -16,16 +16,17 @@
     .cg-panel .checkline{display:flex;align-items:center;gap:6px;margin-top:10px;
       font-size:12px;color:#9db4d0;cursor:pointer;user-select:none;}
     .cg-panel .checkline input{cursor:pointer;}
+    .cg-panel .checks{display:grid;grid-template-columns:1fr 1fr;gap:2px 14px;}
   </style>
 </head>
 <body>
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
-    <h1>95 FFT 海洋仿真</h1>
-    <p class="desc">基于 <b>JONSWAP 谱 + GPU FFT</b>（Tessendorf 多级联）的真实感海面，
-      借鉴 tidewater：频域逆 FFT 生成位移/梯度/雅可比纹理，片元侧由雅可比
-      提取波峰白沫，choppiness 控制水平挤压的卷浪形态。风场（风速/风向）
-      实时重塑谱参数，时间尺度缩放海况演化速度。</p>
+    <h1>96 FFT 海洋 · L2 五件套</h1>
+    <p class="desc">FFT 谱海面 + <b>L2 集成五件套</b>：物理大气（Hillaire LUT）、
+      浅滩沙洲焦散（OceanCaustics+CausticsFloor）、程序泡沫图案（阈值化）、
+      船迹波场（Havelock 压力 + 开尔文尾迹）与水面折射（场景颜色历史采样）。
+      巡航船沿椭圆航线自动航行，船体随航向转向。</p>
     <label>风速 <b id="windSpeedVal">8.0</b> m/s</label>
     <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="8" />
     <label>风向 <b id="windDirVal">20</b>°</label>
@@ -36,30 +37,93 @@
     <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.65" />
     <label>时间尺度 <b id="timeScaleVal">1.0</b>×</label>
     <input id="timeScale" type="range" min="0" max="3" step="0.1" value="1" />
-    <label class="checkline">
-      <input id="showToggle" type="checkbox" checked /> 显示海面
-    </label>
+    <label>船速 <b id="boatSpeedVal">6.0</b> m/s（0 = 停船）</label>
+    <input id="boatSpeed" type="range" min="0" max="10" step="0.5" value="6" />
+    <div class="checks">
+      <label class="checkline"><input id="showToggle" type="checkbox" checked /> 显示海面</label>
+      <label class="checkline"><input id="causticsToggle" type="checkbox" checked /> 焦散沙洲</label>
+      <label class="checkline"><input id="wakeToggle" type="checkbox" checked /> 船迹波场</label>
+      <label class="checkline"><input id="skyToggle" type="checkbox" checked /> 物理大气</label>
+      <label class="checkline"><input id="refractionToggle" type="checkbox" checked /> 水面折射</label>
+    </div>
   </div>
   <script src="./js/demo-utils.js"></script>
   <script type="module">
     import * as engine from '/src/index.ts';
 
     async function demo(viewer, engine) {
-      // ── 1. 海面特效：OceanFFTWater（JONSWAP 谱 + GPU FFT 多级联）──────
-      const ocean = new engine.OceanFFTWater(viewer.scene.context, {
-        center: [121.65, 31.15],   // [lon, lat] 海域中心（东海）
+      // ── 0. 常量：海域中心 / 太阳方向 / 米度换算 ──────────────────────
+      const CEN_LON = 121.65, CEN_LAT = 31.15;
+      const SUN = [0.4, 0.5, 0.77];
+      const METERS_PER_DEG = 111320;
+      const R_EARTH = engine.Cartesian3.EARTH_RADIUS; // 6378137
+      const context = viewer.scene.context;
+
+      // ── 1. 后处理开启（折射需要 _sceneColorRT 路径；海面高光吃 bloom）──
+      viewer.scene.postProcess.enabled = true;
+
+      // ── 2. 船迹波场（A4）：必须先于 ocean add 到 effects，ocean 才能取
+      //      到当帧 fieldView（ping-pong 采样视图与 encoder 内依赖一致）──
+      const wakeField = new engine.WakeField(context, { gridN: 256, windowSizeM: 220 });
+
+      // ── 3. 物理大气（A2）：GBuffer 深度 equal 剔除，画在最后也不遮球；
+      //      但 ocean alpha=1 会全覆盖 → sky 必须先于 ocean 执行 ────────
+      const sky = new engine.AtmosphereSky(context, {
+        sunDirection: SUN,
+        starIntensity: 0,          // 白昼场景关星星
+      });
+      sky.setDepthView(() => viewer.scene.gbufferPass
+        ? viewer.scene.gbufferPass.getDepthView()
+        : null);
+      sky.toneMapped = false;      // postProcess HDR 链：输出线性辐射，链尾统一 tone map
+
+      // ── 4. 海面本体（FFTDataSource + A3/A4/折射接线）─────────────────
+      const foamPattern = new engine.FoamPatternTexture(context, { size: 512 });
+      foamPattern.generate();
+      const ocean = new engine.OceanFFTWater(context, {
+        center: [CEN_LON, CEN_LAT],
         extentKm: 2.5,
         segments: 256,
         waterLevel: 0,
-        windSpeed: 8,              // m/s
-        windDirection: 20,         // deg
+        windSpeed: 8,
+        windDirection: 20,
         choppiness: 0.9,
         timeScale: 1,
-        sunDirection: [0.4, 0.5, 0.77],
+        sunDirection: SUN,
+        foamPattern,
+        wake: wakeField,
+        refraction: true,
       });
-      viewer.scene.effects.add(ocean);
+      ocean.bindSceneHistory(() => viewer.scene.sceneColorHistory);
 
-      // ── 2. 滑杆 → setter 联动（uniform 直改，下帧生效）───────────────
+      // ── 5. 浅滩沙洲焦散（A1）：海域中心西南 ~760 m（相机视野内）──────
+      const sbLon = CEN_LON - 570 / (METERS_PER_DEG * Math.cos(CEN_LAT * Math.PI / 180));
+      const sbLat = CEN_LAT - 500 / METERS_PER_DEG;
+      const caustics = new engine.OceanCaustics(context, {
+        center: [sbLon, sbLat],
+        floorSizeM: 420,
+        floorDepthM: 5,
+        sunDirection: SUN,
+      });
+      caustics.bindFFT(ocean);     // ocean 实现 FFTDataSource
+      const floor = new engine.CausticsFloor(context, {
+        center: [sbLon, sbLat],
+        sizeM: 420,
+        depthM: 5,
+        sunDirection: SUN,
+      });
+      floor.bindFFT(ocean);
+      floor.bindCaustics(caustics);
+
+      // ── 6. effects 挂载顺序即执行顺序：wake(数据) → sky(背景) → ocean
+      //      → caustics(纹理生成) → floor(半透明叠画在水面上) ────────────
+      viewer.scene.effects.add(wakeField);
+      viewer.scene.effects.add(sky);
+      viewer.scene.effects.add(ocean);
+      viewer.scene.effects.add(caustics);
+      viewer.scene.effects.add(floor);
+
+      // ── 7. 滑杆 → setter 联动 ─────────────────────────────────────────
       function bindSlider(sliderId, valId, fmt, apply) {
         const slider = document.getElementById(sliderId);
         const valEl = document.getElementById(valId);
@@ -68,7 +132,7 @@
           apply(slider.valueAsNumber);
         };
         slider.addEventListener('input', update);
-        update(); // 初始化显示值与实际状态一致
+        update();
       }
       bindSlider('windSpeed', 'windSpeedVal', (v) => v.toFixed(1), (v) => ocean.setWindSpeed(v));
       bindSlider('windDir', 'windDirVal', (v) => String(Math.round(v)), (v) => ocean.setWindDirection(v));
@@ -76,14 +140,154 @@
       bindSlider('foamBias', 'foamBiasVal', (v) => v.toFixed(2), (v) => ocean.setFoamBias(v));
       bindSlider('timeScale', 'timeScaleVal', (v) => v.toFixed(1), (v) => ocean.setTimeScale(v));
 
-      // ── 3. 显示/隐藏 ─────────────────────────────────────────────────
-      document.getElementById('showToggle').addEventListener('change', (e) => {
-        ocean.show = e.target.checked;
+      // ── 8. 巡航船：程序化盒体（无外部模型），沿椭圆航线 arc-length 巡航 ─
+      function boxGeo(sx, sy, sz, ox = 0, oy = 0, oz = 0) {
+        const x = sx / 2, y = sy / 2, z = sz / 2;
+        const faces = [ // 每面外向 CCW 绕序（GBuffer 管线 cullMode 'back'）
+          { n: [0, 0, 1],  v: [[-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z]] },
+          { n: [0, 0, -1], v: [[x, -y, -z], [-x, -y, -z], [-x, y, -z], [x, y, -z]] },
+          { n: [1, 0, 0],  v: [[x, -y, z], [x, -y, -z], [x, y, -z], [x, y, z]] },
+          { n: [-1, 0, 0], v: [[-x, -y, -z], [-x, -y, z], [-x, y, z], [-x, y, -z]] },
+          { n: [0, 1, 0],  v: [[-x, y, z], [x, y, z], [x, y, -z], [-x, y, -z]] },
+          { n: [0, -1, 0], v: [[-x, -y, z], [x, -y, z], [x, -y, -z], [-x, -y, -z]] },
+        ];
+        const verts = [], idx = [];
+        faces.forEach((f, fi) => {
+          const b = fi * 4;
+          f.v.forEach((vv) => verts.push(vv[0] + ox, vv[1] + oy, vv[2] + oz, f.n[0], f.n[1], f.n[2], 0, 0));
+          idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+        });
+        return { vertices: new Float32Array(verts), indices: new Uint32Array(idx) };
+      }
+      const HULL_L = 14, HULL_H = 2.6, HULL_W = 3.6;
+      const hullGeo = boxGeo(HULL_L, HULL_H, HULL_W);
+      const hull = new engine.Primitive(viewer.context, {
+        vertices: hullGeo.vertices,
+        indices: hullGeo.indices,
+        color: new engine.Color(0.85, 0.28, 0.20, 1.0),
+        unlit: true,
+      });
+      const cabinGeo = boxGeo(4.2, 1.7, 2.6, -2.2, 2.15, 0); // 船艉舱（局部系偏移）
+      const cabin = new engine.Primitive(viewer.context, {
+        vertices: cabinGeo.vertices,
+        indices: cabinGeo.indices,
+        color: new engine.Color(0.93, 0.95, 0.97, 1.0),
+        unlit: true,
+      });
+      viewer.scene.addPrimitive(hull);   // 预建入场（渲染中途动态 add 曾静默卡死）
+      viewer.scene.addPrimitive(cabin);
+
+      // 局部平面（东/北米）→ 经纬度（与 ocean planeXZ 同域同原点）
+      function planeToLonLat(px, pz) {
+        return [
+          CEN_LON + px / (METERS_PER_DEG * Math.cos(CEN_LAT * Math.PI / 180)),
+          CEN_LAT + pz / METERS_PER_DEG,
+        ];
+      }
+      const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+      const add3 = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+      const scl3 = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+      const crs3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+      const nrm3 = (a) => { const m = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / m, a[1] / m, a[2] / m]; };
+
+      // ENU 基（每米归一化 ECEF 增量，数值差分含极轴压扁——与引擎同源约定）
+      function enuBasis(lon, lat) {
+        const p0 = [0, 0, 0], pE = [0, 0, 0], pN = [0, 0, 0], pU = [0, 0, 0];
+        const d = 1e-5;
+        engine.ecefFromLonLatHeight(lon, lat, 0, p0);
+        engine.ecefFromLonLatHeight(lon + d, lat, 0, pE);
+        engine.ecefFromLonLatHeight(lon, lat + d, 0, pN);
+        engine.ecefFromLonLatHeight(lon, lat, 1.0, pU);
+        const east = nrm3(scl3(sub3(pE, p0), 1 / (d * METERS_PER_DEG * Math.cos(lat * Math.PI / 180))));
+        const north = nrm3(scl3(sub3(pN, p0), 1 / (d * METERS_PER_DEG)));
+        const up = nrm3(sub3(pU, p0));
+        return { east, north, up };
+      }
+
+      // 船体 modelMatrix：列 [F·sL, U·sH, Q·sW, pos]，F=航向单位矢量
+      function boatMatrix(px, pz, heading, pitch, hullLiftM) {
+        const [lon, lat] = planeToLonLat(px, pz);
+        const { east, north, up } = enuBasis(lon, lat);
+        const ch = Math.cos(heading), sh = Math.sin(heading);
+        const F0 = add3(scl3(east, ch), scl3(north, sh));
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        const F = add3(scl3(F0, cp), scl3(up, sp));       // 抬头纵摇
+        const U = nrm3(sub3(scl3(up, cp), scl3(F0, sp)));
+        const Q = nrm3(crs3(U, F));
+        const pos = [0, 0, 0];
+        engine.ecefFromLonLatHeight(lon, lat, hullLiftM, pos);
+        const sL = HULL_L / R_EARTH, sH = HULL_H / R_EARTH, sW = HULL_W / R_EARTH;
+        return engine.Matrix4.fromArray(new Float32Array([
+          F[0] * sL, F[1] * sL, F[2] * sL, 0,
+          U[0] * sH, U[1] * sH, U[2] * sH, 0,
+          Q[0] * sW, Q[1] * sW, Q[2] * sW, 0,
+          pos[0], pos[1], pos[2], 1,
+        ], new engine.Matrix4()));
+      }
+
+      // ── 9. 航线动画：椭圆 arc-length 匀速（速度=船速滑杆），60s 级周期 ──
+      const ELL_A = 90, ELL_B = 60; // 半长轴/半短轴（米），周长 ~470 m
+      let theta = -Math.PI / 2;     // 从最南点出发（相机正前方入画）
+      let boatSpeed = 6;
+      let lastT = performance.now() / 1000;
+      const lastBoat = { planeX: 0, planeZ: 0, heading: 0, speed: 0 };
+      function tick() {
+        const now = performance.now() / 1000;
+        const dt = Math.min(0.1, Math.max(0, now - lastT));
+        lastT = now;
+        if (boatSpeed > 0.01) {
+          const rx = ELL_A * Math.sin(theta), rz = ELL_B * Math.cos(theta);
+          const r = Math.max(Math.hypot(rx, rz), 20); // 弧长参数化：θ̇ = U / r(θ)
+          theta += (boatSpeed * dt) / r;
+        }
+        const px = ELL_A * Math.cos(theta), pz = ELL_B * Math.sin(theta);
+        const heading = Math.atan2(ELL_B * Math.cos(theta), -ELL_A * Math.sin(theta)); // 速度方向
+        const pitch = 0.03 * Math.sin(now * 1.3); // 轻微纵摇（±1.7°）
+        wakeField.updateBoat({ planeX: px, planeZ: pz, heading, speed: boatSpeed, lengthM: HULL_L, beamM: HULL_W });
+        const m = boatMatrix(px, pz, heading, pitch, 0.8);
+        hull.modelMatrix = m;
+        cabin.modelMatrix = m;
+        lastBoat.planeX = px; lastBoat.planeZ = pz; lastBoat.heading = heading; lastBoat.speed = boatSpeed;
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+      bindSlider('boatSpeed', 'boatSpeedVal', (v) => v.toFixed(1), (v) => { boatSpeed = v; });
+
+      // ── 10. 面板开关 ──────────────────────────────────────────────────
+      document.getElementById('showToggle').addEventListener('change', (e) => { ocean.show = e.target.checked; });
+      document.getElementById('causticsToggle').addEventListener('change', (e) => {
+        caustics.show = e.target.checked;
+        floor.show = e.target.checked;
+      });
+      document.getElementById('wakeToggle').addEventListener('change', (e) => {
+        wakeField.show = e.target.checked;
+        ocean.bindWake(e.target.checked ? wakeField : null);
+      });
+      document.getElementById('skyToggle').addEventListener('change', (e) => { sky.show = e.target.checked; });
+      document.getElementById('refractionToggle').addEventListener('change', (e) => {
+        ocean.setRefraction(e.target.checked);
       });
 
-      // ── 4. 初始视角：海域中心上空 450 m，俯角约 -25° ─────────────────
+      // ── 11. QA 钩子（CDP 终验用：等效于面板操作）──────────────────────
+      const ck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
+      window.__hooks = {
+        setBoatSpeed(v) {
+          boatSpeed = v;
+          const el = document.getElementById('boatSpeed');
+          if (el) { el.value = String(v); document.getElementById('boatSpeedVal').textContent = v.toFixed(1); }
+        },
+        setOcean(b) { ocean.show = b; ck('showToggle', b); },
+        setSky(b) { sky.show = b; ck('skyToggle', b); },
+        setCaustics(b) { caustics.show = b; floor.show = b; ck('causticsToggle', b); },
+        setWake(b) { wakeField.show = b; ocean.bindWake(b ? wakeField : null); ck('wakeToggle', b); },
+        setRefraction(b) { ocean.setRefraction(b); ck('refractionToggle', b); },
+        setFoamPattern(b) { ocean.bindFoamPattern(b ? foamPattern : null); },
+        getBoat: () => ({ ...lastBoat }),
+      };
+
+      // ── 12. 初始视角：海域南缘上空 450 m，俯角约 -25° 望向中心 ────────
       viewer.camera.flyTo({
-        destination: { lon: 121.65, lat: 31.1413, height: 450 },
+        destination: { lon: CEN_LON, lat: CEN_LAT - 0.0087, height: 450 },
         orientation: { heading: 0, pitch: -25 * Math.PI / 180 },
       });
     }
@@ -95,9 +299,9 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [121.65, 31.15, 450],
+          view: [121.65, 31.1413, 450],
           imagery: 'gaode-sat',
-          title: '95 · FFT 海洋仿真',
+          title: '96 · FFT 海洋 L2 五件套',
         }));
       } catch (err) {
         window.__DEMO_OK = false;
@@ -106,7 +310,7 @@
       try {
         window.viewer = viewer; // debug hook for QA probes
         await demo(viewer, engine);
-        DemoUtils.showCode(demo, '95 FFT 海洋仿真 · 核心代码');
+        DemoUtils.showCode(demo, '96 FFT 海洋 L2 五件套 · 核心代码');
         window.__DEMO_OK = true; // 海面特效挂载成功
       } catch (err) {
         window.__DEMO_OK = false;

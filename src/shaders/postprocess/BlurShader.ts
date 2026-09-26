@@ -22,10 +22,7 @@ struct BlurParams {
 @group(0) @binding(1) var srcSamp : sampler;
 @group(0) @binding(2) var<uniform> params : BlurParams;
 
-struct VSOut {
-  @builtin(position) pos : vec4<f32>,
-  @location(0)       uv  : vec2<f32>,
-}
+// VSOut 由 FULLSCREEN_VS 前置声明（重复声明会使模块解析失败——真机 CDP 验证发现）
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {

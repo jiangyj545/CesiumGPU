@@ -45,7 +45,9 @@ export class UpsamplePass {
 
     this._ubo = device.createBuffer({
       label: 'PostProcess.Up.UBO',
-      size:  16, // texel(vec2) + blend + pad
+      // UpsampleParams 声明 16B，但 uniform 绑定按对齐要求 ≥24B；
+      // 原 16B 触发 too-small 校验错、整帧命令缓冲失效（真机 CDP 验证发现）
+      size:  32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
   }
