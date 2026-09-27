@@ -59,7 +59,8 @@ export interface FloodWaterOptions {
  * 顶点位置按**地形高程**径向布置（`|p| = 1 + terrainH/6378137`，
  * 引擎「高度折入模长」约定），`uv.x` 存归一化地形高、`uv.y` 存地形处
  * 径向模长（stride 20B 与 DynamicWater 一致）。水位走 uniform：
- * VS 内 `k = max(kTerrain, waterLevel)` 径向放缩——水位变化零重建；
+ * VS 内 `k = max(kTerrain, 1 + waterLevel)` 径向放缩（waterLevel 为
+ * 米/earthScale 相对量，+1 抬到绝对模长尺度）——水位变化零重建；
  * FS 内 `depth = waterLevel - terrainH` 还原水深走 4 段色带，
  * 岸线以上片元 alpha 0 剔除。
  *
@@ -193,7 +194,7 @@ export class FloodWater implements IPass {
       const bindGroupLayout = device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-          // vs_main 里读 flood.waterLevel 布置顶点半径（k = max(kTerrain, waterLevel)），
+          // vs_main 里读 flood.waterLevel 布置顶点半径（k = max(kTerrain, 1 + waterLevel)），
           // visibility 必须含 VERTEX，否则管线验证失败并污染整帧 Frame Encoder
           { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         ],

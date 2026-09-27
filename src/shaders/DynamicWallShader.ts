@@ -40,8 +40,12 @@ struct WallUniforms {
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
 @group(0) @binding(1) var<uniform> wall   : WallUniforms;
 
-// 地球半径略小于 1（归一化 ECEF），避免地平线处墙体底部自遮挡闪烁。
-const GLOBE_OCCLUDE_R2 : f32 = 0.998 * 0.998;
+// 遮挡球半径²：压扁世界地表 |p|² ≥ polarRatio² ≈ 0.99331（极点最小）。
+// 旧值 0.998² = 0.996004 大于该下界——中高纬贴地片元被划进遮挡球内，
+// 相机升到球外俯视时射线必穿球 → 整面 discard。取 0.9945² = 0.989030
+// < 0.99331，任意纬度贴地片元恒在球外；真正超出地平线的远侧片元仍被
+// 正确遮挡（与 OceanFFTShader / OceanCausticsShader 同一常量约定）。
+const GLOBE_OCCLUDE_R2 : f32 = 0.9945 * 0.9945;
 
 // ── Vertex ────────────────────────────────────────────────────────────────────
 

@@ -33,8 +33,11 @@ struct VideoOverlayUniforms {
 @group(0) @binding(1) var videoTex  : texture_2d<f32>;
 @group(0) @binding(2) var videoSamp : sampler;
 
-// 地球遮挡判定半径的平方（略小于 1，归一化 ECEF），与 DynamicWallShader 同一常量约定。
-const GLOBE_OCCLUDE_R2 : f32 = 0.998 * 0.998;
+// 遮挡球半径²：0.998² = 0.996004 大于压扁世界地表模长下界
+// polarRatio² ≈ 0.99331——中高纬贴地片元被划进球内，相机升到球外
+// 俯视时整面 discard。取 0.9945² < 下界，贴地片元恒在球外
+//（对齐 OceanFFTShader / DynamicWallShader 常量约定）。
+const GLOBE_OCCLUDE_R2 : f32 = 0.9945 * 0.9945;
 
 // ── Vertex（两管线共用布局：location 0 = position float32x3） ─────────────────
 

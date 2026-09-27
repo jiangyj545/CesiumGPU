@@ -2,7 +2,7 @@
  * FloodWaterShader - 水深/淹没水面 WGSL（基于 DynamicWaterShader 改造）。
  *
  * 与 DynamicWater 的核心差异：水位是 uniform 而非烘焙在顶点里——
- * 顶点位置按**地形高程**径向布置，VS 内 `k = max(kTerrain, waterLevel)`
+ * 顶点位置按**地形高程**径向布置，VS 内 `k = max(kTerrain, 1 + waterLevel)`
  * 径向放缩（水位变化零重建）；FS 用顶点插值的归一化地形高还原
  * `depth = waterLevel - terrainH`（米），按水深走 4 段色带
  * （浅青 0m → 青 2m → 蓝 5m → 深蓝 10m+），`depth <= 0.001` 的
@@ -42,8 +42,13 @@ struct FloodUniforms {
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
 @group(0) @binding(1) var<uniform> flood  : FloodUniforms;
 
-// 地球半径略小于 1（归一化 ECEF），与 DynamicWaterShader 一致。
-const GLOBE_OCCLUDE_R2 : f32 = 0.998 * 0.998;
+// 遮挡球半径²：压扁世界地表 |p|² ≥ polarRatio² ≈ 0.99331（极点最小）。
+// 旧值 0.998² = 0.996004 大于该下界——中高纬地表被划进遮挡球内，
+// 相机升到球外（92 示例 90km 视角即中招）俯视贴地水面时相机→片元
+// 射线必穿球 → 整面 discard。取 0.9945² = 0.989030 < 0.99331，任意
+// 纬度贴地片元恒在球外；真正超出地平线的远侧片元仍被正确遮挡
+//（与 OceanFFTShader / OceanCausticsShader 同一常量约定）。
+const GLOBE_OCCLUDE_R2 : f32 = 0.9945 * 0.9945;
 
 // ── 程序化波纹（简化版：两层行波 + value noise，风格继承 DynamicWater）─────
 
@@ -114,8 +119,12 @@ fn vs_main(input : VSIn) -> VSOut {
   // 引擎约定：位置 = 单位方向 × k（y/z 已含极区压扁的线性缩放），
   // 径向放缩 = 逐分量乘 (k_new / k_terrain)，与 TerrainLayer stitch 同款
   //（不可用 atan2 地心纬度反推重建——项目坐标约定血泪坑）。
+  // waterLevel 是相对高（米/earthScale，≈1e-5 量级），kTerrain 是绝对
+  // 径向模长（≈1.0）——必须 +1 抬到同一绝对尺度再取 max，否则 max 恒
+  // 取 kTerrain，水位抬升失效（FS 的 waterLevel - terrainH 同为相对量，
+  // 语义不变）。
   let kTerrain = max(input.uv.y, 1e-7);
-  let k        = max(kTerrain, flood.waterLevel);
+  let k        = max(kTerrain, 1.0 + flood.waterLevel);
   let worldPos = input.position * (k / kTerrain);
 
   var out : VSOut;

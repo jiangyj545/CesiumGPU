@@ -34,8 +34,11 @@ struct WaterUniforms {
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
 @group(0) @binding(1) var<uniform> water  : WaterUniforms;
 
-// 地球半径略小于 1（归一化 ECEF），与 DynamicWallShader 一致。
-const GLOBE_OCCLUDE_R2 : f32 = 0.998 * 0.998;
+// 遮挡球半径²：0.998² = 0.996004 大于压扁世界地表模长下界
+// polarRatio² ≈ 0.99331——中高纬贴地片元被划进球内，相机升到球外
+// 俯视时整面 discard。取 0.9945² < 下界，贴地片元恒在球外
+//（对齐 OceanFFTShader / DynamicWallShader 常量约定）。
+const GLOBE_OCCLUDE_R2 : f32 = 0.9945 * 0.9945;
 
 // ── 程序化波纹（解析法线 + 波高）───────────────────────────────────────────
 
