@@ -7,14 +7,58 @@ import {
   decodeSegPixel,
   linearizeDepthMeters,
   quatFromFLU,
+  sensorCamEcefDestination,
 } from '../../src/sensors/SensorCam';
 import type {
   FrameRecordInput,
   SensorCam,
   SensorFrame,
+  SensorPose,
 } from '../../src/sensors/SensorCam';
+import { Cartesian3 } from '../../src/math/Cartesian3';
+import { Cartographic } from '../../src/math/Cartographic';
+import { Camera } from '../../src/scene/Camera';
 
 const EARTH_SCALE = 6378137;
+
+// ── 采集相机大地基准约定（febba8d 后的双约定世界） ────────────────────────────
+
+describe('sensorCamEcefDestination（采集相机=真椭球 ECEF，与城市/SSE pos_ecef 同约定）', () => {
+  const POSE: SensorPose = {
+    lonDeg: 121.65, latDeg: 31.14, heightM: 120,
+    headingRad: 0, pitchRad: -Math.PI / 2, rollRad: 0,
+  };
+
+  it('与 Cartesian3.fromDegrees 逐位一致（城市顶点/SSE pos_ecef 盒/camPosEcefM 同源）', () => {
+    const d = sensorCamEcefDestination(POSE);
+    const ref = Cartesian3.fromDegrees(POSE.lonDeg, POSE.latDeg, POSE.heightM);
+    expect(d.x).toBe(ref.x);
+    expect(d.y).toBe(ref.y);
+    expect(d.z).toBe(ref.z);
+  });
+
+  it('与回归前（f86e541）resolveDestination 路径 Cartographic 真椭球等价——修复保持历史数据语义', () => {
+    const d = sensorCamEcefDestination(POSE);
+    const metres = Cartographic.fromDegrees(
+      POSE.lonDeg, POSE.latDeg, POSE.heightM / EARTH_SCALE,
+    ).toCartesian();
+    // 旧分支 = metres × (1/EARTH_SCALE)，setView x/y/z 分支乘回同因子——
+    // 差异仅浮点舍入级（height 先除后乘），米制绝对差 << 1e-6 m
+    expect(d.x).toBeCloseTo(metres.x, 6);
+    expect(d.y).toBeCloseTo(metres.y, 6);
+    expect(d.z).toBeCloseTo(metres.z, 6);
+  });
+
+  it('不走 resolveDestination 压扁分支：31.14°N 两约定地表矢长差 ≈ 11km（回归特征签名）', () => {
+    const truth = Cartesian3.fromDegrees(121.65, 31.14, 0);
+    const truthR = Math.hypot(truth.x, truth.y, truth.z) / EARTH_SCALE;
+    const flat = Camera.resolveDestination({ lon: 121.65, lat: 31.14, height: 0 });
+    const flatR = Math.hypot(flat.x, flat.y, flat.z);
+    const gapKm = (Math.abs(truthR - flatR) * EARTH_SCALE) / 1000;
+    expect(gapKm).toBeGreaterThan(8);    // febba8d 提交记录：121.65°E/31.14°N 实测 ~11.3km
+    expect(gapKm).toBeLessThan(14);
+  });
+});
 
 // ── 深度线性化数学 ─────────────────────────────────────────────────────────────
 

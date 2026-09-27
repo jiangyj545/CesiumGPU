@@ -471,7 +471,9 @@
       // 俯瞰航线（guanggu-500m 矩形 ~400m×200m）：近垂直俯瞰；相机南偏使视线中心
       // （pitch -75° 落点在相机以北约 h/tan75）对准航线中心 30.5（同 89 页构图做法）
       viewer.camera.setView({
-        destination: { lon: 114.39, lat: 30.4975, height: 1600 },
+        // 米制 ECEF（真椭球——episode 城市数据同约定；{lon,lat,height} 分支
+        // 自 febba8d 起贴 Globe 压扁世界，俯瞰构图会偏离城市 ~11km）
+        destination: engine.Cartesian3.fromDegrees(114.39, 30.4975, 1600),
         orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-75) },
       });
 

@@ -738,8 +738,11 @@
         const { pose } = POSE_SSE
           ? poseAtSse(performance.now() / 1000)   // SSE：消费最新帧
           : poseAt((performance.now() / 1000) % (TOTAL_LEN / SPEED_MS));
+        // 米制 ECEF（真椭球——城市顶点/SSE pos_ecef 同约定；setView 的
+        // {lon,lat,height} 分支自 febba8d 起贴 Globe 压扁世界，会让跟随
+        // 视锥偏离城市 ~11km，见 SensorCam.sensorCamEcefDestination）。
         viewer.camera.setView({
-          destination: { lon: pose.lonDeg, lat: pose.latDeg, height: pose.heightM },
+          destination: engine.Cartesian3.fromDegrees(pose.lonDeg, pose.latDeg, pose.heightM),
           orientation: { heading: pose.headingRad, pitch: pose.pitchRad, roll: pose.rollRad },
         });
       }, 200);

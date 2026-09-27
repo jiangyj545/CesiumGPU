@@ -89,6 +89,24 @@ export interface SensorPose {
   rollRad: number;
 }
 
+/**
+ * 采集位姿 → setView 米制 ECEF 目的地（真 WGS84 椭球约定）。
+ *
+ * 背景（febba8d 后的双约定世界）：`Camera.resolveDestination` 的
+ * `{lon,lat,height}` 分支已改为引擎线性归一化压扁世界（Globe/海洋/地形
+ * 系），而传感器数据链路——CityBlockBuilder 城市顶点、90 页 SSE
+ * `pos_ecef` 伴飞盒、`SensorFrameMeta.camPosEcefM`（"与 fromDegrees 同
+ * 约定"）、depth 线性化米制换算——全部是真 WGS84 椭球的归一化 ECEF。
+ * 采集相机必须与被观测物体同约定：走压扁分支会让视锥整体偏离城市
+ * ~11km（31°N 两约定地表模长差），seg/depth 全空（2026-09-26 回归）。
+ *
+ * 因此 SensorCam 一律显式传米制 ECEF——setView 的 x/y/z 分支
+ * （`×1/EARTH_SCALE` 归一化）两个约定共用，未被 febba8d 改动。
+ */
+export function sensorCamEcefDestination(pose: SensorPose): Cartesian3 {
+  return Cartesian3.fromDegrees(pose.lonDeg, pose.latDeg, pose.heightM);
+}
+
 export interface SensorFrameMeta {
   intrinsics: { fx: number; fy: number; cx: number; cy: number };
   /** 水平 FOV（度），由 fovY 与实际纵横比推出。 */
@@ -313,8 +331,10 @@ export class SensorCam {
 
     try {
       // ── 设传感器位姿（fov/aspect 变更需经 setAspectRatio 触发 proj 重算）──
+      // destination 走米制 ECEF（真椭球，城市/SSE pos_ecef 同约定）——
+      // 不走 setView 的 {lon,lat,height} 压扁世界分支（见 sensorCamEcefDestination）。
       cam.setView({
-        destination: { lon: pose.lonDeg, lat: pose.latDeg, height: pose.heightM },
+        destination: sensorCamEcefDestination(pose),
         orientation: { heading: pose.headingRad, pitch: pose.pitchRad, roll: pose.rollRad },
       });
       cam.frustum.fov = CesiumMath.toRadians(this._params.fovYDeg);
