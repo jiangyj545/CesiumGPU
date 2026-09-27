@@ -519,14 +519,16 @@ struct CameraUniforms {
   nearFar         : vec2<f32>,     // @224 (8B)
 }
 
-// 96B 渲染侧参数（B1 flags/船迹 + L3 水下视角）
+// 128B 渲染侧参数（B1 flags/船迹 + L3 水下视角 + L4-A 岸线泡沫）
 struct OceanRenderParams {
-  sunDir     : vec4<f32>,  // 指向太阳（归一化，归一化 ECEF 空间）
-  deepColor  : vec4<f32>,  // 深水基色
-  skyColor   : vec4<f32>,  // 天空/雾色
-  flags      : vec4<f32>,  // x 泡沫图案开 / y 船迹开 / z 折射开 / w 折射强度
-  wakeUv     : vec4<f32>,  // 船迹 uv = planeXZ*zw + xy（窗口米 → [0,1)）
-  underwater : vec4<f32>,  // L3 x 水下视角开（从下看水面，其余保留）
+  sunDir      : vec4<f32>,  // 指向太阳（归一化，归一化 ECEF 空间）
+  deepColor   : vec4<f32>,  // 深水基色
+  skyColor    : vec4<f32>,  // 天空/雾色
+  flags       : vec4<f32>,  // x 泡沫图案开 / y 船迹开 / z 折射开 / w 折射强度
+  wakeUv      : vec4<f32>,  // 船迹 uv = planeXZ*zw + xy（窗口米 → [0,1)）
+  underwater  : vec4<f32>,  // L3 x 水下视角开（从下看水面，其余保留）
+  shoreParams : vec4<f32>,  // L4-A x 岸线泡沫开 / y shoreStrength（zw 保留）
+  seabedUv    : vec4<f32>,  // L4-A seabed uv = planeXZ*zw + xy（海面局部米 → [0,1]）
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
@@ -555,6 +557,11 @@ struct ShadowUniforms {
 @group(0) @binding(10) var<uniform> shadow     : ShadowUniforms;
 @group(0) @binding(11) var           shadowTex : texture_depth_2d_array;
 @group(0) @binding(12) var           shadowCmp : sampler_comparison;
+
+// L4-A 岸线泡沫：海床高度场（r32float，R = 海拔米，海平面 = 0）。不可过滤
+// 格式 → FS 用 textureLoad 取最近 texel；未绑定海床时 CPU 侧挂 1×1 全 -1000
+// （极深 = 无泡沫）占位且 shoreParams.x = 0 不采样。
+@group(0) @binding(13) var seabedTex : texture_2d<f32>;
 
 // 按视距（归一化单位）选级联；超出覆盖范围返回 -1（无阴影）。
 fn cssmSelectCascade(viewDist: f32) -> i32 {
@@ -638,6 +645,7 @@ struct VSOut {
   @location(0) worldPos : vec3<f32>,
   @location(1) planeXZ : vec2<f32>,
   @location(2) screenUV : vec2<f32>,  // 折射采样场景颜色历史用（NDC → [0,1]）
+  @location(3) waveH : f32,           // L4-A 波面高（米，前 3 级联 disp.y + 船迹），岸线水深用
 }
 
 @vertex
@@ -670,6 +678,7 @@ fn vs_main( input : VSIn ) -> VSOut {
   out.worldPos = input.ecef + dispVec;
   out.planeXZ = input.planeXZ;
   out.screenUV = ( clip.xy / max( clip.w, 1e-6 ) ) * 0.5 + 0.5;
+  out.waveH = disp.y;
   return out;
 }
 
@@ -742,11 +751,36 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     let wuv = input.planeXZ * renderParams.wakeUv.zw + renderParams.wakeUv.xy;
     wakeFoam = textureSampleLevel( wakeTex, clampSmp, wuv, 0.0 ).g;
   }
-  let coverage = clamp( foam + wakeFoam, 0.0, 1.0 );
 
   // 泡沫遮罩：A3 图案阈值化（绑定图案且开关开启）或原 hash 噪声调制（零回归回退）
   let fN = vnoise( input.planeXZ * 1.7 ) * 0.6 + vnoise( input.planeXZ * 5.3 ) * 0.4;
-  var foamMask = clamp( foam * ( 0.45 + 1.1 * fN ), 0.0, 1.0 );
+
+  // L4-A 岸线泡沫：seabed 高度场（R = 海拔米）+ 波面高 varying → 瞬时水深。
+  // flag 关闭时三分量保持初值，下游公式逐项退化回原路径
+  // （covTotal = foam*1 + 0 + wakeFoam、edgeFade = 1 → 零回归）。
+  var jacW = 1.0;     // 近岸 Jacobian 泡沫减权（surf=1 打 5 折，tidewater:421 语义）
+  var shoreCov = 0.0; // 破碎带泡沫增量
+  var edgeFade = 1.0; // 浅水 alpha 收边（水膜结束在岸线，露出干沙给海床画）
+  if ( renderParams.shoreParams.x > 0.5 ) {
+    let suv = input.planeXZ * renderParams.seabedUv.zw + renderParams.seabedUv.xy;
+    var seabedH = -1000.0; // 场外 = 极深 → 无泡沫不收边
+    if ( all( suv >= vec2<f32>( 0.0 ) ) && all( suv <= vec2<f32>( 1.0 ) ) ) {
+      let dim = textureDimensions( seabedTex, 0 );
+      let tc = clamp( vec2<i32>( suv * vec2<f32>( dim ) ), vec2<i32>( 0 ), vec2<i32>( dim ) - vec2<i32>( 1 ) );
+      seabedH = textureLoad( seabedTex, tc, 0 ).r;
+    }
+    let depth = input.waveH - seabedH;        // 瞬时水深（米）
+    let surf = smoothstep( 7.0, 3.0, depth ); // 破碎带：≤3m 全量、≥7m 归零（tidewater SurfFoam 同款语义）
+    jacW = 1.0 - 0.5 * surf;
+    shoreCov = surf * renderParams.shoreParams.y * ( 0.75 + 0.5 * fN );
+    edgeFade = smoothstep( 0.0, 0.05, depth );
+  }
+
+  let covTotal = foam * jacW + shoreCov + wakeFoam;
+  let coverage = clamp( covTotal, 0.0, 1.0 );
+
+  var foamMask = clamp( foam * jacW * ( 0.45 + 1.1 * fN ), 0.0, 1.0 ) + shoreCov;
+  foamMask = clamp( foamMask, 0.0, 1.0 );
   var fineGlow = 0.0;
   var albedoJit = 1.0;
   if ( renderParams.flags.x > 0.5 ) {
@@ -789,11 +823,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let fog = 1.0 - exp( - distM / FOG_DIST );
   col = mix( col, fogCol, fog * 0.95 );
 
-  return vec4<f32>( col, 1.0 );
+  return vec4<f32>( col, edgeFade );
 }
 `;
 
 /** OceanParams uniform buffer 字节数（288B，见 struct 注释）。 */
 export const OCEAN_PARAMS_UBO_BYTES = 288;
-/** OceanRenderParams uniform buffer 字节数（96B：sunDir/deep/sky/flags/wakeUv/underwater）。 */
-export const OCEAN_RENDER_PARAMS_UBO_BYTES = 96;
+/** OceanRenderParams uniform buffer 字节数（128B：sunDir/deep/sky/flags/wakeUv/underwater/shoreParams/seabedUv）。 */
+export const OCEAN_RENDER_PARAMS_UBO_BYTES = 128;

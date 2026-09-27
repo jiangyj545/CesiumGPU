@@ -2,6 +2,7 @@ import type { IPass } from '../scene/passes/IPass';
 import type { Camera } from '../scene/Camera';
 import type { Context } from '../renderer/Context';
 import type { FFTDataSource, OceanCaustics } from './OceanCaustics';
+import type { SeabedHeightField } from './SeabedHeightField';
 import { ecefFromLonLatHeight } from '../terrain/TerrainProvider';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 import { CAUSTICS_FLOOR_SHADER, FLOOR_PARAMS_UBO_BYTES } from '../shaders/OceanCausticsShader';
@@ -13,10 +14,12 @@ export interface CausticsFloorOptions {
   center: [number, number];
   /** 沙洲边长（米，贴地经纬网格）。Default: `400` */
   sizeM?: number;
-  /** 沙洲面在水下的深度（米，向下偏移 ECEF 模长）。Default: `6` */
+  /** 沙洲面在水下的深度（米，向下偏移 ECEF 模长，仅平底模式）。Default: `6` */
   depthM?: number;
   /** 太阳方向（指向太阳，归一化 ECEF）。Default: `[0.4, 0.5, 0.77]` */
   sunDirection?: [number, number, number];
+  /** 湿沙线强度（0=关；bindSeabed 绑定高度场后生效）。Default: `0` */
+  shoreStrength?: number;
 }
 
 /** 每纬度度数对应米数（小范围线性换算，与 OceanFFTWater 一致）。 */
@@ -51,16 +54,22 @@ export class CausticsFloor implements IPass {
   /** 可见性开关（EffectManager 每帧检查）。 */
   show = true;
 
+  /** 湿沙线强度（0=关；每帧写入 UBO P[24]，仅 bindSeabed 绑定高度场后有视觉意义）。 */
+  shoreStrength: number;
+
   private _context: Context;
   private _camera: Camera | null = null;
   private _fft: FFTDataSource | null = null;
   private _source: OceanCaustics | null = null;
+  private _seabed: SeabedHeightField | null = null;
 
+  private readonly _centerLon: number;
+  private readonly _centerLat: number;
   private readonly _sizeM: number;
   private readonly _depthM: number;
   private readonly _sunLocal: [number, number, number];
   private readonly _upDir: [number, number, number];
-  private readonly _geometry: { vertices: Float32Array; indices: Uint32Array; indexCount: number };
+  private _geometry: { vertices: Float32Array; indices: Uint32Array; indexCount: number };
 
   // ── GPU 资源 ──
   private _cameraUBO: GPUBuffer | null = null;
@@ -84,8 +93,11 @@ export class CausticsFloor implements IPass {
     }
 
     this._context = context;
+    this._centerLon = lon;
+    this._centerLat = lat;
     this._sizeM = options.sizeM ?? 400;
     this._depthM = options.depthM ?? 6;
+    this.shoreStrength = options.shoreStrength ?? 0;
 
     // 太阳方向 ECEF → 局部 ENU；upDir 为「每米归一化 ECEF 增量」（数值差分）
     const enu = CausticsFloor._enuBasis(lon, lat);
@@ -95,10 +107,28 @@ export class CausticsFloor implements IPass {
     this._sunLocal = [dot(sun, enu.east), dot(sun, enu.up), dot(sun, enu.north)];
     this._upDir = enu.up;
 
-    this._geometry = CausticsFloor._buildGeometry(lon, lat, this._sizeM, FLOOR_SEGMENTS);
+    this._geometry = CausticsFloor._buildGeometry(lon, lat, this._sizeM, FLOOR_SEGMENTS, null);
   }
 
   // ── 公开 API ─────────────────────────────────────────────────────────────
+
+  /**
+   * 绑定海床高度场（海洋 L4-B 起伏几何）：立即 CPU 重建网格，顶点 ECEF 改为
+   * `ecefFromLonLatHeight(lon, lat, seabedH)` 海拔投影（引擎单一来源换算），
+   * 高度米随顶点属性进 VS/FS（湿沙线）。传 `null` 恢复平底（零回归）。
+   * 同一 field 引用重复调用为无操作（幂等，不重写 GPU 缓冲）。
+   */
+  bindSeabed(field: SeabedHeightField | null): void {
+    if (this._seabed === field) return;
+    this._seabed = field;
+    this._geometry = CausticsFloor._buildGeometry(
+      this._centerLon, this._centerLat, this._sizeM, FLOOR_SEGMENTS, field
+    );
+    // prepare 已建过顶点缓冲时原位重写（几何拓扑固定 → 字节数恒定，无需重建）
+    if (this._vertexBuffer) {
+      this._context.writeBuffer(this._vertexBuffer, 0, CausticsFloor._asBytes(this._geometry.vertices));
+    }
+  }
 
   /** 绑定 FFT 波场数据源（长波斜率摆动 + 级联尺寸）。可重复调用。 */
   bindFFT(fft: FFTDataSource): void {
@@ -162,10 +192,11 @@ export class CausticsFloor implements IPass {
             module,
             entryPoint: 'vs_main',
             buffers: [{
-              arrayStride: 20, // 5 floats：[ecefX, ecefY, ecefZ, planeX_m, planeZ_m]
+              arrayStride: 24, // 6 floats：[ecefX, ecefY, ecefZ, planeX_m, planeZ_m, seabedH_m]
               attributes: [
                 { shaderLocation: 0, offset: 0, format: 'float32x3' },  // 海平面基准 ecef
                 { shaderLocation: 1, offset: 12, format: 'float32x2' }, // planeXZ（米）
+                { shaderLocation: 2, offset: 20, format: 'float32' },   // 海拔米（湿沙线）
               ],
             }],
           },
@@ -223,7 +254,7 @@ export class CausticsFloor implements IPass {
    * `loadOp: 'load'` 叠加绘制沙面（不清除已合成的场景）。
    * 未绑定焦散纹理或 FFT 数据源时跳过（B1 集成两 bind 均需就位）。
    */
-  execute(encoder: GPUCommandEncoder, target: GPUTextureView, _time: number): void {
+  execute(encoder: GPUCommandEncoder, target: GPUTextureView, time: number): void {
     this.prepare();
     if (this._failed) return;
 
@@ -251,7 +282,7 @@ export class CausticsFloor implements IPass {
     });
     this._context.writeBuffer(this._cameraUBO, 0, camData);
 
-    // ── 参数 UBO（96B；焦面深度/覆盖域与 OceanCaustics 配置保持一致）────
+    // ── 参数 UBO（112B；P[0..23] 焦面深度/覆盖域与 OceanCaustics 保持一致）──
     const P = this._paramsF32;
     P.set(this._sunLocal, 0);
     P.set(this._upDir, 4);
@@ -265,6 +296,10 @@ export class CausticsFloor implements IPass {
     P[15] = 0.92;                                          // depths.w 基础 alpha
     P.set(SAND_COLOR, 16);
     P.set(SKY_COLOR, 20);
+    P[24] = Number.isFinite(this.shoreStrength) ? Math.max(0, this.shoreStrength) : 0; // wet.x 湿沙强度（0=关）
+    P[25] = time;                                          // wet.y 效果时间（s，浪痕呼吸）
+    P[26] = this._seabed ? 1.0 : 0.0;                      // wet.z 高度模式（1=ECEF 已含海拔）
+    P[27] = 0;                                             // wet.w 保留对齐
 
     if (this._boundCaustics !== caustics || this._boundDeriv !== deriv || !this._bindGroup) {
       this._bindGroup = this._context.device.createBindGroup({
@@ -328,8 +363,14 @@ export class CausticsFloor implements IPass {
   }
 
   /**
-   * 贴地经纬正方形网格 → 归一化 ECEF 顶点：每顶点 [ecefX,ecefY,ecefZ,planeX,planeZ]
-   * （ecef 为海平面基准；沙面深度在 VS 内经 upDir 偏移，规避 f32 精度损失）。
+   * 贴地经纬正方形网格 → 归一化 ECEF 顶点：每顶点 [ecefX,ecefY,ecefZ,planeX,planeZ,seabedH]。
+   *
+   * 平底模式（field=null，零回归）：ecef 为海平面基准，seabedH 写 0；
+   * 沙面深度在 VS 内经 upDir·(-depthM) 偏移，规避 f32 精度损失。
+   *
+   * 高度场模式（field≠null，海洋 L4-B）：seabedH = field.sampleHeight(planeX,planeZ)
+   * 海拔米，ecef 经引擎 `ecefFromLonLatHeight(lon,lat,seabedH)` 单一来源投影回
+   * 压扁世界（禁止手写坐标换算——项目血泪铁律），VS 内 drop=0（wet.z 门）。
    * planeX=东向米 / planeZ=北向米（与焦散纹理/导数采样坐标同系）；
    * 经纬增量用小范围线性换算（Δlon = 米 / (111320·cos lat)）。
    */
@@ -337,11 +378,12 @@ export class CausticsFloor implements IPass {
     centerLon: number,
     centerLat: number,
     sizeM: number,
-    segments: number
+    segments: number,
+    field: SeabedHeightField | null
   ): { vertices: Float32Array; indices: Uint32Array; indexCount: number } {
     const n = segments + 1;
     const metersPerDegLon = METERS_PER_DEG * Math.cos((centerLat * Math.PI) / 180);
-    const vertices = new Float32Array(n * n * 5);
+    const vertices = new Float32Array(n * n * 6);
     const tmp: [number, number, number] = [0, 0, 0];
 
     for (let iy = 0; iy < n; iy++) {
@@ -350,13 +392,15 @@ export class CausticsFloor implements IPass {
       for (let ix = 0; ix < n; ix++) {
         const planeX = (ix / segments - 0.5) * sizeM;
         const lon = centerLon + planeX / metersPerDegLon;
-        ecefFromLonLatHeight(lon, lat, 0, tmp);
-        const v = (iy * n + ix) * 5;
+        const h = field ? field.sampleHeight(planeX, planeZ) : 0;
+        ecefFromLonLatHeight(lon, lat, h, tmp);
+        const v = (iy * n + ix) * 6;
         vertices[v + 0] = tmp[0];
         vertices[v + 1] = tmp[1];
         vertices[v + 2] = tmp[2];
         vertices[v + 3] = planeX;
         vertices[v + 4] = planeZ;
+        vertices[v + 5] = h;
       }
     }
 

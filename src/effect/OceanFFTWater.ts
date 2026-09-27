@@ -21,6 +21,7 @@ import { SHADOW_RECEIVER_UBO_SIZE } from '../shadow/ShadowMap';
 import type { ShadowReceiverBinding } from '../shadow/ShadowMap';
 import type { FoamPatternTexture } from './FoamPatternTexture';
 import type { WakeField } from './WakeField';
+import type { SeabedHeightField } from './SeabedHeightField';
 import type { FFTDataSource } from './OceanCaustics';
 
 /** FFT 边长（与 shader 内 N 一致）。 */
@@ -156,6 +157,17 @@ export class OceanFFTWater implements IPass {
   private _foamPattern: FoamPatternTexture | null = null;
   private _wake: WakeField | null = null;
   private _refraction: boolean;
+  /** L4-A 岸线泡沫：海床高度场（null = 原路径零回归）。 */
+  private _seabed: SeabedHeightField | null = null;
+  /** 岸线泡沫强度（UBO shoreParams.y，默认 1.0，0 = 等效关闭）。 */
+  private _shoreStrength = 1.0;
+  /** 海面中心归一化 ECEF（水位折入模长）+ east/north 基——seabedUv 原点差投影用。 */
+  private readonly _centerEcef: [number, number, number];
+  private readonly _eastDir: [number, number, number];
+  private readonly _northDir: [number, number, number];
+  /** planeXZ → seabed uv 仿射系数：uv = planeXZ*scale + offset（bindSeabed 时算好）。 */
+  private _seabedUvOffset: [number, number] = [0.5, 0.5];
+  private _seabedUvScale: [number, number] = [1, 1];
   /** 场景颜色历史来源（Scene.sceneColorHistory），null = 折射不混色。 */
   private _sceneHistorySource: (() => GPUTextureView | null) | null = null;
   /** L3：CSSM 阴影源 getter（`() => scene.shadow.receiverBinding()`）。null = 无阴影。 */
@@ -169,6 +181,9 @@ export class OceanFFTWater implements IPass {
   /** 未绑定 foam/wake/history 时的 1×1 零纹理（BGL 恒全绑定的回退资源）。 */
   private _fallbackTex: GPUTexture | null = null;
   private _fallbackView: GPUTextureView | null = null;
+  /** L4-A：seabed 未绑定/已 dispose 时的 1×1 r32float 占位（R = -1000 极深 = 无泡沫）。 */
+  private _seabedFallbackTex: GPUTexture | null = null;
+  private _seabedFallbackView: GPUTextureView | null = null;
   /** 渲染参数暂存（每帧整体写入：静态段 + 动态 flags/wakeUv）。 */
   private readonly _renderParamsF32: Float32Array;
   /** 双波浪系统：local 风浪 + 远场涌浪（tidewater 默认参数）。 */
@@ -199,6 +214,8 @@ export class OceanFFTWater implements IPass {
   private _bgHist: GPUTextureView | null = null;
   /** L3 阴影缓存键：源 UBO 身份（ShadowMap 重建 GPU 资源后引用会换）。 */
   private _bgShadow: GPUBuffer | null = null;
+  /** L4-A 缓存键：seabed 高度场视图身份（bindSeabed 切换 / dispose 后换占位）。 */
+  private _bgSeabed: GPUTextureView | null = null;
   /** L3：阴影未激活时的占位资源（1×1 depth 2d-array + 全零 UBO + comparison）。 */
   private _shadowFallbackTex: GPUTexture | null = null;
   private _shadowFallbackView: GPUTextureView | null = null;
@@ -279,6 +296,9 @@ export class OceanFFTWater implements IPass {
 
     // ENU 基（每米归一化 ECEF 增量）写入 uniform 静态段
     const enu = OceanFFTWater._enuBasis(lon, lat, this._waterLevel);
+    this._centerEcef = OceanFFTWater._ecef(lon, lat, this._waterLevel);
+    this._eastDir = enu.east;
+    this._northDir = enu.north;
     this._paramsF32.set(enu.east, P_EAST);
     this._paramsF32.set(enu.north, P_NORTH);
     this._paramsF32.set(enu.up, P_UP);
@@ -349,6 +369,42 @@ export class OceanFFTWater implements IPass {
   /** 绑定/解绑船迹波场（A4）。null 时 VS 不叠加波高、FS 不叠加泡沫。 */
   bindWake(wake: WakeField | null): void {
     this._wake = wake;
+  }
+
+  /**
+   * 绑定/解绑海床高度场（L4-A 岸线泡沫）。null 时 flag=0 走原路径（零回归）。
+   *
+   * uv 仿射在绑定时刻算好：seabed 局部平面与海面 planeXZ 同为 ENU 米域但
+   * 原点不同，须做原点差换算——seabedLocal = oceanLocal + (oceanCenter -
+   * seabedCenter) 在共享 ENU 平面基（海面 east/north，每米归一化 ECEF 增量）
+   * 下的投影，uv = seabedLocal / sizeMeters + 0.5（与 seabed 纹理行主序
+   * j=z / i=x 排布一致）。中心重合时 offset 恰为 (0.5, 0.5)。
+   */
+  bindSeabed(field: SeabedHeightField | null): void {
+    this._seabed = field;
+    if (!field) return;
+    const c = field.centerRadial;
+    const dx = this._centerEcef[0] - c.x;
+    const dy = this._centerEcef[1] - c.y;
+    const dz = this._centerEcef[2] - c.z;
+    // 原点差在共享 ENU 平面基下的投影：center 均为归一化 ECEF（模长 ~1），
+    // 基向量为「每米归一化增量」→ 需最小二乘投影 M = dot(diff, basis) /
+    // dot(basis, basis) 还原米数（直接点积会差 R 倍，错位测试抓到）。
+    const e = this._eastDir;
+    const n = this._northDir;
+    const eastM = (dx * e[0] + dy * e[1] + dz * e[2]) / (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+    const northM = (dx * n[0] + dy * n[1] + dz * n[2]) / (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    const s = 1 / field.sizeMeters;
+    this._seabedUvOffset = [eastM * s + 0.5, northM * s + 0.5];
+    this._seabedUvScale = [s, s];
+  }
+
+  /** 岸线泡沫强度（UBO shoreParams.y；0 = 等效关闭）。 */
+  setShoreStrength(v: number): void {
+    if (!Number.isFinite(v) || v < 0) {
+      throw new Error(`OceanFFTWater.setShoreStrength: 非法 ${v}`);
+    }
+    this._shoreStrength = v;
   }
 
   /** 开关折射混色（仍依赖 bindSceneHistory 提供的场景颜色历史）。 */
@@ -475,6 +531,17 @@ export class OceanFFTWater implements IPass {
     RP[14] = this._refraction ? 1 : 0;
     RP[15] = 0.045; // 折射扰动强度（NDC 域，∝法线水平分量）
     RP[20] = this._underwaterView ? 1 : 0; // L3 水下视角
+    // L4-A 岸线泡沫：RP[24] flag（下一空闲位，flags vec4 已满：x/y/z 开关 + w 强度）
+    // + RP[25] 强度 + RP[28-31] seabedUv 仿射（海面局部米 → seabed 纹理 [0,1]）。
+    const sbActive = !!(this._seabed && this._seabed.seabedTexture);
+    RP[24] = sbActive ? 1 : 0;
+    RP[25] = this._shoreStrength;
+    if (sbActive) {
+      RP[28] = this._seabedUvOffset[0];
+      RP[29] = this._seabedUvOffset[1];
+      RP[30] = this._seabedUvScale[0];
+      RP[31] = this._seabedUvScale[1];
+    }
     if (this._wake && this._wake.fieldView) {
       // uv = planeXZ * scale + offset；offset = -windowOrigin / windowSizeM
       const winM = this._wake.gridN * this._wake.cellM;
@@ -490,6 +557,8 @@ export class OceanFFTWater implements IPass {
     const foamView = this._foamPattern?.view ?? this._fallbackView!;
     const wakeView = (this._wake && RP[13] > 0.5) ? this._wake.fieldView! : this._fallbackView!;
     const histView = this._refraction ? (this._sceneHistorySource?.() ?? this._fallbackView!) : this._fallbackView!;
+    // L4-A：seabed 视图（场已 dispose → seabedTexture null → 占位 + flag=0）
+    const seabedView = sbActive ? this._seabed!.seabedTexture! : this._seabedFallbackView!;
     // L3：每帧惰性求值阴影源（Scene.render 中 shadow.execute 已先于 effects
     // 更新共享 UBO → 级联矩阵随相机移动自动最新）；null 换占位资源。
     const shadowSrc = this._shadowSource?.() ?? null;
@@ -497,7 +566,7 @@ export class OceanFFTWater implements IPass {
     const shView = shadowSrc?.textureView ?? this._shadowFallbackView!;
     const shSmp = shadowSrc?.comparisonSampler ?? this._shadowCmpSampler!;
     if (!this._renderBindGroup || foamView !== this._bgFoam || wakeView !== this._bgWake
-      || histView !== this._bgHist || shUbo !== this._bgShadow) {
+      || histView !== this._bgHist || shUbo !== this._bgShadow || seabedView !== this._bgSeabed) {
       this._renderBindGroup = this._context.device.createBindGroup({
         layout: this._renderBindGroupLayout,
         entries: [
@@ -514,12 +583,14 @@ export class OceanFFTWater implements IPass {
           { binding: 10, resource: { buffer: shUbo } },
           { binding: 11, resource: shView },
           { binding: 12, resource: shSmp },
+          { binding: 13, resource: seabedView },
         ],
       });
       this._bgFoam = foamView;
       this._bgWake = wakeView;
       this._bgHist = histView;
       this._bgShadow = shUbo;
+      this._bgSeabed = seabedView;
     }
 
     const camData = new Float32Array(CAMERA_UBO_SIZE / 4);
@@ -560,12 +631,16 @@ export class OceanFFTWater implements IPass {
     this._fallbackTex?.destroy();
     this._fallbackTex = null;
     this._fallbackView = null;
+    this._seabedFallbackTex?.destroy();
+    this._seabedFallbackTex = null;
+    this._seabedFallbackView = null;
     this._derivTextureView = null;
     this._renderBindGroupLayout = null;
     this._bgFoam = null;
     this._bgWake = null;
     this._bgHist = null;
     this._bgShadow = null;
+    this._bgSeabed = null;
     this._shadowFallbackTex?.destroy();
     this._shadowFallbackUBO?.destroy();
     this._shadowFallbackTex = null;
@@ -765,6 +840,24 @@ export class OceanFFTWater implements IPass {
         this._fallbackView = this._fallbackTex.createView();
       }
 
+      // L4-A 岸线泡沫占位：1×1 r32float 全 -1000（极深 = 无泡沫）。BGL 恒全
+      // 绑定；shoreParams.x = 0 时 shader 不采样，走原路径（零回归）。
+      if (!this._seabedFallbackTex) {
+        this._seabedFallbackTex = device.createTexture({
+          label: 'OceanFFTSeabedFallback',
+          size: [1, 1],
+          format: 'r32float',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        device.queue.writeTexture(
+          { texture: this._seabedFallbackTex },
+          new Float32Array([-1000]),
+          { bytesPerRow: 4, rowsPerImage: 1 },
+          [1, 1, 1],
+        );
+        this._seabedFallbackView = this._seabedFallbackTex.createView();
+      }
+
       // L3 阴影占位资源：1×1 depth32float 2d-array + 全零 UBO + comparison 采样器。
       // UBO 不写即全零 → params.x=0 → cssmShadowFactor 短路返回 1（阴影零回归）。
       if (!this._shadowFallbackTex) {
@@ -811,6 +904,8 @@ export class OceanFFTWater implements IPass {
           { binding: 10, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: SHADOW_RECEIVER_UBO_SIZE } },
           { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', viewDimension: '2d-array', multisampled: false } },
           { binding: 12, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
+          // L4-A 岸线泡沫：seabed 高度场 r32float（不可过滤 → FS textureLoad 取最近 texel）
+          { binding: 13, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
         ],
       });
 

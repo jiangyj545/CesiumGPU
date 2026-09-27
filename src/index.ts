@@ -169,6 +169,13 @@ export { FoamPatternTexture } from './effect/FoamPatternTexture';
 export type { FoamPatternTextureOptions } from './effect/FoamPatternTexture';
 export { WakeField } from './effect/WakeField';
 export type { WakeFieldOptions, WakeSource } from './effect/WakeField';
+// L4 海洋地基：程序化沙洲高度场（岸线泡沫/湿沙线消费）
+export { SeabedHeightField } from './effect/SeabedHeightField';
+export type { SeabedHeightOptions } from './effect/SeabedHeightField';
+
+// L4 船首浪喷雾（tidewater BoatSpray 直译裁剪版）
+export { BowSpray, computeEmitDemand, sprayGate } from './effect/BowSpray';
+export type { BowSprayBoatState, BowSprayOptions } from './effect/BowSpray';
 
 // L3 水下观感全屏叠加（蓝绿深度雾 + 浮游颗粒 + 焦散缓动）
 export { UnderwaterFog } from './effect/UnderwaterFog';

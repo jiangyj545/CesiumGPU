@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>示例 96：FFT 海洋 L3（五件套 + CSSM 船体阴影 + 水下模式）- CesiumGPU</title>
+  <title>示例 96：FFT 海洋 L4（五件套 + CSSM 船体阴影 + 水下 + 沙洲场/岸线/船首喷雾）- CesiumGPU</title>
   <style>
     .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:340px;max-width:460px;
       padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
@@ -22,10 +22,12 @@
 <body>
   <div id="cesiumContainer"></div>
   <div class="cg-panel">
-    <h1>96 FFT 海洋 · L3（五件套 + 阴影 + 水下）</h1>
+    <h1>96 FFT 海洋 · L4（五件套 + 阴影 + 水下 + 沙洲场）</h1>
     <p class="desc">FFT 谱海面 + <b>L2 五件套</b>（物理大气 / 沙洲焦散 / 程序泡沫 /
       船迹波场 / 水面折射）+ <b>L3</b>：CSSM 级联船体阴影（海面 PCF 软边接收，
       太阳方向与大气/海洋同源）与水下模式（海面双面视角 + 水下观感叠加）。
+      <b>L4</b>：SeabedHeightField 海拔场（径向沙洲）→ 海面水深泡沫/收边 +
+      海床起伏/湿沙线，BowSpray 船首喷雾（随航速喷射）。
       巡航船沿椭圆航线自动航行，船体随航向转向。</p>
     <label>风速 <b id="windSpeedVal">8.0</b> m/s</label>
     <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="8" />
@@ -46,6 +48,9 @@
       <label class="checkline"><input id="skyToggle" type="checkbox" checked /> 物理大气</label>
       <label class="checkline"><input id="refractionToggle" type="checkbox" checked /> 水面折射</label>
       <label class="checkline"><input id="shadowToggle" type="checkbox" checked /> 船体阴影</label>
+      <label class="checkline"><input id="shoreFoamToggle" type="checkbox" checked /> 岸线泡沫</label>
+      <label class="checkline"><input id="wetSandToggle" type="checkbox" checked /> 湿沙线</label>
+      <label class="checkline"><input id="sprayToggle" type="checkbox" checked /> 船首喷雾</label>
     </div>
     <button id="diveBtn" style="margin-top:10px;width:100%;padding:6px 0;cursor:pointer;
       background:#12395c;color:#8ee6ff;border:1px solid rgba(120,180,255,.4);border-radius:6px;
@@ -123,18 +128,37 @@
       floor.bindFFT(ocean);
       floor.bindCaustics(caustics);
 
+      // ── 5b. L4 海拔场：SeabedHeightField 径向沙洲高度场（与沙洲同心）────
+      // L4 数据流：SeabedHeightField（海拔场：peak 1.8 m 露出水面 /
+      // 岸线 ~110 m 处海拔 0 / 外缘 -7 m 深底）
+      //   ├→ 海面 OceanFFTWater.bindSeabed：水深白沫 + 岸线收边（setShoreStrength）
+      //   └→ 海床 CausticsFloor.bindSeabed：网格起伏 + 湿沙线（shoreStrength）
+      // 海面与海床采样同一张高度场纹理（uv = 局部米坐标/sizeM + 0.5），
+      // 沙洲位置与岸线半径天然对齐。
+      const seabedField = new engine.SeabedHeightField(context, {
+        center: { lon: sbLon, lat: sbLat },
+        sizeM: 500,
+      });
+      ocean.bindSeabed(seabedField);  // 海面：水深泡沫 + 收边（绑定即开 seabed flag）
+      ocean.setShoreStrength(1.0);
+      floor.bindSeabed(seabedField);  // 海床：起伏 + 湿沙线
+      floor.shoreStrength = 0.8;
+
       // ── 6. effects 挂载顺序即执行顺序：wake(数据) → sky(背景) → ocean
-      //      → caustics(纹理生成) → floor(半透明叠画在水面上) → uwFog(全屏罩)
+      //      → caustics(纹理生成) → floor(半透明叠画在水面上)
+      //      → spray(船首喷雾粒子，GBuffer 深度测试) → uwFog(全屏罩)
       const uwFog = new engine.UnderwaterFog(context, {
         intensity: 1.15,
         waterColor: [0.05, 0.24, 0.27],
         particleDensity: 0.6,
       });
+      const spray = new engine.BowSpray(context, { maxParticles: 2048, scene: viewer.scene });
       viewer.scene.effects.add(wakeField);
       viewer.scene.effects.add(sky);
       viewer.scene.effects.add(ocean);
       viewer.scene.effects.add(caustics);
       viewer.scene.effects.add(floor);
+      viewer.scene.effects.add(spray); // L4 船首喷雾：floor 之后、uwFog 之前
       viewer.scene.effects.add(uwFog); // L3 水下观感：罩在所有场景效果之上
 
       // ── 6b. L3 海面阴影接收：每帧从 scene.shadow 拉取最新级联绑定 ─────
@@ -247,6 +271,31 @@
         ], new engine.Matrix4()));
       }
 
+      // ── 8c. L4 船首喷雾喂数：船首 = 船位 + 航向 × HULL_L/2 ─────────────
+      // bowPos 为归一化 ECEF（米/R_EARTH 尺度，与 boatMatrix 同源），
+      // headingDir/sideDir 复用同一 ENU 基推导，不自建坐标换算。
+      const sprayState = {
+        bowPos: { x: 0, y: 0, z: 0 },
+        headingDir: { x: 1, y: 0, z: 0 },
+        sideDir: { x: 0, y: 1, z: 0 },
+        speed: 0,
+        beamM: HULL_W,
+      };
+      function updateSprayState(px, pz, heading, speed) {
+        const [lon, lat] = planeToLonLat(px, pz);
+        const { east, north, up } = enuBasis(lon, lat);
+        const ch = Math.cos(heading), sh = Math.sin(heading);
+        const F = nrm3(add3(scl3(east, ch), scl3(north, sh))); // 航向（水平面内）
+        const S = nrm3(crs3(F, up));                           // 右舷 = heading × up
+        const bow = [0, 0, 0];
+        engine.ecefFromLonLatHeight(lon, lat, 0.8, bow);       // 与船体吃水同高
+        const off = scl3(F, HULL_L / 2 / R_EARTH);             // 局部 +HULL_L/2 沿航向
+        sprayState.bowPos = { x: bow[0] + off[0], y: bow[1] + off[1], z: bow[2] + off[2] };
+        sprayState.headingDir = { x: F[0], y: F[1], z: F[2] };
+        sprayState.sideDir = { x: S[0], y: S[1], z: S[2] };
+        sprayState.speed = speed;
+      }
+
       // ── 9. 航线动画：椭圆 arc-length 匀速（速度=船速滑杆），60s 级周期 ──
       const ELL_A = 90, ELL_B = 60; // 半长轴/半短轴（米），周长 ~470 m
       let theta = -Math.PI / 2;     // 从最南点出发（相机正前方入画）
@@ -310,6 +359,10 @@
         const heading = Math.atan2(ELL_B * Math.cos(theta), -ELL_A * Math.sin(theta)); // 速度方向
         const pitch = 0.03 * Math.sin(now * 1.3); // 轻微纵摇（±1.7°）
         wakeField.updateBoat({ planeX: px, planeZ: pz, heading, speed: boatSpeed, lengthM: HULL_L, beamM: HULL_W });
+        // L4：船首喷雾每帧喂数（船速 0 也照喂——BowSpray 自带 smoothstep(3.5,9) 速度门）
+        updateSprayState(px, pz, heading, boatSpeed);
+        if (spray.show) spray.setBoat(sprayState);
+        else spray.clearBoat();
         const m = boatMatrix(px, pz, heading, pitch, 0.8);
         hull.modelMatrix = m;
         cabin.modelMatrix = m;
@@ -343,6 +396,17 @@
       document.getElementById('shadowToggle').addEventListener('change', (e) => {
         viewer.scene.shadow.enabled = e.target.checked;
       });
+      // L4 开关：岸线泡沫 / 湿沙线 / 船首喷雾
+      document.getElementById('shoreFoamToggle').addEventListener('change', (e) => {
+        ocean.setShoreStrength(e.target.checked ? 1 : 0);
+      });
+      document.getElementById('wetSandToggle').addEventListener('change', (e) => {
+        floor.shoreStrength = e.target.checked ? 0.8 : 0;
+      });
+      document.getElementById('sprayToggle').addEventListener('change', (e) => {
+        spray.show = e.target.checked;
+        if (!e.target.checked) spray.clearBoat(); // 防残留粒子
+      });
 
       // ── 11. QA 钩子（CDP 终验用：等效于面板操作）──────────────────────
       const ck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
@@ -361,6 +425,10 @@
         getBoat: () => ({ ...lastBoat }),
         // ── L3 探针扩展 ────────────────────────────────────────────────
         setShadow(b) { viewer.scene.shadow.enabled = b; ck('shadowToggle', b); },
+        // ── L4 探针扩展：岸线泡沫 / 湿沙线 / 船首喷雾 ──────────────────
+        setShoreFoam(b) { ocean.setShoreStrength(b ? 1.0 : 0); ck('shoreFoamToggle', b); },
+        setWetSand(b) { floor.shoreStrength = b ? 0.8 : 0; ck('wetSandToggle', b); },
+        setSpray(b) { spray.show = b; if (!b) spray.clearBoat(); ck('sprayToggle', b); },
         setTimeScale(v) {
           ocean.setTimeScale(v);
           const el = document.getElementById('timeScale');
@@ -398,7 +466,7 @@
           engine,
           view: [121.65, 31.1413, 450],
           imagery: 'gaode-sat',
-          title: '96 · FFT 海洋 L2 五件套',
+          title: '96 · FFT 海洋 L4（五件套 + 沙洲场/岸线/喷雾）',
         }));
       } catch (err) {
         window.__DEMO_OK = false;
@@ -407,7 +475,7 @@
       try {
         window.viewer = viewer; // debug hook for QA probes
         await demo(viewer, engine);
-        DemoUtils.showCode(demo, '96 FFT 海洋 L2 五件套 · 核心代码');
+        DemoUtils.showCode(demo, '96 FFT 海洋 L4 · 核心代码');
         window.__DEMO_OK = true; // 海面特效挂载成功
       } catch (err) {
         window.__DEMO_OK = false;
