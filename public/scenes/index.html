@@ -79,7 +79,8 @@
   <header>
     <h1>多机防撞仿真 <em>·</em> 场景引导页</h1>
     <p>点击任意场景卡片,在新标签页打开 <b>90_sensorCam</b> 实时仿真 —— 相机为<b>长机机载天底视角</b>,画面中的
-       <b style="color:var(--danger)">红色盒子</b>即伴飞机(防撞检测目标)。同一 seed 刷新页面可<b>逐帧精确重放</b>。</p>
+       <b style="color:var(--danger)">红色盒子</b>即伴飞机(防撞检测目标)。同一 seed 刷新页面可<b>逐帧精确重放</b>。<br>
+       💡 每个标签页都是独立 WebGPU 渲染(单标签实测 ~165fps)——同时开多个场景标签会分摊 GPU 导致帧率骤降,看完请关闭旧标签。</p>
   </header>
 
   <div class="bar">
@@ -130,13 +131,28 @@
   const BASE = 'D:\\work\\仿真\\scenario\\examples\\';
   const $ = id => document.getElementById(id);
 
-  function buildUrl(s) {
+  // 90 页城市锚点只在 URL 带 &spec=<场景JSON> 时才对准 SSE 航线(缺省偏 ~270m
+  // 出视锥,白模看不到)——引导页经 vite /@fs(见 vite.config fs.allow)读平台仓
+  // 场景 JSON 透传,与 farm 录制行为一致。
+  const specCache = {};
+  async function fetchSpec(s) {
+    if (specCache[s.file] !== undefined) return specCache[s.file];
+    try {
+      const r = await fetch('/@fs/' + (BASE + s.file).replaceAll('\\', '/'));
+      specCache[s.file] = r.ok ? await r.text() : null;
+    } catch { specCache[s.file] = null; }
+    return specCache[s.file];
+  }
+
+  async function buildUrl(s) {
     const seed = $('seed').value || '42';
     const simUrl = $('simUrl').value || 'http://localhost:8895';
     const p = new URLSearchParams({
       pose: 'sse', simUrl,
       scenario: BASE + s.file, seed, hz: '5',
     });
+    const spec = await fetchSpec(s);
+    if (spec) p.set('spec', spec);
     return '/examples/90_sensorCam.html?' + p.toString();
   }
 
@@ -152,7 +168,7 @@
       <div class="desc">${s.desc}</div>
       <div class="meta">${s.chips.map(c => `<span class="chip${/near-miss|冲突/.test(c) ? ' hot' : ''}">${c}</span>`).join('')}</div>
       <div class="go">▶ 查看实时仿真 <span class="arr">→</span></div>`;
-    card.addEventListener('click', () => window.open(buildUrl(s), '_blank'));
+    card.addEventListener('click', () => buildUrl(s).then(u => window.open(u, '_blank')));
     grid.appendChild(card);
   }
 
