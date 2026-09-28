@@ -516,6 +516,11 @@ export const OCEAN_FFT_MIP_B_DERIV_SHADER = mipBShader(1);
 // ── 渲染 shader（VS 位移采样 / FS 法线・菲涅尔・高光・泡沫・雾）─────────────
 
 export const OCEAN_FFT_RENDER_SHADER = /* wgsl */`${OCEAN_PARAMS_WGSL}
+// sat 定义（与 OCEAN_FFT_COMMON_WGSL 同式但渲染段不拼 COMMON——Track P 雾
+// 染色调用 sat 而定义缺失，真机解析期 unresolved call target，2026-09-28
+// fn 守卫捕获；此处独立声明防重复定义）。
+fn sat( x : f32 ) -> f32 { return clamp( x, 0.0, 1.0 ); }
+
 // 256B 相机 UBO — 布局单一来源：src/renderer/CameraUniforms.ts
 struct CameraUniforms {
   viewMatrix      : mat4x4<f32>,   // @0   (64B)

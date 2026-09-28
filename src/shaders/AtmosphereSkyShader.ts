@@ -602,6 +602,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 export const ATMO_SKY_REFLECTION_WGSL = /* wgsl */`
 ${ATMO_CORE_WGSL}
 ${ATMO_SKY_LUMINANCE_WGSL}
+// SKY_COMPOSITE 必须先于 SKY_STARS：skyStars() 调用 skyHash13（定义在本段），
+// 漏拼时真机 createShaderModule 解析期抛 unresolved call target（2026-09-28
+// OceanFFTRenderShader 级联作废黑屏实测）。
+${SKY_COMPOSITE_WGSL}
 ${SKY_STARS_WGSL}
 ${SKY_MOON_WGSL}
 
