@@ -394,6 +394,26 @@
     }
     global.viewer = viewer; // console 调试钩子
 
+    // GPU validation 错误可视化：第一条 uncaptured error 即为整帧级联作废
+    //（"Frame Encoder invalid due to a previous error"）的根因——弹红框直读，
+    // 后续条目全为级联噪声，只 console 计数不再弹（防刷屏）。
+    try {
+      var gpuDevice = viewer.context && viewer.context.device;
+      if (gpuDevice && gpuDevice.addEventListener) {
+        var gpuFirstErrShown = false;
+        var gpuErrCount = 0;
+        gpuDevice.addEventListener('uncapturederror', function (ev) {
+          gpuErrCount++;
+          var msg = (ev.error && ev.error.message) || String(ev);
+          console.error('[DemoUtils] GPU uncaptured error #' + gpuErrCount, msg);
+          if (!gpuFirstErrShown) {
+            gpuFirstErrShown = true;
+            showError('WebGPU 校验错误（第 1 条 = 根因，后续为级联作废）', new Error(msg));
+          }
+        });
+      }
+    } catch (gpuHookErr) { /* device 访问失败不阻塞示例 */ }
+
     // 底图
     var imagery = opts.imagery === undefined ? 'gaode-sat' : opts.imagery;
     if (imagery !== 'none') {
