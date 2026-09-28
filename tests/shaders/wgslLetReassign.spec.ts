@@ -145,6 +145,61 @@ function scanUnresolvedCalls(wgsl: string, label: string): string[] {
   return unresolved;
 }
 
+/** WGSL 规范保留关键字（声明位置命中 100% 是 bug——解析期 "reserved keyword"）。
+ *  只在声明位（let/var/fn/const/struct 后标识符）检查：使用位保留字本身不合法语法
+ *  不会通过 let 扫描，声明位零误报。 */
+const WGSL_RESERVED = new Set([
+  'NULL', 'Self', 'abstract', 'active', 'alignas', 'alignof', 'as', 'asm', 'asm_fragment',
+  'async', 'attribute', 'auto', 'await', 'become', 'binding_array', 'cast', 'catch', 'class',
+  'co_await', 'co_return', 'co_yield', 'coherent', 'column_major', 'common', 'compile',
+  'compile_fragment', 'concept', 'const_cast', 'consteval', 'constexpr', 'constinit', 'crate',
+  'debugger', 'decltype', 'delete', 'demote', 'demote_to_helper', 'do', 'dynamic_cast',
+  'enum', 'explicit', 'export', 'extends', 'extern', 'external', 'fallthrough', 'filter',
+  'final', 'finally', 'friend', 'from', 'fxGroup', 'get', 'goto', 'groupshared', 'highp',
+  'impl', 'implements', 'import', 'inline', 'instanceof', 'interface', 'layout', 'lowp',
+  'macro', 'macro_rules', 'match', 'mediump', 'meta', 'mod', 'module', 'move', 'mut',
+  'mutable', 'namespace', 'new', 'nil', 'noexcept', 'noinline', 'nointerpolation',
+  'non_coherent', 'noncoherent', 'noperspective', 'null', 'nullptr', 'of', 'operator',
+  'package', 'packoffset', 'partition', 'pass', 'patch', 'pixelfragment', 'precise',
+  'precision', 'premerge', 'priv', 'protected', 'pub', 'public', 'readonly', 'ref',
+  'regardless', 'register', 'reinterpret_cast', 'require', 'resource', 'restrict', 'self',
+  'set', 'shared', 'sizeof', 'smooth', 'snorm', 'static', 'static_assert', 'static_cast',
+  'std', 'subroutine', 'super', 'target', 'template', 'this', 'thread_local', 'throw',
+  'trait', 'try', 'type', 'typedef', 'typeid', 'typename', 'typeof', 'union', 'unless',
+  'unorm', 'unsafe', 'unsized', 'use', 'using', 'varying', 'virtual', 'volatile', 'wgsl',
+  'where', 'while', 'writeonly', 'yield',
+]);
+
+/** 扫描段内声明位保留字（let/var/const/fn/struct 后的标识符 ∈ 保留字表）。 */
+function scanReservedDecls(seg: string, segIdx: number, file: string): string[] {
+  const hits: string[] = [];
+  const cleaned = stripWgslComments(seg);
+  for (const m of cleaned.matchAll(/\b(?:let|var|const|fn|struct)\s+([a-zA-Z_]\w*)/g)) {
+    if (WGSL_RESERVED.has(m[1])) {
+      hits.push(`${file} [wgsl#${segIdx}] 声明 "${m[1]}" 是 WGSL 保留关键字`);
+    }
+  }
+  return hits;
+}
+
+describe('WGSL 保留字声明守卫', () => {
+  it('src/shaders 全部 WGSL 段无保留字声明', () => {
+    const files = collectTs(SHADER_ROOT);
+    const violations: string[] = [];
+    for (const f of files) {
+      const segs = extractWgslSegments(readFileSync(f, 'utf8'));
+      segs.forEach((seg, i) => violations.push(...scanReservedDecls(seg, i, f.split('src')[1])));
+    }
+    expect(violations, `WGSL 保留字声明（改名）：\n${violations.join('\n')}`).toHaveLength(0);
+  });
+
+  it('守卫自检：能捕获 SwashField 历史坏模式', () => {
+    expect(scanReservedDecls('let target = 1.0;', 0, '(selftest)')).toHaveLength(1);
+    expect(scanReservedDecls('let targetEta = 1.0;', 0, '(selftest)')).toHaveLength(0);
+    expect(scanReservedDecls('// let ref = 1.0;', 0, '(selftest)')).toHaveLength(0); // 注释剥除
+  });
+});
+
 describe('WGSL 拼接模块 fn 调用解析守卫', () => {
   it('OCEAN_FFT_RENDER_SHADER（含 ATMO 反射块拼接产物）无未解析调用', () => {
     const hits = scanUnresolvedCalls(OCEAN_FFT_RENDER_SHADER, 'OCEAN_FFT_RENDER_SHADER');

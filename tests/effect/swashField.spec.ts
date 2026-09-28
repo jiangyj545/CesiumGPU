@@ -428,7 +428,7 @@ describe('SwashComputeShader 源串（物理公式钉死）', () => {
   });
   it('入射波 forcing：深水带松弛 + 主波正弦 + 切向相位', () => {
     expect(src).toContain('sp.wave.x * sin( sp.wave.y * sp.grid.w + phi )');
-    expect(src).toContain('eta1 = mix( eta1, target, k )');
+    expect(src).toContain('eta1 = mix( eta1, targetEta, k )');
     expect(src).toContain('if ( inRange && b < sp.misc.y ) {');
   });
   it('干湿前沿 + 海床 textureLoad（r32float unfilterable）+ ping-pong 输出', () => {

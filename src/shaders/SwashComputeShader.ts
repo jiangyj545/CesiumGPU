@@ -175,9 +175,11 @@ fn main( @builtin( global_invocation_id ) gid : vec3<u32> ) {
   if ( inRange && b < sp.misc.y ) {
     let phi = dot( p, tanDir ) * sp.wave.w;
     let sec = sp.wave.z * sp.wave.x * ( vnoise( p * 0.02 + vec2<f32>( sp.grid.w * 0.13, -sp.grid.w * 0.11 ) ) * 2.0 - 1.0 );
-    let target = sp.wave.x * sin( sp.wave.y * sp.grid.w + phi ) + sec;
+    // targetEta 而非 target：target 是 WGSL 保留关键字，声明即解析错
+    // （真机 "target is a reserved keyword"，2026-09-28 横幅捕获）。
+    let targetEta = sp.wave.x * sin( sp.wave.y * sp.grid.w + phi ) + sec;
     let k = 1.0 - exp( - dt * sp.misc.x );
-    eta1 = mix( eta1, target, k );
+    eta1 = mix( eta1, targetEta, k );
     u1 = u1 * ( 1.0 - k * 0.5 );
   }
 

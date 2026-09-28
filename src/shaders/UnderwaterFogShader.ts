@@ -129,8 +129,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let sunDir = uw.sunShaft.xyz / max(length(uw.sunShaft.xyz), 1e-6);
     let above  = clamp(dot(sunDir, up) * 3.0, 0.0, 1.0);
     if (above > 0.0) {
-      let target = cam.cameraPosition.xyz + sunDir * 10000.0;
-      let clip   = cam.viewProjMatrix * vec4<f32>(target, 1.0);
+      // sunPt 而非 target：target 是 WGSL 保留关键字（守卫捕获，同 SwashComputeShader）
+      let sunPt  = cam.cameraPosition.xyz + sunDir * 10000.0;
+      let clip   = cam.viewProjMatrix * vec4<f32>(sunPt, 1.0);
       if (clip.w > 0.0) {
         let sunUv = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
         let toSun = (sunUv - in.uv) * vec2<f32>(aspect, 1.0);
