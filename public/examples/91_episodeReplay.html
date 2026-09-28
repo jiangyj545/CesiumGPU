@@ -124,6 +124,7 @@
     const rgbImg = new Image();   // dataURL 缓存（同一 uri 不重复解码）
     let rgbUriLoaded = '';
     const state = { posList: [] };
+    let isRealEp = false;         // P3-S1 real 源标记（线宽/自动取景分支）
 
     const cRgb = document.getElementById('cRgb');
     const cDepth = document.getElementById('cDepth');
@@ -194,7 +195,7 @@
       const n = Math.max(2, fi + 1);
       flownEntity = addEntity({
         name: '已飞航迹',
-        polyline: { positions: state.posList.slice(0, n), width: 2.5, color: new engine.Color(1.0, 0.55, 0.1, 0.95) },
+        polyline: { positions: state.posList.slice(0, n), width: isRealEp ? 8 : 2.5, color: new engine.Color(1.0, 0.55, 0.1, 0.95) },
       });
     }
 
@@ -209,6 +210,7 @@
       // P3-S1 real-episode（docs/phase3-telemetry-backflow.md §3.1）：hz 在 meta 内
       // （frame_rate_hz/hz 双键）；demo 旧格式仍读顶层。
       hz = (ep.meta && (ep.meta.frame_rate_hz || ep.meta.hz)) || ep.frame_rate_hz || 5;
+      isRealEp = !!(ep.meta && ep.meta.source === 'real');
       duration = frames[frames.length - 1].sim_time_s;
       simT = 0;
       playing = true;
@@ -222,7 +224,7 @@
       addEntity({
         name: '全轨迹',
         // 线宽说明：引擎 polyline 宽度按世界尺度（米制带）渲染，视距 ~1.6km 下取小值
-        polyline: { positions: state.posList, width: 1.5, color: new engine.Color(0.3, 0.7, 1.0, 0.4) },
+        polyline: { positions: state.posList, width: isRealEp ? 6 : 1.5, color: new engine.Color(0.3, 0.7, 1.0, 0.4) },
       });
 
       // 2) 航点标记：优先 manifest.scenario.waypoints（ScenarioSpec 快照），
@@ -268,20 +270,26 @@
         const xs = state.posList.map((p) => p.x);
         const ys = state.posList.map((p) => p.y);
         const zs = state.posList.map((p) => p.z);
-        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-        const cz = (Math.min(...zs) + Math.max(...zs)) / 2;
+        // 轨迹包围盒中心（米制 ECEF，pos_ecef 绝对地心坐标已在前文 ecefToPos 反解验证）
+        const cxM = (Math.min(...xs) + Math.max(...xs)) / 2;
+        const cyM = (Math.min(...ys) + Math.max(...ys)) / 2;
+        const czM = (Math.min(...zs) + Math.max(...zs)) / 2;
         const spanM = Math.max(
           Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) * EARTH_SCALE,
           80,
         );
+        // 相机目的地与 demo 同一构造路径：包围盒中心（归一化）×EARTH_SCALE 还原米制
+        // → Cartographic 反解（入参米，height 出参亦为米）→ fromDegrees(lon, lat, h_m)。
+        const cc = engine.Cartographic.fromCartesian(new engine.Cartesian3(
+          cxM * EARTH_SCALE, cyM * EARTH_SCALE, czM * EARTH_SCALE,
+        ));
         viewer.camera.setView({
-          destination: new engine.Cartesian3(
-            cx * EARTH_SCALE + spanM * 2.2,
-            cy * EARTH_SCALE - spanM * 2.2,
-            cz * EARTH_SCALE + spanM * 1.6,
+          destination: engine.Cartesian3.fromDegrees(
+            cc.longitude * R2D,
+            cc.latitude * R2D,
+            cc.height + spanM * 0.9,
           ),
-          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-48) },
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-52) },
         });
       }
 
@@ -293,7 +301,12 @@
         duration,
         source: (ep.meta && ep.meta.source) || 'legacy',
         episodeId: ep.episode_id || (ep.meta ? `real-v${ep.meta.vehicle_id}` : null),
+        cam: viewer.camera && viewer.camera.position
+          ? [viewer.camera.position.x, viewer.camera.position.y, viewer.camera.position.z]
+          : null,
+        headPos: head && head.position ? [head.position.x, head.position.y, head.position.z] : null,
       };
+      window.__P3_VIEWER = viewer; // 验证诊断用（真实页面逻辑不依赖）
     }
 
     // ── 帧四宫格绘制 ─────────────────────────────────────────────
