@@ -6,19 +6,24 @@ import {
   defaultPostProcessConfig,
   sanitizeBloomParams,
   sanitizeGhostCount,
+  sanitizeGodRaysParams,
   validatePostProcessConfig,
 } from './PostProcessConfig';
-import type { BloomParams, LensFlareParams, PostProcessConfig, ToneMappingMode } from './PostProcessConfig';
+import type { BloomParams, GodRaysParams, LensFlareParams, PostProcessConfig, ToneMappingMode } from './PostProcessConfig';
 import { BrightPass } from './passes/BrightPass';
 import { DownsamplePass } from './passes/DownsamplePass';
 import { UpsamplePass } from './passes/UpsamplePass';
 import { CompositePass } from './passes/CompositePass';
 import type { CompositeFrameParams } from './passes/CompositePass';
 import { ToneMappingPass } from './passes/ToneMappingPass';
+import { GodRaysPass } from './passes/GodRaysPass';
 import { createProceduralDirtTexture } from './DirtTexture';
 
 /** 太阳投影屏外判定的 NDC 边界（任务约定 |ndc| > 1.3 跳过 flare）。 */
 const SUN_NDC_MARGIN = 1.3;
+
+/** god rays 屏外余晖放宽边界：|ndc| 1→2.0 线性衰减，太阳刚出画时余晖仍在。 */
+const GODRAYS_SUN_NDC_MARGIN = 2.0;
 
 /** 中间 RT 格式（Manager 自持管线，格式自洽，不与场景管线冲突）。 */
 const INTERNAL_FORMAT: GPUTextureFormat = 'rgba16float';
@@ -32,16 +37,19 @@ export type { PostProcessConfig, ToneMappingMode };
  *   sceneColor → BrightPass（半分辨率阈值提取）
  *   → DownsamplePass ×(levels-1)（13-tap 金字塔收缩）
  *   → UpsamplePass ×(levels-1)（3×3 tent 回升叠加 → bloomTex）
- *   → CompositePass（scene + bloom + lensFlare ghost/DirtMask）
+ *   → [godRays.enabled 时] GodRaysPass（场景亮度 mask 径向 march → 光束纹理）
+ *   → CompositePass（scene + bloom + lensFlare ghost/DirtMask + godRays 光束）
  *   → ToneMappingPass（none/reinhard/aces + gamma）→ targetView（swapChain）
  *
  * 用法（对外 API，直接改公开字段即可，下一帧生效）：
  *   scene.postProcess.enabled = true;
  *   scene.postProcess.bloom.threshold = 0.9;
+ *   scene.postProcess.godRays.enabled = true;   // Track G：屏幕空间光柱
  *   scene.postProcess.toneMapping = 'aces';
  *
  * 太阳屏幕位置：SunPosition 方向（归一化 ECEF）经 camera.viewProjectionMatrix
- * 投 NDC；|ndc|>1.3 或 w≤0 时 flareIntensity=0 跳过 flare。
+ * 投 NDC；|ndc|>1.3 或 w≤0 时 flareIntensity=0 跳过 flare；godRays 用放宽的
+ * 2.0 边界（|ndc| 1→2.0 线性余晖衰减）。
  */
 export class PostProcessManager {
   /** 总开关。false = Scene 走旧 swapChain 直渲路径（本类 execute 直接 return）。 */
@@ -53,6 +61,9 @@ export class PostProcessManager {
   /** lensFlare 参数。 */
   readonly lensFlare: LensFlareParams = { ...defaultPostProcessConfig().lensFlare };
 
+  /** godRays 参数（Track G：默认 enabled=false —— execute 链零变化零回归）。 */
+  readonly godRays: GodRaysParams = { ...defaultPostProcessConfig().godRays };
+
   /** 色调映射模式。 */
   toneMapping: ToneMappingMode = 'aces';
 
@@ -63,21 +74,24 @@ export class PostProcessManager {
   private _height: number;
 
   // ── 懒创建资源（首帧 execute / resize 时）────────────────────────────────
-  private _passes: [BrightPass, DownsamplePass, UpsamplePass, CompositePass, ToneMappingPass] | null = null;
+  private _passes: [BrightPass, DownsamplePass, UpsamplePass, CompositePass, ToneMappingPass, GodRaysPass] | null = null;
   private _sampler: GPUSampler | null = null;
   private _downRTs: RenderTexture[] = [];
   private _upRTs: RenderTexture[] = [];     // levels-1 个，尺寸 = down[0..levels-2]
   private _compositeRT: RenderTexture | null = null;
+  private _godRaysRT: RenderTexture | null = null;  // 全分辨率光束；仅 enabled 时分配
   private _dirtTexture: GPUTexture | null = null;
-  private _blackTex: GPUTexture | null = null;  // bloom 关闭 / dirt 缺失时占位
+  private _blackTex: GPUTexture | null = null;  // bloom/godRays 关闭 / dirt 缺失时占位
 
   // ── bindGroup 缓存（视图/开关变化时重建）──────────────────────────────────
   private _bindGroupsDirty = true;
   private _lastSceneView: GPUTextureView | null = null;
   private _lastBloomEnabled = false;
+  private _lastGodRaysEnabled = false;
   private _bgBright: GPUBindGroup | null = null;
   private _bgDown: (GPUBindGroup | null)[] = [];
   private _bgUp: (GPUBindGroup | null)[] = [];
+  private _bgGodRays: GPUBindGroup | null = null;
   private _bgComposite: GPUBindGroup | null = null;
   private _bgTone: GPUBindGroup | null = null;
 
@@ -99,6 +113,7 @@ export class PostProcessManager {
       if (config.enabled !== undefined) this.enabled = config.enabled;
       if (config.bloom) Object.assign(this.bloom, config.bloom);
       if (config.lensFlare) Object.assign(this.lensFlare, config.lensFlare);
+      if (config.godRays) Object.assign(this.godRays, config.godRays);
       if (config.toneMapping) this.toneMapping = config.toneMapping;
     }
   }
@@ -111,6 +126,7 @@ export class PostProcessManager {
       enabled: this.enabled,
       bloom: { ...this.bloom },
       lensFlare: { ...this.lensFlare },
+      godRays: { ...this.godRays, tint: [...this.godRays.tint] as [number, number, number] },
       toneMapping: this.toneMapping,
     };
   }
@@ -151,11 +167,17 @@ export class PostProcessManager {
     // 关闭时不编码任何 pass —— Scene 侧同一帧也不会把场景写进离屏 RT。
     if (!this.enabled || this._destroyed) return;
 
-    const [bright, down, up, composite, tone] = this._ensurePasses();
+    const [bright, down, up, composite, tone, godRays] = this._ensurePasses();
     const levels = sanitizeBloomParams(this.bloom).levels;
 
     this._ensureTargets(levels);
+    // godRays 开启才分配全分辨率光束 RT（关闭时 Composite 绑 1×1 黑占位）。
+    if (this.godRays.enabled) this._ensureGodRaysTarget();
     this._ensureBindGroups(sceneColorView, levels);
+
+    // ── 0. 太阳屏幕投影：一次投影两处消费（flare 1.3 边界 / godRays 2.0 余晖）
+    const sun = camera ? PostProcessManager.projectSun(camera, GODRAYS_SUN_NDC_MARGIN) : null;
+    const sunMaxNdc = sun ? Math.max(Math.abs(sun.ndc[0]), Math.abs(sun.ndc[1])) : Infinity;
 
     // ── 1. Bloom：Bright → Down ×N → Up ×N ────────────────────────────────
     if (this.bloom.enabled) {
@@ -171,17 +193,40 @@ export class PostProcessManager {
       }
     }
 
-    // ── 2. Composite：scene + bloom + lensFlare ───────────────────────────
+    // ── 1.5 GodRays：亮度 mask 径向 march（bloom 后、Composite 前）─────────
+    let godRayIntensity = 0;
+    if (this.godRays.enabled && sun) {
+      const gr = sanitizeGodRaysParams(this.godRays);
+      // 屏外余晖：|ndc| ≤ 1 全强，1 → 2.0 线性衰减到 0
+      const fade = sunMaxNdc <= 1
+        ? 1
+        : Math.max(0, 1 - (sunMaxNdc - 1) / (GODRAYS_SUN_NDC_MARGIN - 1));
+      godRays.execute(encoder, this._bgGodRays!, this._godRaysRT!.view!, {
+        sunUv: sun.uv,
+        intensity: gr.intensity * fade,
+        decay: gr.decay,
+        density: gr.density,
+        weight: gr.weight,
+        threshold: gr.threshold,
+        aspect: this._width / Math.max(this._height, 1),
+        tint: gr.tint,
+      });
+      godRayIntensity = gr.intensity * fade;
+    }
+
+    // ── 2. Composite：scene + bloom + lensFlare + godRays ─────────────────
     const flare = this.lensFlare;
-    const sun = camera ? PostProcessManager.projectSun(camera) : null;
+    // flare 沿用原 1.3 边界语义（godRays 用放宽的 2.0，两者独立判定）
+    const flareVisible = flare.enabled && sun !== null && sunMaxNdc <= SUN_NDC_MARGIN;
     const p: CompositeFrameParams = {
       bloomIntensity: this.bloom.enabled ? this.bloom.intensity : 0,
-      flareIntensity: (flare.enabled && sun) ? flare.intensity : 0,
+      flareIntensity: flareVisible ? flare.intensity : 0,
       sunUv: sun ? sun.uv : [0.5, 0.5],
       ghosts: sanitizeGhostCount(flare.ghosts),
       time,
       dirtStrength: 1.0,
       aspect: this._width / Math.max(this._height, 1),
+      godRayIntensity,
     };
     composite.execute(encoder, this._bgComposite!, this._compositeRT!.view!, p);
 
@@ -193,6 +238,7 @@ export class PostProcessManager {
     for (const rt of this._downRTs) rt.onFrameEnd();
     for (const rt of this._upRTs) rt.onFrameEnd();
     this._compositeRT!.onFrameEnd();
+    if (this._godRaysRT) this._godRaysRT.onFrameEnd();
   }
 
   /**
@@ -208,6 +254,11 @@ export class PostProcessManager {
 
     if (this._downRTs.length > 0) this._ensureTargets(this._downRTs.length);
     else this._bindGroupsDirty = true;
+
+    // godRays RT 全分辨率跟随画布（存在才随动；尺寸变化 → bindGroup 重建）
+    if (this._godRaysRT && this._godRaysRT.ensure(width, height)) {
+      this._bindGroupsDirty = true;
+    }
   }
 
   /** 销毁全部 pass 与 RT（RT 内部含 3 帧宽限队列的立即清空）。 */
@@ -224,6 +275,8 @@ export class PostProcessManager {
     this._upRTs = [];
     this._compositeRT?.destroy();
     this._compositeRT = null;
+    this._godRaysRT?.destroy();
+    this._godRaysRT = null;
     this._dirtTexture = null; // 自建 dirt 由 GC/设备释放；外部注入的归调用方
     this._blackTex = null;
     this._sampler = null;
@@ -241,6 +294,7 @@ export class PostProcessManager {
         new UpsamplePass(d, INTERNAL_FORMAT),
         new CompositePass(d, INTERNAL_FORMAT),
         new ToneMappingPass(d, this._outputFormat),
+        new GodRaysPass(d, INTERNAL_FORMAT),
       ];
     }
     if (!this._sampler) {
@@ -260,6 +314,14 @@ export class PostProcessManager {
     const w = Math.max(Math.floor(this._width / (2 << i)), 1);
     const h = Math.max(Math.floor(this._height / (2 << i)), 1);
     return [w, h];
+  }
+
+  /** godRays 光束 RT（全分辨率；仅 enabled 时调用，尺寸变化 → bindGroup 重建）。 */
+  private _ensureGodRaysTarget(): void {
+    if (!this._godRaysRT) {
+      this._godRaysRT = new RenderTexture(this._device, INTERNAL_FORMAT, 'PostProcess.GodRays');
+    }
+    if (this._godRaysRT.ensure(this._width, this._height)) this._bindGroupsDirty = true;
   }
 
   private _ensureTargets(levels: number): void {
@@ -288,10 +350,11 @@ export class PostProcessManager {
   }
 
   private _ensureBindGroups(sceneColorView: GPUTextureView, levels: number): void {
-    const [bright, down, up, composite, tone] = this._ensurePasses();
+    const [bright, down, up, composite, tone, godRays] = this._ensurePasses();
     const sceneChanged = this._lastSceneView !== sceneColorView;
     const bloomChanged = this._lastBloomEnabled !== this.bloom.enabled;
-    if (!this._bindGroupsDirty && !sceneChanged && !bloomChanged && this._bgComposite) return;
+    const godRaysChanged = this._lastGodRaysEnabled !== this.godRays.enabled;
+    if (!this._bindGroupsDirty && !sceneChanged && !bloomChanged && !godRaysChanged && this._bgComposite) return;
 
     const device = this._device;
     const samp = this._sampler!;
@@ -337,9 +400,26 @@ export class PostProcessManager {
       });
     }
 
+    // GodRays：sceneColor → 光束 RT（仅 enabled 时创建；RT 已在 execute 前保证）
+    if (this.godRays.enabled && this._godRaysRT?.view) {
+      this._bgGodRays = device.createBindGroup({
+        label: 'PostProcess.GodRays.BG',
+        layout: godRays.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: sceneColorView },
+          { binding: 1, resource: samp },
+          { binding: 2, resource: { buffer: godRays.uniformBuffer } },
+        ],
+      });
+    }
+
     // Composite：scene + bloom（关闭时占位黑纹）+ dirt + sampler + params
+    //            + godRays 光束（关闭时占位黑纹 × 强度 0 = 零影响）
     const dirt = this._ensureDirtTexture() ?? this._ensureBlackTex();
     const bloomTex = this.bloom.enabled ? this._upRTs[0].view! : this._ensureBlackTex();
+    const godTex = (this.godRays.enabled && this._godRaysRT?.view)
+      ? this._godRaysRT.view
+      : this._ensureBlackTex();
     this._bgComposite = device.createBindGroup({
       label: 'PostProcess.Composite.BG',
       layout: composite.bindGroupLayout,
@@ -349,6 +429,7 @@ export class PostProcessManager {
         { binding: 2, resource: dirt },
         { binding: 3, resource: samp },
         { binding: 4, resource: { buffer: composite.uniformBuffer } },
+        { binding: 5, resource: godTex },
       ],
     });
 
@@ -365,6 +446,7 @@ export class PostProcessManager {
 
     this._lastSceneView = sceneColorView;
     this._lastBloomEnabled = this.bloom.enabled;
+    this._lastGodRaysEnabled = this.godRays.enabled;
     this._bindGroupsDirty = false;
   }
 
@@ -394,9 +476,10 @@ export class PostProcessManager {
 
   /**
    * 太阳方向（归一化 ECEF 单位球位置）经相机 viewProj 投影到 uv。
-   * @returns null = 屏外（|ndc|>1.3）或在相机背后（w≤0）→ 跳过 flare
+   * @param margin 屏外判定 NDC 边界（默认 1.3 = LensFlare 语义；godRays 传 2.0 留余晖）
+   * @returns null = 屏外（|ndc|>margin）或在相机背后（w≤0）；uv + 原始 ndc
    */
-  static projectSun(camera: Camera): { uv: [number, number] } | null {
+  static projectSun(camera: Camera, margin: number = SUN_NDC_MARGIN): { uv: [number, number]; ndc: [number, number] } | null {
     // computeSunDirection 返回"太阳→地球"；取反得到地球→太阳（单位球上的太阳位置）。
     const [dx, dy, dz] = SunPosition.computeSunDirection(JulianDate.now());
     const sx = -dx, sy = -dy, sz = -dz;
@@ -410,10 +493,10 @@ export class PostProcessManager {
     if (cw <= 0) return null; // 相机背后
     const nx = cx / cw;
     const ny = cy / cw;
-    if (Math.abs(nx) > SUN_NDC_MARGIN || Math.abs(ny) > SUN_NDC_MARGIN) return null;
+    if (Math.abs(nx) > margin || Math.abs(ny) > margin) return null;
 
     // NDC(y 上) → uv（纹理 y 下，与全屏三角 uv 约定一致）
-    return { uv: [nx * 0.5 + 0.5, 0.5 - ny * 0.5] };
+    return { uv: [nx * 0.5 + 0.5, 0.5 - ny * 0.5], ndc: [nx, ny] };
   }
 }
 

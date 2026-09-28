@@ -2,6 +2,8 @@ import type { IPass } from '../scene/passes/IPass';
 import type { Context } from '../renderer/Context';
 import { Camera } from '../scene/Camera';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
+import { SunPosition } from '../scene/SunPosition';
+import { JulianDate } from '../math/JulianDate';
 import { UNDERWATER_FOG_SHADER } from '../shaders/UnderwaterFogShader';
 
 /**
@@ -14,7 +16,9 @@ import { UNDERWATER_FOG_SHADER } from '../shaders/UnderwaterFogShader';
  *      + 屏幕径向暗角近似；
  *   2. 浮动颗粒/光斑 —— 两层屏幕空间 hash 点阵缓漂 + 两层正弦波纹相乘的焦散
  *      缓动（呼应 OceanCaustics 观感，独立实现、零纹理采样）；
- *   3. 边缘暗角 + 轻微色偏青 —— 水下通透感。
+ *   3. 边缘暗角 + 轻微色偏青 —— 水下通透感；
+ *   4. 水下太阳光柱 —— sunShaftIntensity > 0 时启用（Track G 联动，默认 0
+ *      关闭零回归），与屏幕空间 god rays（PostProcessManager.godRays）叠加。
  *
  * 完全独立：不依赖 OceanFFT/OceanCaustics 任何符号，bind group 仅含两个
  * uniform buffer（相机 UBO 256 B + 参数 UBO 48 B），无任何纹理。
@@ -47,10 +51,12 @@ export interface UnderwaterFogOptions {
   waterColor?: [number, number, number];
   /** 浮游颗粒密度倍率。Default: `0.5` */
   particleDensity?: number;
+  /** 水下太阳光柱强度（Track G 联动；0 = 关闭）。Default: `0`（零回归） */
+  sunShaftIntensity?: number;
 }
 
-/** 参数 UBO：3 x vec4 = 48 字节（布局见 UnderwaterFogShader 的 UWParams）。 */
-const PARAMS_BYTES = 48;
+/** 参数 UBO：4 x vec4 = 64 字节（布局见 UnderwaterFogShader 的 UWParams）。 */
+const PARAMS_BYTES = 64;
 
 const DEFAULT_WATER_COLOR: [number, number, number] = [0.05, 0.22, 0.30];
 
@@ -67,6 +73,7 @@ export class UnderwaterFog implements IPass {
   private _intensity: number;
   private _waterColor: [number, number, number];
   private _particleDensity: number;
+  private _sunShaftIntensity: number;
 
   private _pipeline: GPURenderPipeline | null = null;
   private _bindGroupLayout: GPUBindGroupLayout | null = null;
@@ -86,6 +93,7 @@ export class UnderwaterFog implements IPass {
     this._intensity = opts?.intensity ?? 1;
     this._waterColor = opts?.waterColor ?? DEFAULT_WATER_COLOR;
     this._particleDensity = opts?.particleDensity ?? 0.5;
+    this._sunShaftIntensity = opts?.sunShaftIntensity ?? 0;
   }
 
   /** 手动开关水下模式（B1 在相机入水判定后调用）。 */
@@ -101,6 +109,16 @@ export class UnderwaterFog implements IPass {
   /** 强度（0 = 完全透明，>1 可加浓）。 */
   setIntensity(v: number): void {
     this._intensity = v;
+  }
+
+  /** 水下太阳光柱强度（Track G 联动；0 = 关闭，默认零回归）。 */
+  setSunShaftIntensity(v: number): void {
+    this._sunShaftIntensity = v;
+  }
+
+  /** 当前水下太阳光柱强度。 */
+  get sunShaftIntensity(): number {
+    return this._sunShaftIntensity;
   }
 
   /** @inheritdoc IPass - 由 Scene 在 execute 前注入相机（IPass 可选协议）。 */
@@ -209,7 +227,8 @@ export class UnderwaterFog implements IPass {
     }
     this._context.writeBuffer(this._cameraUBO, 0, camData);
 
-    // ── 参数 UBO：[time, intensity, density, _] [w, h, _, _] [rgb, _] ──
+    // ── 参数 UBO：[time, intensity, density, _] [w, h, _, _] [rgb, _]
+    //              [sunDir.xyz, sunShaftIntensity]（Track G 水下光柱）──
     const p = this._params;
     p[0] = time;
     p[1] = this._intensity;
@@ -219,6 +238,12 @@ export class UnderwaterFog implements IPass {
     p[8]  = this._waterColor[0];
     p[9]  = this._waterColor[1];
     p[10] = this._waterColor[2];
+    // 太阳方向（地球→太阳，归一化 ECEF；与 PostProcessManager.projectSun 同源约定）
+    const [dx, dy, dz] = SunPosition.computeSunDirection(JulianDate.now());
+    p[12] = -dx;
+    p[13] = -dy;
+    p[14] = -dz;
+    p[15] = this._sunShaftIntensity;
     this._context.writeBuffer(this._paramsUBO, 0, p);
 
     const pass = encoder.beginRenderPass({

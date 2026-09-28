@@ -20,6 +20,8 @@ import {
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 import { SHADOW_RECEIVER_UBO_SIZE } from '../shadow/ShadowMap';
 import type { ShadowReceiverBinding } from '../shadow/ShadowMap';
+import { CLOUD_SHADOW_PARAMS_UBO_BYTES } from '../shaders/CloudShader';
+import type { CloudShadowInfo } from './CloudLayer';
 import type { FoamPatternTexture } from './FoamPatternTexture';
 import type { WakeField } from './WakeField';
 import type { SeabedHeightField } from './SeabedHeightField';
@@ -50,6 +52,14 @@ const N_OVER_32 = N / 32;
 
 /** AtmosphereParams/SkyParams UBO 字节（64B each，布局单一来源 AtmosphereSkyShader.ts）。 */
 const ATMO_UBO_BYTES = 64;
+
+/** 归一化 ECEF：1 内部单位 = 6378137 米（Camera.EARTH_SCALE 同值）。 */
+const EARTH_RADIUS_M = 6378137;
+/**
+ * 海面云影强度（Track C：CloudShadowInfo 契约不含强度，海面侧固定——与
+ * CloudLayer 默认 shadowIntensity 同值；UBO params.y = 0 时 shader 短路恒 1）。
+ */
+const CLOUD_SHADOW_SEA_INTENSITY = 0.65;
 
 /** 单个波浪系统参数（tidewater WaveSystem）。 */
 interface WaveSystem {
@@ -230,6 +240,8 @@ export class OceanFFTWater implements IPass {
   private _sceneHistorySource: (() => GPUTextureView | null) | null = null;
   /** L3：CSSM 阴影源 getter（`() => scene.shadow.receiverBinding()`）。null = 无阴影。 */
   private _shadowSource: (() => ShadowReceiverBinding | null) | null = null;
+  /** Track C：海面云影源 getter（`() => clouds.cloudShadow`）。null = 无云影。 */
+  private _cloudShadowSource: (() => CloudShadowInfo | null) | null = null;
   /** L3：水下视角（从下看水面：法线翻转 + 透射青绿 + 高光弱化）。 */
   private _underwaterView = false;
   /** 导数纹理全 mip 2d-array 视图（FFTDataSource 公开 + 渲染绑定共用）。 */
@@ -299,11 +311,19 @@ export class OceanFFTWater implements IPass {
   private _bgAtmoTr: GPUTextureView | null = null;
   private _bgAtmoUboA: GPUBuffer | null = null;
   private _bgAtmoUboS: GPUBuffer | null = null;
+  /** Track C 缓存键：云影贴图视图身份（绑定/解绑、CloudLayer 失效后变化）。 */
+  private _bgCloudTex: GPUTextureView | null = null;
   /** L3：阴影未激活时的占位资源（1×1 depth 2d-array + 全零 UBO + comparison）。 */
   private _shadowFallbackTex: GPUTexture | null = null;
   private _shadowFallbackView: GPUTextureView | null = null;
   private _shadowFallbackUBO: GPUBuffer | null = null;
   private _shadowCmpSampler: GPUSampler | null = null;
+  /** Track C：云影未激活时的占位（1×1 黑 rgba8unorm + 全零 96B UBO）。 */
+  private _cloudFallbackTex: GPUTexture | null = null;
+  private _cloudFallbackView: GPUTextureView | null = null;
+  private _cloudShadowUBO: GPUBuffer | null = null;
+  /** CloudShadowParams UBO 载荷（96B，布局单一来源 CloudShader.ts）。 */
+  private readonly _cloudShadowF32 = new Float32Array(CLOUD_SHADOW_PARAMS_UBO_BYTES / 4);
   private _sampler: GPUSampler | null = null;
   private _vertexBuffer: GPUBuffer | null = null;
   private _indexBuffer: GPUBuffer | null = null;
@@ -513,6 +533,17 @@ export class OceanFFTWater implements IPass {
    */
   bindAtmosphere(source: (() => OceanAtmosphereBinding | null) | null): void {
     this._atmoSource = source;
+  }
+
+  /**
+   * 注入海面云影源（Track C T6：`() => clouds.cloudShadow`）。getter 每帧
+   * 惰性求值——null（未绑定 / CloudLayer prepare 前 / destroy 后）时绑定
+   * 1×1 黑 rgba8unorm 占位 + 全零 96B UBO（intensity 0 短路恒 1，零回归）。
+   * 海面侧强度固定 {@link CLOUD_SHADOW_SEA_INTENSITY}（CloudShadowInfo 契约
+   * 不含强度；太阳直射项 = 天光反射 + 高光 glitter 同乘云影因子，水下恒 1）。
+   */
+  bindCloudShadow(source: (() => CloudShadowInfo | null) | null): void {
+    this._cloudShadowSource = source;
   }
 
   /** 天空反射开关（featureFlags bit0；须先 bindAtmosphere 才生效）。 */
@@ -752,6 +783,25 @@ export class OceanFFTWater implements IPass {
     }
     this._context.writeBuffer(this._breakParamsUBO!, 0, OceanFFTWater._asBytes(BK));
 
+    // ── Track C 云影 UBO：每帧从 source 惰性读并写入（布局单一来源
+    // CloudShader.ts CloudShadowParams 96B；未绑定全零 → intensity 0 短路）──
+    const cloudSrc = this._cloudShadowSource?.() ?? null;
+    const CS = this._cloudShadowF32;
+    if (cloudSrc) {
+      CS[0] = cloudSrc.centerEcef[0]; CS[1] = cloudSrc.centerEcef[1];
+      CS[2] = cloudSrc.centerEcef[2]; CS[3] = cloudSrc.cloudRadiusNorm;
+      CS[4] = cloudSrc.eastDir[0]; CS[5] = cloudSrc.eastDir[1]; CS[6] = cloudSrc.eastDir[2]; CS[7] = 0;
+      CS[8] = cloudSrc.northDir[0]; CS[9] = cloudSrc.northDir[1]; CS[10] = cloudSrc.northDir[2]; CS[11] = 0;
+      CS[12] = EARTH_RADIUS_M / Math.max(cloudSrc.extentM, 1); // extentScale
+      CS[13] = CLOUD_SHADOW_SEA_INTENSITY; CS[14] = 0; CS[15] = 0;
+      CS[16] = cloudSrc.sunDirection[0]; CS[17] = cloudSrc.sunDirection[1];
+      CS[18] = cloudSrc.sunDirection[2]; CS[19] = 0;
+      CS[20] = 0; CS[21] = 0; CS[22] = 0; CS[23] = 0; // windOffset 未消费
+    } else {
+      CS.fill(0);
+    }
+    this._context.writeBuffer(this._cloudShadowUBO!, 0, OceanFFTWater._asBytes(CS));
+
     // ── bind group 缓存：视图身份变化才重建（wake ping-pong / history 就绪）──
     const foamView = this._foamPattern?.view ?? this._fallbackView!;
     const wakeView = (this._wake && RP[13] > 0.5) ? this._wake.fieldView! : this._fallbackView!;
@@ -769,10 +819,13 @@ export class OceanFFTWater implements IPass {
     const atmoTr = atmoReady ? atmoSrc!.transmittance! : this._fallbackView!;
     const atmoUbA = atmoReady ? atmoSrc!.atmosphereParams! : this._atmoFallbackUBO!;
     const atmoUbS = atmoReady ? atmoSrc!.skyParams! : this._atmoFallbackUBO!;
+    // Track C：云影贴图视图（未激活 → 1×1 黑占位；UBO/采样器身份恒定不进键）
+    const cloudView = cloudSrc?.view ?? this._cloudFallbackView!;
     if (!this._renderBindGroup || foamView !== this._bgFoam || wakeView !== this._bgWake
       || histView !== this._bgHist || shUbo !== this._bgShadow || seabedView !== this._bgSeabed
       || atmoSv !== this._bgAtmoSv || atmoTr !== this._bgAtmoTr
-      || atmoUbA !== this._bgAtmoUboA || atmoUbS !== this._bgAtmoUboS) {
+      || atmoUbA !== this._bgAtmoUboA || atmoUbS !== this._bgAtmoUboS
+      || cloudView !== this._bgCloudTex) {
       this._renderBindGroup = this._context.device.createBindGroup({
         layout: this._renderBindGroupLayout,
         entries: [
@@ -797,6 +850,10 @@ export class OceanFFTWater implements IPass {
           { binding: 17, resource: { buffer: atmoUbA } },
           { binding: 18, resource: { buffer: atmoUbS } },
           { binding: 19, resource: { buffer: this._breakParamsUBO! } },
+          // Track C：云影接收（fallback 见 _prepareRender；UBO 每帧 writeBuffer）
+          { binding: 20, resource: cloudView },
+          { binding: 21, resource: { buffer: this._cloudShadowUBO! } },
+          { binding: 22, resource: this._clampSampler! },
         ],
       });
       this._bgFoam = foamView;
@@ -808,6 +865,7 @@ export class OceanFFTWater implements IPass {
       this._bgAtmoTr = atmoTr;
       this._bgAtmoUboA = atmoUbA;
       this._bgAtmoUboS = atmoUbS;
+      this._bgCloudTex = cloudView;
     }
 
     const camData = new Float32Array(CAMERA_UBO_SIZE / 4);
@@ -873,6 +931,12 @@ export class OceanFFTWater implements IPass {
     this._shadowFallbackView = null;
     this._shadowFallbackUBO = null;
     this._shadowCmpSampler = null;
+    this._cloudFallbackTex?.destroy();
+    this._cloudShadowUBO?.destroy();
+    this._cloudFallbackTex = null;
+    this._cloudFallbackView = null;
+    this._cloudShadowUBO = null;
+    this._bgCloudTex = null;
     this._clampSampler = null;
     this._vertexBuffer = null;
     this._indexBuffer = null;
@@ -1106,6 +1170,29 @@ export class OceanFFTWater implements IPass {
       });
       this._shadowCmpSampler ??= this._context.createSampler({ compare: 'less' });
 
+      // Track C 云影占位：1×1 黑 rgba8unorm（dens = 0）+ 全零 96B UBO
+      //（intensity = 0 短路）→ cloudShadowFactor 恒 1，零回归。
+      if (!this._cloudFallbackTex) {
+        this._cloudFallbackTex = device.createTexture({
+          label: 'OceanFFTCloudFallback',
+          size: [1, 1],
+          format: 'rgba8unorm',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        device.queue.writeTexture(
+          { texture: this._cloudFallbackTex },
+          new Uint8Array([0, 0, 0, 0]),
+          { bytesPerRow: 4, rowsPerImage: 1 },
+          [1, 1, 1],
+        );
+        this._cloudFallbackView = this._cloudFallbackTex.createView();
+      }
+      this._cloudShadowUBO ??= device.createBuffer({
+        label: 'OceanFFTCloudShadowUBO',
+        size: CLOUD_SHADOW_PARAMS_UBO_BYTES,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
       // L5 大气 fallback UBO（64B 全零，binding 17/18 共用；LUT 复用上方 1×1 黑
       // rgba16float——不写即全零 → featureFlags 相应位短路，零回归）
       this._atmoFallbackUBO ??= device.createBuffer({
@@ -1158,6 +1245,12 @@ export class OceanFFTWater implements IPass {
           { binding: 18, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: ATMO_UBO_BYTES } },
           // T4 破碎波参数（VS 波形变形 + FS 花边/内卷水幕 → 双阶段）
           { binding: 19, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: OCEAN_BREAK_PARAMS_UBO_BYTES } },
+          // Track C 云影（FRAGMENT 专用）：影贴图 rgba8unorm + 96B
+          // CloudShadowParams UBO + filtering 采样器。未激活时绑占位资源
+          //（BGL 恒全绑定；全零 UBO → shader 因子恒 1，零回归）。
+          { binding: 20, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+          { binding: 21, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: CLOUD_SHADOW_PARAMS_UBO_BYTES } },
+          { binding: 22, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
         ],
       });
 

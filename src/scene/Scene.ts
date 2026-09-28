@@ -22,6 +22,7 @@ import { PostProcessManager } from '../postprocessing/PostProcessManager';
 import { RenderTexture } from '../renderer/RenderTexture';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 import { ShadowMap } from '../shadow/ShadowMap';
+import type { CloudShadowReceiverBinding } from './passes/LightingPass';
 
 /**
  * Scene - Orchestrates all rendering passes.
@@ -77,6 +78,15 @@ export class Scene {
    * LightingPass 以组 2 采样级联阴影图。
    */
   readonly shadow: ShadowMap;
+
+  /**
+   * Track C 云影代理挂点（工厂模式，仿 OceanFFTWater.bindSceneHistory 的
+   * 惰性求值理由——CloudLayer prepare 前 cloudShadowSource getter 为 null）。
+   * 示例接线：`scene.cloudShadowSource = () => clouds.cloudShadowSource`。
+   * render() 每帧求值后喂 LightingPass（同引用零开销早退内置）；null = 无云影
+   * （原 4 变体管线，零回归）。
+   */
+  cloudShadowSource: (() => CloudShadowReceiverBinding | null) | null = null;
 
   /**
    * Toggles per-primitive frustum culling (G-Buffer opaque loop, transparent
@@ -372,6 +382,9 @@ export class Scene {
     this.shadow.updateFrame(this.camera, this.lights);
     this.shadow.execute(encoder, () => this.getOpaquePipeline());
     this._lightingPass.setShadowSource(this.shadow.receiverBinding());
+    // ── Track C 云影挂点：每帧惰性求值工厂（CloudLayer prepare 前为 null，
+    // LightingPass 同引用零开销早退内置；null 时保持原 4 变体管线零回归）──
+    this._lightingPass.setCloudShadowSource(this.cloudShadowSource?.() ?? null);
 
     // ── Pass loop: gbuffer → lighting → overlay → transparent ─────────────
     const swapChainView = ctx.getCurrentTextureView();

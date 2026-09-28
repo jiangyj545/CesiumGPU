@@ -1,7 +1,8 @@
 import { FULLSCREEN_VS } from './Fullscreen';
 
 /**
- * CompositePass 着色器：sceneColor + bloom + lensFlare（ghost 序列 + DirtMask）。
+ * CompositePass 着色器：sceneColor + bloom + lensFlare（ghost 序列 + DirtMask）
+ * + godRays 光束（Track G）。
  *
  * LensFlare ghost 布局：
  *  - 第 0 个 ghost 即太阳本体（halo），沿 sun↔屏幕中心镜像轴等距散布
@@ -10,6 +11,9 @@ import { FULLSCREEN_VS } from './Fullscreen';
  *    chromatic offset（RGB 三通道沿径向微偏移，边缘色散）。
  *  - flare 与 DirtMask 纹理逐像素相乘，再乘 intensity 叠加。
  *  - 太阳在屏外时 Manager 将 flareIntensity 置 0（本 shader 无需判屏外）。
+ *
+ * godRays：godTex 由 GodRaysPass 预生成（已含 tint），此处仅乘
+ * godRayIntensity 叠加；未启用时纹理绑定 1×1 黑 + 强度 0 → 零影响。
  */
 export const COMPOSITE_SHADER = FULLSCREEN_VS + /* wgsl */`
 struct CompositeParams {
@@ -20,6 +24,8 @@ struct CompositeParams {
   time           : f32,       // 秒（halo 微呼吸动画）
   dirtStrength   : f32,       // DirtMask 强度
   aspect         : f32,       // 宽高比（ghost 圆形化修正）
+  godRayIntensity: f32,       // god rays 叠加强度（未启用 = 0）
+  pad            : f32,
 }
 
 @group(0) @binding(0) var sceneTex  : texture_2d<f32>;
@@ -27,6 +33,7 @@ struct CompositeParams {
 @group(0) @binding(2) var dirtTex   : texture_2d<f32>;
 @group(0) @binding(3) var samp      : sampler;
 @group(0) @binding(4) var<uniform> params : CompositeParams;
+@group(0) @binding(5) var godTex    : texture_2d<f32>;
 
 // VSOut 由 FULLSCREEN_VS 前置声明（重复声明会使模块解析失败——真机 CDP 验证发现）
 
@@ -78,7 +85,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let dirt = textureSample(dirtTex, samp, in.uv).rgb;
   let flareMasked = flare * dirt * params.dirtStrength * params.flareIntensity;
 
-  let color = scene + bloom * params.bloomIntensity + flareMasked;
+  // god rays 光束叠加（GodRaysPass 输出已含 tint；未启用 = 0 → 零影响）
+  let godRays = textureSample(godTex, samp, in.uv).rgb;
+
+  let color = scene + bloom * params.bloomIntensity + flareMasked
+            + godRays * params.godRayIntensity;
 
   return vec4<f32>(color, 1.0);
 }

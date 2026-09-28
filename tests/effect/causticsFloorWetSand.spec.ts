@@ -203,7 +203,7 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
     expect(P[24]).toBe(0);    // shoreStrength 关
     expect(P[25]).toBe(12.5); // time 透传
     expect(P[26]).toBe(0);    // 平底模式
-    expect(P[27]).toBe(0);    // pad
+    expect(P[27]).toBe(0);    // swash 默认关（零回归）
     expect([P[28], P[29], P[30], P[31]]).toEqual([0.5, 0.5, 0, 0]); // seabedUv 未绑定
   });
 
@@ -319,5 +319,46 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
     expect(buf).toBe(vb1);
     expect(offset).toBe(0);
     expect(data.byteLength).toBe((SEGMENTS + 1) * (SEGMENTS + 1) * STRIDE * 4);
+  });
+
+  it('swash：setSwash 写 P[27]（默认 0 零回归），shader 门控 / 相位场 / 白沫源串', () => {
+    const { context, writeBuffer } = makeContext();
+    const floor = new CausticsFloor(context, { context, center: CENTER, sizeM: SIZE_M, depthM: 6 });
+    expect(paramsOf(floor, writeBuffer)[27]).toBe(0); // 默认关
+
+    floor.setSwash(0.8);
+    floor.bindSeabed(makeField());
+    const P = paramsOf(floor, writeBuffer);
+    expect(P[27]).toBe(Math.fround(0.8)); // UBO 为 f32
+    expect(P[24]).toBe(0);                // 与 shoreStrength 独立（未开湿沙仍 swash 生效）
+
+    // 非法值钳 [0,1]
+    floor.setSwash(Number.NaN);
+    expect(paramsOf(floor, writeBuffer)[27]).toBe(0);
+    floor.setSwash(-0.5);
+    expect(paramsOf(floor, writeBuffer)[27]).toBe(0);
+    floor.setSwash(2.5);
+    expect(paramsOf(floor, writeBuffer)[27]).toBe(1);
+
+    // 构造选项同款语义
+    const { context: ctx2, writeBuffer: wb2 } = makeContext();
+    const f2 = new CausticsFloor(ctx2, { context: ctx2, center: CENTER, sizeM: SIZE_M, depthM: 6, swash: 0.5 });
+    expect(paramsOf(f2, wb2)[27]).toBe(Math.fround(0.5));
+
+    // shader 源串：wet.w>0.001 分支门控（0 = 整块跳过逐字节零回归）
+    expect(CAUSTICS_FLOOR_SHADER).toContain('let swashAmt = max( floorParams.wet.w, 0.0 )');
+    expect(CAUSTICS_FLOOR_SHADER).toContain('if ( swashAmt > 0.001 ) {');
+    // 岸线相位场：海床梯度 ±2 texel 差分 + 平底 vnoise 回退相位
+    expect(CAUSTICS_FLOOR_SHADER).toContain('input.planeXZ.x * 0.42 + nz * 3.0');
+    expect(CAUSTICS_FLOOR_SHADER).toContain(
+      'textureLoad( seabedTex, clamp( tcS + vec2<i32>( 2, 0 ), vec2<i32>( 0 ), hiS ), 0 ).r'
+    );
+    // 水位涨落：run-up 幅度 0.6m × T≈7s（2π/7≈0.898）正弦 + 平滑 smoothstep 带
+    expect(CAUSTICS_FLOOR_SHADER).toContain('0.6 * swashAmt * sin( phase )');
+    expect(CAUSTICS_FLOOR_SHADER).toContain('wt * 0.898');
+    expect(CAUSTICS_FLOOR_SHADER).toContain('0.25 + max( swashLevel, 0.0 )');
+    // 回退白沫线：退潮门（cos<0）+ 白沫色与海面泡沫一致
+    expect(CAUSTICS_FLOOR_SHADER).toContain('clamp( - cos( phase ), 0.0, 1.0 )');
+    expect(CAUSTICS_FLOOR_SHADER).toContain('vec3<f32>( 0.90, 0.94, 0.97 )');
   });
 });

@@ -158,6 +158,11 @@ export type { FloodWaterOptions, HeightGridData } from './effect/FloodWater';
 export { OceanFFTWater, OCEAN_FFT_SIZE } from './effect/OceanFFTWater';
 export type { OceanFFTWaterOptions } from './effect/OceanFFTWater';
 
+// Track C 体积云层（全屏云场 + 逐帧云影烘焙：地形 LightingPass 组 3 /
+// 海面 OceanFFTWater.bindCloudShadow 双通道消费）
+export { CloudLayer } from './effect/CloudLayer';
+export type { CloudLayerOptions, CloudShadowInfo } from './effect/CloudLayer';
+
 // B1 L2 五件套集成层（焦散 / 物理大气 / 泡沫图案 / 船迹波场）
 export { OceanCaustics } from './effect/OceanCaustics';
 export type { OceanCausticsOptions, FFTDataSource } from './effect/OceanCaustics';

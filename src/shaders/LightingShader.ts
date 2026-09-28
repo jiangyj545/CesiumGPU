@@ -10,6 +10,7 @@
  * 两变体共享 SHADER_CORE —— 主体只有一份，尾段分叉。
  */
 import { SHADOW_RECEIVER_MODULE } from './ShadowShader';
+import { CLOUD_SHADOW_RECEIVER_MODULE } from './CloudShader';
 
 const SHADER_CORE = /* wgsl */`
 // ── Uniforms ──────────────────────────────────────────────────────────────────
@@ -207,5 +208,63 @@ export const LIGHTING_SHADER_SHADOW = injectShadowCore(SHADER_CORE) + TAIL_LDR;
 
 /** CSSM 阴影 + HDR 直通尾段（配 ToneMappingPass）。 */
 export const LIGHTING_SHADER_SHADOW_HDR = injectShadowCore(SHADER_CORE) + TAIL_HDR;
+
+// ── Track C 云影（CloudLayer 烘焙贴图，组 3）变体 ────────────────────────────
+//
+// injectShadowCore 同款锚点拼接：把 CLOUD_SHADOW_RECEIVER_MODULE（CloudShader.ts
+// 导出，含组 3 uniform/纹理/采样器声明 + cloudShadowFactor）注入 SHADER_CORE，
+// 仅第 0 盏光（太阳）再乘云影因子。四个既有导出（LIGHTING_SHADER / _HDR /
+// _SHADOW / _SHADOW_HDR）逐字节不变 —— LightingPass 未接云影时走原变体，
+// 零回归。与 CSSM 正交组合成 8 变体（4 旧 + 4 新）。
+
+/** 原始光照循环注入云影：仅第 0 盏光乘 cloudShadowFactor。 */
+const LOOP_CLOUDED = `  for (var i: u32 = 0u; i < lighting.lightCount; i++) {
+    var shadowFactor = 1.0;
+    if (i == 0u) {
+      shadowFactor = cloudShadowFactor(worldPos);
+    }
+    color += shadowFactor * computeDirectionalLight(lighting.lights[i], normal, viewDir, albedo);
+  }`;
+
+/** CSSM 阴影循环（LOOP_SHADOWED）叠加云影：两因子相乘。 */
+const LOOP_SHADOW_CLOUDED = `  let viewDist = length(worldPos - camera.cameraPosition.xyz);
+  for (var i: u32 = 0u; i < lighting.lightCount; i++) {
+    var shadowFactor = 1.0;
+    if (i == 0u) {
+      shadowFactor = cssmShadowFactor(worldPos, normal, viewDist)
+        * cloudShadowFactor(worldPos);
+    }
+    color += shadowFactor * computeDirectionalLight(lighting.lights[i], normal, viewDir, albedo);
+  }`;
+
+/**
+ * 把云影 receiver 模块注入光照核心（可链在 injectShadowCore 之后）。
+ * 循环锚点二选一（带/不带 CSSM 阴影）必须恰好命中一个，声明锚点沿用
+ * FRAGMENT_ANCHOR（注入后文本保留，可多次插入），否则抛错。
+ */
+export function injectCloudShadowCore(core: string): string {
+  const hasPlain = core.includes(LOOP_ANCHOR);
+  const hasCssm = core.includes(LOOP_SHADOWED);
+  if ((!hasPlain && !hasCssm) || !core.includes(FRAGMENT_ANCHOR) || (hasPlain && hasCssm)) {
+    throw new Error('LightingShader.injectCloudShadowCore: anchors drifted — update LOOP_ANCHOR/LOOP_SHADOWED/FRAGMENT_ANCHOR');
+  }
+  return core
+    .replace(FRAGMENT_ANCHOR, CLOUD_SHADOW_RECEIVER_MODULE + FRAGMENT_ANCHOR)
+    .replace(hasCssm ? LOOP_SHADOWED : LOOP_ANCHOR, hasCssm ? LOOP_SHADOW_CLOUDED : LOOP_CLOUDED);
+}
+
+/** 云影 + LDR 尾段（无 CSSM）。 */
+export const LIGHTING_SHADER_CLOUD = injectCloudShadowCore(SHADER_CORE) + TAIL_LDR;
+
+/** 云影 + HDR 直通尾段（无 CSSM）。 */
+export const LIGHTING_SHADER_CLOUD_HDR = injectCloudShadowCore(SHADER_CORE) + TAIL_HDR;
+
+/** CSSM 阴影 + 云影 + LDR 尾段。 */
+export const LIGHTING_SHADER_SHADOW_CLOUD =
+  injectCloudShadowCore(injectShadowCore(SHADER_CORE)) + TAIL_LDR;
+
+/** CSSM 阴影 + 云影 + HDR 直通尾段（配 ToneMappingPass）。 */
+export const LIGHTING_SHADER_SHADOW_CLOUD_HDR =
+  injectCloudShadowCore(injectShadowCore(SHADER_CORE)) + TAIL_HDR;
 
 export default LIGHTING_SHADER;

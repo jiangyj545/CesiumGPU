@@ -9,11 +9,30 @@ import {
   LIGHTING_SHADER_HDR,
   LIGHTING_SHADER_SHADOW,
   LIGHTING_SHADER_SHADOW_HDR,
+  LIGHTING_SHADER_CLOUD,
+  LIGHTING_SHADER_CLOUD_HDR,
+  LIGHTING_SHADER_SHADOW_CLOUD,
+  LIGHTING_SHADER_SHADOW_CLOUD_HDR,
 } from '../../shaders/LightingShader';
 import type { ShadowReceiverBinding } from '../../shadow/ShadowMap';
 
 /** Maximum directional lights supported in the WGSL shader. */
 const MAX_LIGHTS = 8;
+
+/**
+ * Track C 云影接线（生产方 CloudLayer.cloudShadowSource 的结构契约）。
+ * 生产方持有资源并每帧写 ubo（CloudShadowParams 96B，布局单一来源
+ * CloudShader.ts）；引用身份稳定 —— 本 pass 以同一性做重建判定
+ * （仿 OceanAtmosphereBinding 契约）。
+ */
+export interface CloudShadowReceiverBinding {
+  /** 影贴图视图（rgba8unorm，R 通道 = 云密度）。 */
+  view: GPUTextureView;
+  /** CloudShadowParams UBO（96B）。 */
+  ubo: GPUBuffer;
+  /** filtering 线性采样器。 */
+  sampler: GPUSampler;
+}
 
 /**
  * LightingPass - Reads the G-Buffer and computes deferred Blinn-Phong lighting.
@@ -54,6 +73,14 @@ export class LightingPass implements IPass {
   private _shadowSource: ShadowReceiverBinding | null = null;
   private _shadowActive = false;
   private _shadowBindGroup: GPUBindGroup | null = null;
+
+  /**
+   * Track C 云影源（CloudLayer.cloudShadowSource）。null = 无云影管线
+   * 变体（原 4 变体逐字节原样 —— 关闭时零回归，90 页不接云不受影响）。
+   */
+  private _cloudShadowSource: CloudShadowReceiverBinding | null = null;
+  private _cloudShadowActive = false;
+  private _cloudShadowBindGroup: GPUBindGroup | null = null;
 
   constructor(context: Context, gbufferPass: GBufferPass, outputFormat: GPUTextureFormat) {
     this._context      = context;
@@ -103,17 +130,40 @@ export class LightingPass implements IPass {
     this.prepare();
   }
 
+  /**
+   * Track C：接入 / 摘除云影源（Scene.render 每帧传
+   * `cloudLayer.cloudShadowSource`；同一对象引用零开销早退）。
+   * 非空 → 管线切到带云影变体并建组 3（uniform + 影纹理 + filtering
+   * 采样器）；null → 回到原管线（无云影 4 变体，零回归）。
+   * FS 侧 intensity <= 0 时 cloudShadowFactor 短路恒 1，双重门控。
+   */
+  setCloudShadowSource(source: CloudShadowReceiverBinding | null): void {
+    if (source === this._cloudShadowSource) return;
+    this._cloudShadowSource = source;
+    this._cloudShadowActive = source !== null;
+    this._pipeline = null;
+    this.prepare();
+  }
+
   /** Build or rebuild the render pipeline and bind groups. */
   prepare(): void {
     const device = this._context.device;
 
-    // A1 CSSM：阴影开关 × HDR 开关 → 4 个 shader 变体。
+    // A1 CSSM：阴影开关 × HDR 开关 → 4 个 shader 变体；Track C 再与
+    // 云影开关正交组合 → 8 变体（未接云影走原 4 变体，逐字节零回归）。
     const src = this._shadowSource;
     const shadowReady = this._shadowActive &&
       src !== null && !!src.ubo && !!src.textureView && !!src.comparisonSampler;
+    const cloud = this._cloudShadowSource;
+    const cloudReady = this._cloudShadowActive &&
+      cloud !== null && !!cloud.view && !!cloud.ubo && !!cloud.sampler;
     const shaderCode = this._hdr
-      ? (shadowReady ? LIGHTING_SHADER_SHADOW_HDR : LIGHTING_SHADER_HDR)
-      : (shadowReady ? LIGHTING_SHADER_SHADOW     : LIGHTING_SHADER);
+      ? (shadowReady
+          ? (cloudReady ? LIGHTING_SHADER_SHADOW_CLOUD_HDR : LIGHTING_SHADER_SHADOW_HDR)
+          : (cloudReady ? LIGHTING_SHADER_CLOUD_HDR       : LIGHTING_SHADER_HDR))
+      : (shadowReady
+          ? (cloudReady ? LIGHTING_SHADER_SHADOW_CLOUD    : LIGHTING_SHADER_SHADOW)
+          : (cloudReady ? LIGHTING_SHADER_CLOUD           : LIGHTING_SHADER));
 
     const shader = device.createShaderModule({
       code: shaderCode,
@@ -155,11 +205,26 @@ export class LightingPass implements IPass {
       });
     }
 
+    // 组 3 仅在云影激活时存在（独立 bind group，保守不动既有组结构）。
+    let bindGroupLayout3: GPUBindGroupLayout | null = null;
+    if (cloudReady && cloud) {
+      bindGroupLayout3 = device.createBindGroupLayout({
+        label: 'Lighting.BGL3',
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+          { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        ],
+      });
+    }
+
+    const bindGroupLayouts = [bindGroupLayout0, bindGroupLayout1];
+    if (bindGroupLayout2) bindGroupLayouts.push(bindGroupLayout2);
+    if (bindGroupLayout3) bindGroupLayouts.push(bindGroupLayout3);
+
     this._pipeline = device.createRenderPipeline({
       label:  'LightingPipeline',
-      layout: device.createPipelineLayout({ bindGroupLayouts: bindGroupLayout2
-        ? [bindGroupLayout0, bindGroupLayout1, bindGroupLayout2]
-        : [bindGroupLayout0, bindGroupLayout1] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts }),
       vertex:   { module: shader, entryPoint: 'vs_main' },
       fragment: {
         module:  shader,
@@ -207,6 +272,20 @@ export class LightingPass implements IPass {
           { binding: 0, resource: { buffer: src.ubo } },
           { binding: 1, resource: src.textureView },
           { binding: 2, resource: src.comparisonSampler },
+        ],
+      });
+    }
+
+    // Group 3: 云影（uniform + rgba8unorm 影纹理 + filtering 采样器）。
+    this._cloudShadowBindGroup = null;
+    if (cloudReady && cloud && bindGroupLayout3) {
+      this._cloudShadowBindGroup = device.createBindGroup({
+        label:  'Lighting.BG3',
+        layout: bindGroupLayout3,
+        entries: [
+          { binding: 0, resource: { buffer: cloud.ubo } },
+          { binding: 1, resource: cloud.view },
+          { binding: 2, resource: cloud.sampler },
         ],
       });
     }
@@ -311,6 +390,10 @@ export class LightingPass implements IPass {
     // A1 CSSM：阴影激活时补组 2（管线布局已含 BGL2）。
     if (this._shadowActive && this._shadowBindGroup) {
       pass.setBindGroup(2, this._shadowBindGroup);
+    }
+    // Track C：云影激活时补组 3（管线布局已含 BGL3）。
+    if (this._cloudShadowActive && this._cloudShadowBindGroup) {
+      pass.setBindGroup(3, this._cloudShadowBindGroup);
     }
     pass.draw(3); // full-screen triangle
     pass.end();

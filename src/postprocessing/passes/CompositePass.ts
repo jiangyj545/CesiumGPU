@@ -9,12 +9,14 @@ export interface CompositeFrameParams {
   time: number;
   dirtStrength: number;
   aspect: number;
+  godRayIntensity: number;  // god rays 叠加强度（未启用 = 0，零回归）
 }
 
 /**
- * CompositePass - sceneColor + bloom + lensFlare（ghost + DirtMask）合成。
+ * CompositePass - sceneColor + bloom + lensFlare（ghost + DirtMask）
+ * + godRays 光束（Track G）合成。
  *
- * bindGroup 绑定 [sceneTex, bloomTex, dirtTex, sampler, params]；由
+ * bindGroup 绑定 [sceneTex, bloomTex, dirtTex, sampler, params, godTex]；由
  * PostProcessManager 构建并按帧传入参数。pipeline 懒创建，幂等。
  */
 export class CompositePass {
@@ -44,6 +46,7 @@ export class CompositePass {
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }, // godRays 光束
       ],
     });
 
@@ -55,10 +58,10 @@ export class CompositePass {
       primitive: { topology: 'triangle-list', cullMode: 'none' },
     });
 
-    // CompositeParams：7×f32 → 28B → 对齐 32B
+    // CompositeParams：9×f32（含 godRayIntensity + pad）= 36B → 对齐 48B
     this._ubo = device.createBuffer({
       label: 'PostProcess.Composite.UBO',
-      size:  32,
+      size:  48,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
   }
@@ -84,7 +87,7 @@ export class CompositePass {
     this.prepare();
     if (!this._pipeline || !this._ubo) return;
 
-    const data = new Float32Array(8);
+    const data = new Float32Array(12);
     data[0] = p.bloomIntensity;
     data[1] = p.flareIntensity;
     data[2] = p.sunUv[0];
@@ -93,6 +96,7 @@ export class CompositePass {
     data[5] = p.time;
     data[6] = p.dirtStrength;
     data[7] = p.aspect;
+    data[8] = p.godRayIntensity;
     this._device.queue.writeBuffer(this._ubo, 0, data);
 
     const pass = encoder.beginRenderPass({

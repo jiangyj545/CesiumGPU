@@ -206,7 +206,9 @@
       clearEpisodeEntities();
       ep = obj;
       const frames = ep.frames;
-      hz = ep.frame_rate_hz || 5;
+      // P3-S1 real-episode（docs/phase3-telemetry-backflow.md §3.1）：hz 在 meta 内
+      // （frame_rate_hz/hz 双键）；demo 旧格式仍读顶层。
+      hz = (ep.meta && (ep.meta.frame_rate_hz || ep.meta.hz)) || ep.frame_rate_hz || 5;
       duration = frames[frames.length - 1].sim_time_s;
       simT = 0;
       playing = true;
@@ -258,6 +260,40 @@
       });
       rebuildFlown(0);
       render();
+
+      // P3-S1 real 源（meta.source==='real'）：轨迹可远离页面默认取景（光谷），
+      // 按轨迹包围盒自动取景；demo 光谷数据不触发，保持原构图。
+      // 注意 posList 是归一化单位（×EARTH_SCALE=米），相机 destination 是米制——换算后取景。
+      if (ep.meta && ep.meta.source === 'real' && state.posList.length >= 2) {
+        const xs = state.posList.map((p) => p.x);
+        const ys = state.posList.map((p) => p.y);
+        const zs = state.posList.map((p) => p.z);
+        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+        const cz = (Math.min(...zs) + Math.max(...zs)) / 2;
+        const spanM = Math.max(
+          Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) * EARTH_SCALE,
+          80,
+        );
+        viewer.camera.setView({
+          destination: new engine.Cartesian3(
+            cx * EARTH_SCALE + spanM * 2.2,
+            cy * EARTH_SCALE - spanM * 2.2,
+            cz * EARTH_SCALE + spanM * 1.6,
+          ),
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-48) },
+        });
+      }
+
+      // CDP 验证探针（verify 探针消费；页面正常使用无副作用）
+      window.__REPLAY_STATE = {
+        nFrames: frames.length,
+        hz,
+        posListLen: state.posList.length,
+        duration,
+        source: (ep.meta && ep.meta.source) || 'legacy',
+        episodeId: ep.episode_id || (ep.meta ? `real-v${ep.meta.vehicle_id}` : null),
+      };
     }
 
     // ── 帧四宫格绘制 ─────────────────────────────────────────────

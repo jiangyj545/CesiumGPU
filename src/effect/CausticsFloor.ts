@@ -20,6 +20,8 @@ export interface CausticsFloorOptions {
   sunDirection?: [number, number, number];
   /** 湿沙线强度（0=关；bindSeabed 绑定高度场后生效）。Default: `0` */
   shoreStrength?: number;
+  /** swash 岸线冲刷强度（0=关，1=全效果；setSwash 同款语义）。Default: `0` */
+  swash?: number;
 }
 
 /** 每纬度度数对应米数（小范围线性换算，与 OceanFFTWater 一致）。 */
@@ -46,6 +48,7 @@ const SKY_COLOR: [number, number, number] = [0.55, 0.72, 0.88];
  * }));
  * floor.bindFFT(ocean);        // 长波斜率摆动数据源（bindFFT 同款）
  * floor.bindCaustics(caustics); // 焦散纹理来源（OceanCaustics 实例）
+ * floor.setSwash(0.8);         // swash 岸线冲刷（run-up 涨落 + 退潮白沫）
  * ```
  */
 export class CausticsFloor implements IPass {
@@ -56,6 +59,9 @@ export class CausticsFloor implements IPass {
 
   /** 湿沙线强度（0=关；每帧写入 UBO P[24]，仅 bindSeabed 绑定高度场后有视觉意义）。 */
   shoreStrength: number;
+
+  /** swash 岸线冲刷强度（0=关，1=全效果；每帧写入 UBO P[27]，shader 侧 wet.w>0.001 门控）。 */
+  swash: number;
 
   private _context: Context;
   private _camera: Camera | null = null;
@@ -112,6 +118,7 @@ export class CausticsFloor implements IPass {
     this._sizeM = options.sizeM ?? 400;
     this._depthM = options.depthM ?? 6;
     this.shoreStrength = options.shoreStrength ?? 0;
+    this.swash = options.swash ?? 0;
 
     // 太阳方向 ECEF → 局部 ENU；upDir 为「每米归一化 ECEF 增量」（数值差分）
     const enu = CausticsFloor._enuBasis(lon, lat);
@@ -169,6 +176,14 @@ export class CausticsFloor implements IPass {
   /** 绑定 FFT 波场数据源（长波斜率摆动 + 级联尺寸）。可重复调用。 */
   bindFFT(fft: FFTDataSource): void {
     this._fft = fft;
+  }
+
+  /**
+   * swash 岸线动态冲刷强度（写 UBO wet.w，与 shoreStrength 独立叠加；默认
+   * 0 = 逐字节零回归）。非法值钳 [0,1]：NaN/负数 → 0，>1 → 1（T6 接线入口）。
+   */
+  setSwash(intensity: number): void {
+    this.swash = Number.isFinite(intensity) ? Math.min(1, Math.max(0, intensity)) : 0;
   }
 
   /** 绑定焦散纹理来源（OceanCaustics 实例，读其 causticsTexture / 焦面深度配置）。 */
@@ -352,7 +367,7 @@ export class CausticsFloor implements IPass {
     P[24] = Number.isFinite(this.shoreStrength) ? Math.max(0, this.shoreStrength) : 0; // wet.x 湿沙强度（0=关）
     P[25] = time;                                          // wet.y 效果时间（s，浪痕呼吸）
     P[26] = this._seabed ? 1.0 : 0.0;                      // wet.z 高度模式（1=ECEF 已含海拔）
-    P[27] = 0;                                             // wet.w 保留对齐
+    P[27] = Number.isFinite(this.swash) ? Math.min(1, Math.max(0, this.swash)) : 0; // wet.w swash 冲刷强度（0=关）
     P[28] = this._seabedUvOffset[0];                       // seabedUv 仿射 offset.xy
     P[29] = this._seabedUvOffset[1];
     P[30] = this._seabedUvScale[0];                        // seabedUv 仿射 scale.zw（0=未绑定）

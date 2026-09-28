@@ -138,7 +138,9 @@ export const OCEAN_CAUSTICS_GEN_BROAD_DEEP = genLayerShader({
  * seabedH varying 供湿沙线着色。着色 = 沙色 × 焦散采样（双焦平面按沙面
  * 真实深度混合，长波斜率使焦散网摇摆），叠深水衰减蓝；湿沙变暗 + 水线
  * 白沫线（tidewater Terrain.js 静态 fallback 直译，shoreStrength=0 全关，
- * 逐字节回到原着色）；半透明混合 + 距离雾 + 网格边缘 alpha 淡出免硬边。
+ * 逐字节回到原着色）；swash 岸线动态冲刷（第二批 Track S，wet.w>0：
+ * run-up 水位沿岸线切向错峰涨落 + 退潮白沫线，wet.w=0 整块分支跳过零回归）；
+ * 半透明混合 + 距离雾 + 网格边缘 alpha 淡出免硬边。
  */
 export const CAUSTICS_FLOOR_SHADER = /* wgsl */`
 // 256B 相机 UBO — 布局单一来源：src/renderer/CameraUniforms.ts
@@ -159,7 +161,7 @@ struct FloorParams {
   depths   : vec4<f32>,  // @48  x=浅焦面 D y=深焦面 D z=级联1平铺(m) w=基础 alpha
   sandCol  : vec4<f32>,  // @64  沙色 rgb
   skyCol   : vec4<f32>,  // @80  天空/雾色 rgb
-  wet      : vec4<f32>,  // @96  x=湿沙强度 shoreStrength(0=关) y=time(s) z=高度模式(1=海拔已烘焙) w=保留
+  wet      : vec4<f32>,  // @96  x=湿沙强度 shoreStrength(0=关) y=time(s) z=高度模式(1=海拔已烘焙) w=swash 冲刷强度(0=关)
   /** seabedUv 仿射（P[28..31]）：uv = planeXZ * seabed_uv.zw + seabed_uv.xy（高度场米域 → 纹理 [0,1]）。 */
   seabed_uv: vec4<f32>,  // @112
 }
@@ -299,6 +301,61 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let runup = 0.25 + 0.45 * sin( wt * 0.7 + nz * 3.0 );
   let swashLine = smoothstep( 0.22, 0.0, abs( seabedH - runup ) ) * shoreStrength * shoreFade;
   col = mix( col, vec3<f32>( 1.0 ), min( 0.5 * swashLine, 1.0 ) );
+
+  // ── swash 岸线动态冲刷（第二批 Track S；wet.w=0 整块跳过，输出逐字节零回归）──
+  // run-up 水位 A=0.6m / T≈7s 沿岸线错峰涨落：岸线相位场 = 切向坐标 × 空间频率
+  // + time × 角频率，切向由海床梯度（±2 texel 中心差分，等高线方向）旋转 90°
+  // 求得；无梯度（平底/界外）退回平面坐标 + 噪声相位。动态湿沙带随水位平滑
+  // 涨落 + 浸水湿润衰减 + 退潮白沫线（色与海面泡沫一致）+ 着水色随动态水深微调。
+  let swashAmt = max( floorParams.wet.w, 0.0 );
+  if ( swashAmt > 0.001 ) {
+    // 海床梯度（米/米）：岸线 = 等高线，法向 = 梯度方向
+    var grad = vec2<f32>( 0.0 );
+    if ( floorParams.wet.z > 0.5 ) {
+      let suvS = input.planeXZ * floorParams.seabed_uv.zw + floorParams.seabed_uv.xy;
+      if ( all( suvS >= vec2<f32>( 0.0 ) ) && all( suvS <= vec2<f32>( 1.0 ) ) ) {
+        let dimS = textureDimensions( seabedTex, 0 );
+        let hiS = vec2<i32>( dimS ) - vec2<i32>( 1 );
+        let tcS = clamp( vec2<i32>( suvS * vec2<f32>( dimS ) ), vec2<i32>( 0 ), hiS );
+        let texelM = 1.0 / max( vec2<f32>( dimS ) * floorParams.seabed_uv.zw, vec2<f32>( 1e-6 ) );
+        grad = vec2<f32>(
+          textureLoad( seabedTex, clamp( tcS + vec2<i32>( 2, 0 ), vec2<i32>( 0 ), hiS ), 0 ).r
+            - textureLoad( seabedTex, clamp( tcS - vec2<i32>( 2, 0 ), vec2<i32>( 0 ), hiS ), 0 ).r,
+          textureLoad( seabedTex, clamp( tcS + vec2<i32>( 0, 2 ), vec2<i32>( 0 ), hiS ), 0 ).r
+            - textureLoad( seabedTex, clamp( tcS - vec2<i32>( 0, 2 ), vec2<i32>( 0 ), hiS ), 0 ).r
+        ) * ( texelM * 0.25 );   // ±2 texel 差分跨度 4 texel，归一为米/米
+      }
+    }
+    // 相位 = 岸线切向坐标 × 空间频率（~15m 波长）+ time × 角频率（2π/7s≈0.898）
+    // + 噪声抖动；切向 = 梯度旋转 90°，平面回退沿 x
+    var tanPhase = input.planeXZ.x * 0.42 + nz * 3.0;
+    if ( length( grad ) > 1e-5 ) {
+      let tanDir = normalize( vec2<f32>( - grad.y, grad.x ) );
+      tanPhase = dot( input.planeXZ, tanDir ) * 0.42 + nz * 3.0;
+    }
+    let phase = tanPhase + wt * 0.898;
+    let swashLevel = 0.6 * swashAmt * sin( phase );  // run-up 水位（米，0.25 基线上方）
+    let frontH = 0.25 + max( swashLevel, 0.0 );      // 当前前沿海拔 = 静态线 + max(0, run-up)
+    let envH = 0.25 + 0.6 * swashAmt;                // 最近 run-up 包络（静态线 + A）
+    let hN = seabedH + nz * 0.3;                     // 与静态湿沙同款噪声边缘
+    // 浸水湿润衰减：当前水位以下更深色（刚被覆盖），前沿..包络过渡带随相位呼吸
+    let underW = smoothstep( frontH + 0.2, frontH - 0.15, hN );
+    let bandW = smoothstep( envH + 0.2, frontH, hN ) * ( 0.35 + 0.4 * ( 0.5 + 0.5 * sin( phase ) ) );
+    col = mix( col, col * 0.45 * vec3<f32>( 0.96, 0.98, 1.0 ),
+               min( max( underW * 0.9, bandW ) * swashAmt * shoreFade, 1.0 ) );
+    // 着水色联动：deepK 蓝调按动态水深（前沿海拔 - 海床）微调（动态水深与静态
+    // depthM 等价时修正为 0；mix 负 t 为线性外推，钳 ±0.15 防过冲）
+    let dkDyn = clamp( max( frontH - seabedH, 0.0 ) * 0.08, 0.0, 0.5 );
+    col = mix( col, col * vec3<f32>( 0.45, 0.72, 1.0 ),
+               clamp( dkDyn - depthM * 0.08, -0.15, 0.15 ) * swashAmt );
+    // 回退白沫线：退潮（cos<0 ⇒ d(swashLevel)/dt<0）在前沿叠白沫，强度 ∝ 退速，
+    // 拖尾沿前沿..包络带渐隐；色与海面泡沫一致（0.90, 0.94, 0.97）
+    let recede = clamp( - cos( phase ), 0.0, 1.0 );
+    let foamFront = smoothstep( 0.16, 0.0, abs( hN - frontH ) );
+    let foamTrail = smoothstep( envH + 0.1, frontH - 0.1, hN ) * 0.5;
+    let foamK = max( foamFront, foamTrail ) * recede * swashAmt * shoreFade;
+    col = mix( col, vec3<f32>( 0.90, 0.94, 0.97 ), min( 0.6 * foamK, 1.0 ) );
+  }
 
   // 距离雾 + 沙洲边缘 alpha 淡出（免 400m 网格硬边）
   let fog = 1.0 - exp( - distM / FOG_DIST );

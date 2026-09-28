@@ -27,6 +27,7 @@ import {
   ATMO_TRANS_SAMPLE_WGSL,
   ATMO_SKY_REFLECTION_WGSL,
 } from './AtmosphereSkyShader';
+import { cloudShadowReceiverModule } from './CloudShader';
 const N = OCEAN_FFT_SIZE;
 /** log2(N)：IFFT 级数。 */
 const LOG2N = 8;
@@ -666,6 +667,12 @@ fn vnoise( p : vec2<f32> ) -> f32 {
 ${ATMO_TRANS_SAMPLE_WGSL}
 ${ATMO_SKY_REFLECTION_WGSL}
 
+// ── Track C 云影接收（海面版：组 0 内 20-22，布局同 LightingPass 组 3）──────
+// binding 20 = 影贴图（rgba8unorm，R = 云密度）/ 21 = CloudShadowParams UBO
+//（96B，布局单一来源 CloudShader.ts）/ 22 = filtering 采样器。未绑定时 CPU
+// 侧挂 1×1 黑占位 + 全零 UBO（intensity = 0 短路恒 1，零回归）。
+${cloudShadowReceiverModule(0, 21, 20, 22)}
+
 struct VSIn {
   @location(0) ecef : vec3<f32>,    // 归一化 ECEF 水面基准点（水位折入模长）
   @location(1) planeXZ : vec2<f32>, // 局部平面坐标（米：x 东 / z 北）
@@ -794,6 +801,10 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 未绑定 scene.shadow / 已关闭时 params.x=0 短路恒 1（零回归）；水下不采样。
   let shadowF = select( cssmShadowFactor( input.worldPos, n, distN ), 1.0, uw );
 
+  // Track C 云影因子（海面 T6 接线）：云挡太阳 → 天光反射与太阳高光 glitter
+  // 同乘衰减。未绑定 / intensity<=0 时短路恒 1（零回归）；水下视角恒 1。
+  let cloudF = select( cloudShadowFactor( input.worldPos ), 1.0, uw );
+
   // 船迹泡沫（A4 G 通道）叠加进 foam 累计值
   var wakeFoam = 0.0;
   if ( renderParams.flags.y > 0.5 ) {
@@ -887,8 +898,8 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   }
 
   var col = waterTint * ( 0.82 + 0.18 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
-    + skyRad * fresnel * 0.9 * shadowF
-    + vec3<f32>( spec ) * mix( vec3<f32>( 1.0 ), sunTint, flagSpecTint ) * shadowF;
+    + skyRad * fresnel * 0.9 * shadowF * cloudF
+    + vec3<f32>( spec ) * mix( vec3<f32>( 1.0 ), sunTint, flagSpecTint ) * shadowF * cloudF;
 
   // T3 波峰 SSS 透光：波面高×逆光×掠射的青绿透射，随太阳透射色偏移；
   // 波峰自遮蔽微降。RP[22]（underwater.z）总强度 0 = 关。

@@ -28,7 +28,9 @@
       太阳方向与大气/海洋同源）与水下模式（海面双面视角 + 水下观感叠加）。
       <b>L4</b>：SeabedHeightField 海拔场（径向沙洲）→ 海面水深泡沫/收边 +
       海床起伏/湿沙线，BowSpray 船首喷雾（随航速喷射）。
-      巡航船沿椭圆航线自动航行，船体随航向转向。</p>
+      巡航船沿椭圆航线自动航行，船体随航向转向。
+      <b>Track C/G</b>：体积云 + 云影（地形/海面双通道）+ 光柱（godRays /
+      水下太阳光柱）+ 岸线冲刷。</p>
     <label>风速 <b id="windSpeedVal">8.0</b> m/s</label>
     <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="8" />
     <label>风向 <b id="windDirVal">20</b>°</label>
@@ -55,6 +57,11 @@
       <label class="checkline"><input id="sssToggle" type="checkbox" checked /> 波峰透光</label>
       <label class="checkline"><input id="sunTintToggle" type="checkbox" checked /> 太阳染色</label>
       <label class="checkline"><input id="breakSprayToggle" type="checkbox" checked /> 破碎喷雾</label>
+      <label class="checkline"><input id="cloudsToggle" type="checkbox" checked /> 体积云</label>
+      <label class="checkline"><input id="cloudShadowToggle" type="checkbox" checked /> 云影</label>
+      <label class="checkline"><input id="godRaysToggle" type="checkbox" checked /> 光柱</label>
+      <label class="checkline"><input id="swashToggle" type="checkbox" checked /> 岸线冲刷</label>
+      <label class="checkline"><input id="sunShaftToggle" type="checkbox" checked /> 水下光柱</label>
     </div>
     <button id="diveBtn" style="margin-top:10px;width:100%;padding:6px 0;cursor:pointer;
       background:#12395c;color:#8ee6ff;border:1px solid rgba(120,180,255,.4);border-radius:6px;
@@ -78,6 +85,7 @@
 
       // ── 1. 后处理开启（折射需要 _sceneColorRT 路径；海面高光吃 bloom）──
       viewer.scene.postProcess.enabled = true;
+      viewer.scene.postProcess.godRays.enabled = true; // Track G：屏幕空间太阳光柱
 
       // ── 2. 船迹波场（A4）：必须先于 ocean add 到 effects，ocean 才能取
       //      到当帧 fieldView（ping-pong 采样视图与 encoder 内依赖一致）──
@@ -93,6 +101,17 @@
         ? viewer.scene.gbufferPass.getDepthView()
         : null);
       sky.toneMapped = false;      // postProcess HDR 链：输出线性辐射，链尾统一 tone map
+
+      // ── 3b. Track C 体积云：云高球面云场 + 逐帧云影烘焙（rgba8unorm）────
+      //      setDepthView = GBuffer 深度安全闸（同 sky，未设不绘制）；
+      //      effects 顺序 sky → clouds → ocean：云叠在天空上、海面画在其上。
+      const clouds = new engine.CloudLayer(context, {
+        center: [CEN_LON, CEN_LAT],
+        sunDirection: SUN,
+      });
+      clouds.setDepthView(() => viewer.scene.gbufferPass
+        ? viewer.scene.gbufferPass.getDepthView()
+        : null);
 
       // ── 4. 海面本体（FFTDataSource + A3/A4/折射接线）─────────────────
       const foamPattern = new engine.FoamPatternTexture(context, { size: 512 });
@@ -147,6 +166,7 @@
       ocean.setShoreStrength(1.0);
       floor.bindSeabed(seabedField);  // 海床：起伏 + 湿沙线
       floor.shoreStrength = 0.8;
+      floor.setSwash(0.85);           // Track C：岸线冲刷（run-up 涨落 + 退潮白沫）
 
       // ── 5c. L5 物大气接线（tidewater 观感追赶）：海面逐像素反射 / 太阳染色 /
       //    波峰 SSS 直接绑 AtmosphereSky 的 LUT/UBO。getter 每帧惰性求值——
@@ -179,6 +199,7 @@
         waterColor: [0.05, 0.24, 0.27],
         particleDensity: 0.6,
       });
+      uwFog.setSunShaftIntensity(1.2); // Track G：水下太阳光柱（潜水观感）
       const spray = new engine.BowSpray(context, { maxParticles: 2048, scene: viewer.scene });
       // L5/T4 岸线破碎波喷雾：发射带 = 沙洲岸线（吸附源取 ocean 的海床/位移视图）
       const breakSpray = new engine.BreakSpray(context, {
@@ -196,6 +217,7 @@
       });
       viewer.scene.effects.add(wakeField);
       viewer.scene.effects.add(sky);
+      viewer.scene.effects.add(clouds); // Track C 体积云：sky 之后 ocean 之前
       viewer.scene.effects.add(ocean);
       viewer.scene.effects.add(caustics);
       viewer.scene.effects.add(floor);
@@ -205,6 +227,13 @@
 
       // ── 6b. L3 海面阴影接收：每帧从 scene.shadow 拉取最新级联绑定 ─────
       ocean.setShadowSource(() => viewer.scene.shadow.receiverBinding());
+
+      // ── 6c. Track C 云影双通道接线（工厂惰性求值：CloudLayer prepare 前
+      //      getter 为 null，自动走占位资源零回归）──────────────────────────
+      //      地形：scene 代理挂点 → LightingPass 组 3；
+      //      海面：cloudShadow 契约（view/几何/太阳）→ OceanFFTWater 组 0。
+      viewer.scene.cloudShadowSource = () => clouds.cloudShadowSource;
+      ocean.bindCloudShadow(() => clouds.cloudShadow);
 
       // ── 7. 滑杆 → setter 联动 ─────────────────────────────────────────
       function bindSlider(sliderId, valId, fmt, apply) {
@@ -464,6 +493,24 @@
       document.getElementById('breakSprayToggle').addEventListener('change', (e) => {
         breakSpray.show = e.target.checked;
       });
+      // Track C/G 开关：体积云 / 云影 / 光柱 / 岸线冲刷 / 水下光柱
+      document.getElementById('cloudsToggle').addEventListener('change', (e) => {
+        clouds.setShow(e.target.checked);
+      });
+      document.getElementById('cloudShadowToggle').addEventListener('change', (e) => {
+        const on = e.target.checked;
+        viewer.scene.cloudShadowSource = on ? () => clouds.cloudShadowSource : null;
+        ocean.bindCloudShadow(on ? () => clouds.cloudShadow : null);
+      });
+      document.getElementById('godRaysToggle').addEventListener('change', (e) => {
+        viewer.scene.postProcess.godRays.enabled = e.target.checked;
+      });
+      document.getElementById('swashToggle').addEventListener('change', (e) => {
+        floor.setSwash(e.target.checked ? 0.85 : 0);
+      });
+      document.getElementById('sunShaftToggle').addEventListener('change', (e) => {
+        uwFog.setSunShaftIntensity(e.target.checked ? 1.2 : 0);
+      });
 
       // ── 11. QA 钩子（CDP 终验用：等效于面板操作）──────────────────────
       const ck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
@@ -491,6 +538,21 @@
         setSss(b) { ocean.setSubsurfaceStrength(b ? 1.0 : 0); ck('sssToggle', b); },
         setSunTint(b) { ocean.setSunTint(b); ck('sunTintToggle', b); },
         setBreakSpray(b) { breakSpray.show = b; ck('breakSprayToggle', b); },
+        // ── Track C/G 探针扩展：体积云 / 云影 / 光柱 / 冲刷 / 水下光柱 ──
+        setClouds(b) { clouds.setShow(b); ck('cloudsToggle', b); },
+        setCloudShadow(b) {
+          viewer.scene.cloudShadowSource = b ? () => clouds.cloudShadowSource : null;
+          ocean.bindCloudShadow(b ? () => clouds.cloudShadow : null);
+          ck('cloudShadowToggle', b);
+        },
+        setGodRays(b) { viewer.scene.postProcess.godRays.enabled = b; ck('godRaysToggle', b); },
+        setSwash(b) { floor.setSwash(b ? 0.85 : 0); ck('swashToggle', b); },
+        setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 1.2 : 0); ck('sunShaftToggle', b); },
+        cloudInfo: () => ({
+          show: clouds.show,
+          seaShadow: clouds.cloudShadow !== null,       // 海面通道（prepare 后非 null）
+          terrainSource: clouds.cloudShadowSource !== null, // 地形通道
+        }),
         setTimeScale(v) {
           ocean.setTimeScale(v);
           const el = document.getElementById('timeScale');

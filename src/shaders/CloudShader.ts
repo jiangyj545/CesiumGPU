@@ -1,0 +1,292 @@
+/**
+ * 体积云层 shader（tidewater 观感追赶 Track C）。
+ *
+ * 两个入口：
+ *  - {@link CLOUD_RENDER_WGSL}    全屏三角形渲染：相机射线 × 云高球面求交，
+ *    FBM 云密度场 + 朝太阳 2D 梯度光照 + 黄昏染色，预乘 alpha 叠加在
+ *    已合成场景之上（depthCompare equal 只写背景像素，同 AtmosphereSky）。
+ *  - {@link CLOUD_SHADOW_BAKE_WGSL}  compute 正交烘焙：同款云密度场写入
+ *    rgba8unorm storage 纹理 R 通道（r8unorm 不可作 storage，WebGPU 限制），
+ *    供地形（LightingPass 组 3）与海面（主会话 T6 接线）作云影采样。
+ *
+ * UBO 布局单一来源（三份，与 CloudLayer.ts 的 CPU 写入严格对应）：
+ *
+ *  CloudCamera（96B）——渲染专用：
+ *    @0   invViewProj : mat4x4<f32>   逆 viewProj（CPU 逐帧算好上传）
+ *    @64  cameraPos   : vec4<f32>     相机归一化 ECEF
+ *    @80  viewport    : vec4<f32>     (w, h, 0, 0)
+ *
+ *  CloudParams（128B）——渲染专用：
+ *    @0   sunDirection : vec4<f32>    指向太阳（归一化）
+ *    @16  planeCenter  : vec4<f32>    云高平面中心（归一化 ECEF），w = 云球半径（归一化）
+ *    @32  eastDir      : vec4<f32>    ENU 东基（单位方向，×EARTH_SCALE = 米）
+ *    @48  northDir     : vec4<f32>    ENU 北基（同上）
+ *    @64  params0      : vec4<f32>    x=coverage y=density z=horizonFade w=保留
+ *    @80  params1      : vec4<f32>    xy=风漂移(公里) z=保留 w=保留
+ *    @96  tintLow      : vec4<f32>    云底色（rgb, a 未用）
+ *    @112 tintHigh     : vec4<f32>    云顶色（rgb, a 未用）
+ *
+ *  CloudShadowParams（96B）——烘焙 compute 与 LightingPass 组 3 消费共用：
+ *    @0   planeCenter : vec4<f32>    xyz 云高平面中心（归一化 ECEF），w = 云球半径（归一化）
+ *    @16  eastDir     : vec4<f32>
+ *    @32  northDir    : vec4<f32>
+ *    @48  params      : vec4<f32>    x=extentScale(=EARTH_SCALE/extentM) y=intensity z=coverage w=保留
+ *    @64  sunDir      : vec4<f32>    指向太阳（归一化）
+ *    @80  windOffset  : vec4<f32>    xy=风漂移(公里)
+ *
+ * 世界点 → 影贴图 uv 的仿射契约（消费方唯一公式）：
+ *    d  = 云高球面交点 - planeCenter.xyz
+ *    uv = vec2(dot(d, eastDir), dot(d, northDir)) * params.x + vec2(0.5)
+ */
+
+/** 归一化 ECEF：1 内部单位 = 6378137 米（Camera.EARTH_SCALE 同值）。 */
+const EARTH_SCALE = 6378137.0;
+
+export const CLOUD_CAMERA_UBO_BYTES = 96;
+export const CLOUD_PARAMS_UBO_BYTES = 128;
+export const CLOUD_SHADOW_PARAMS_UBO_BYTES = 96;
+
+// ── 云密度场公共段（渲染 FS 与烘焙 compute 同一份文本）──────────────────────
+const CLOUD_NOISE_WGSL = /* wgsl */`
+// 2D hash / value noise / 5 octave FBM（旋转防轴向伪影）。
+fn cloudHash(p: vec2<f32>) -> f32 {
+  let q = fract(p * vec2<f32>(123.34, 456.21));
+  q += dot(q, q + 45.32);
+  return fract(q.x * q.y);
+}
+
+fn cloudVnoise(p: vec2<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (vec2<f32>(3.0) - 2.0 * f);
+  let a = cloudHash(i);
+  let b = cloudHash(i + vec2<f32>(1.0, 0.0));
+  let c = cloudHash(i + vec2<f32>(0.0, 1.0));
+  let d = cloudHash(i + vec2<f32>(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn cloudFbm(pIn: vec2<f32>) -> f32 {
+  var p = pIn;
+  var amp = 0.5;
+  var sum = 0.0;
+  var norm = 0.0;
+  let rot = mat2x2<f32>(0.8, -0.6, 0.6, 0.8);
+  for (var i: i32 = 0; i < 5; i++) {
+    sum += amp * cloudVnoise(p);
+    norm += amp;
+    amp *= 0.5;
+    p = rot * p * 2.03 + vec2<f32>(11.7, 5.3);
+  }
+  return sum / norm;
+}
+
+/** 云密度场（planeM：云高切平面东西/北 米坐标；windKm：风漂移 公里）。 */
+fn cloudDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>) -> f32 {
+  let q = planeM * 0.00042 + windKm;
+  let warp = vec2<f32>(
+    cloudFbm(q * 0.5),
+    cloudFbm(q * 0.5 + vec2<f32>(3.7, 9.1))
+  );
+  let n = cloudFbm(q + warp * 0.6);
+  let thr = mix(0.74, 0.28, clamp(coverage, 0.0, 1.0));
+  return smoothstep(thr, thr + 0.18, n);
+}
+`;
+
+// ── 渲染入口 ─────────────────────────────────────────────────────────────────
+export const CLOUD_RENDER_WGSL = /* wgsl */`
+struct CloudCamera {
+  invViewProj : mat4x4<f32>,
+  cameraPos   : vec4<f32>,
+  viewport    : vec4<f32>,
+}
+
+struct CloudParams {
+  sunDirection : vec4<f32>,
+  planeCenter  : vec4<f32>,
+  eastDir      : vec4<f32>,
+  northDir     : vec4<f32>,
+  params0      : vec4<f32>,
+  params1      : vec4<f32>,
+  tintLow      : vec4<f32>,
+  tintHigh     : vec4<f32>,
+}
+
+@group(0) @binding(0) var<uniform> cloudCam : CloudCamera;
+@group(0) @binding(1) var<uniform> cloud    : CloudParams;
+
+const CLOUD_EARTH_SCALE: f32 = ${EARTH_SCALE.toFixed(1)};
+
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0)       ndc : vec2<f32>,
+}
+
+// 全屏三角形；NDC z = 1 恰与 GBuffer 背景深度相等（depthCompare equal 透传）。
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
+  var positions = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 3.0, -1.0),
+    vec2<f32>(-1.0,  3.0),
+  );
+  var out: VSOut;
+  out.pos = vec4<f32>(positions[vid], 1.0, 1.0);
+  out.ndc = positions[vid];
+  return out;
+}
+
+${CLOUD_NOISE_WGSL}
+
+// 最近正交向的云高球面交点距离；无交返回 -1。
+fn cloudRaySphereNearest(ro: vec3<f32>, rd: vec3<f32>, radius: f32) -> f32 {
+  let b = dot(ro, rd);
+  let c = dot(ro, ro) - radius * radius;
+  let disc = b * b - c;
+  if (disc < 0.0) { return -1.0; }
+  let sq = sqrt(disc);
+  let t0 = -b - sq;
+  if (t0 > 0.0) { return t0; }
+  let t1 = -b + sq;
+  if (t1 > 0.0) { return t1; }
+  return -1.0;
+}
+
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+  // 逆 viewProj 重建世界射线（far 平面点 → 方向）。
+  let farH = cloudCam.invViewProj * vec4<f32>(in.ndc, 1.0, 1.0);
+  let far = farH.xyz / farH.w;
+  let ro = cloudCam.cameraPos.xyz;
+  let rd = normalize(far - ro);
+
+  let hit = cloudRaySphereNearest(ro, rd, cloud.planeCenter.w);
+  if (hit <= 0.0) { discard; }
+
+  // 地平线渐隐：贴地平的掠射交点拉得极远，alpha 压零防摩尔纹。
+  let up = normalize(ro);
+  let el = dot(rd, up);
+  let horizon = smoothstep(0.015, 0.015 + 0.105 * max(cloud.params0.z, 0.001), el);
+  if (horizon <= 0.002) { discard; }
+
+  // 云高交点 → 中心切平面米坐标（与云影烘焙同一坐标系）。
+  let d = ro + rd * hit - cloud.planeCenter.xyz;
+  let planeM = vec2<f32>(
+    dot(d, cloud.eastDir.xyz),
+    dot(d, cloud.northDir.xyz)
+  ) * CLOUD_EARTH_SCALE;
+
+  let coverage = cloud.params0.x;
+  let dens = cloudDensity(planeM, coverage, cloud.params1.xy);
+  if (dens <= 0.004) { discard; }
+
+  // 朝太阳 2D 密度差分 → 迎光面提亮 / 背光面压暗。
+  let sun2 = vec2<f32>(
+    dot(cloud.sunDirection.xyz, cloud.eastDir.xyz),
+    dot(cloud.sunDirection.xyz, cloud.northDir.xyz)
+  );
+  let sunL2 = select(-sun2 / max(length(sun2), 1e-4), vec2<f32>(0.0), length(sun2) < 1e-4);
+  let densSun = cloudDensity(planeM + sunL2 * 140.0, coverage, cloud.params1.xy);
+  let grad = (densSun - dens) * 2.2;
+  let light = clamp(1.0 + grad, 0.35, 1.65);
+
+  // 太阳高度染色：正午近云顶白，黄昏整体染橙红（transmittance 近似）。
+  let sunUp = dot(cloud.sunDirection.xyz, up);
+  let dusk = 1.0 - clamp(sunUp * 1.6, 0.0, 1.0);
+  var col = mix(cloud.tintHigh.rgb, cloud.tintLow.rgb, clamp(dens, 0.0, 1.0));
+  col *= light;
+  col = mix(col, col * vec3<f32>(1.3, 0.55, 0.32), dusk * 0.85);
+
+  let alpha = clamp(dens * cloud.params0.y, 0.0, 1.0) * horizon;
+  return vec4<f32>(col * alpha, alpha); // 预乘 alpha
+}
+`;
+
+// ── 云影烘焙 compute ─────────────────────────────────────────────────────────
+export const CLOUD_SHADOW_BAKE_WGSL = /* wgsl */`
+struct CloudShadowParams {
+  planeCenter : vec4<f32>,
+  eastDir     : vec4<f32>,
+  northDir    : vec4<f32>,
+  params      : vec4<f32>,
+  sunDir      : vec4<f32>,
+  windOffset  : vec4<f32>,
+}
+
+@group(0) @binding(0) var<uniform> shadow : CloudShadowParams;
+// r8unorm 不可作 storage（WebGPU 限制）：rgba8unorm 写 R 通道。
+@group(0) @binding(1) var shadowTex : texture_storage_2d<rgba8unorm, write>;
+
+${CLOUD_NOISE_WGSL}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let dims = textureDimensions(shadowTex);
+  if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+  let uv01 = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5))
+    / vec2<f32>(f32(dims.x), f32(dims.y));
+  // uv → 覆盖区平面米坐标（params.x = EARTH_SCALE / extentM）。
+  let planeM = (uv01 - vec2<f32>(0.5)) / max(shadow.params.x, 1e-9);
+  let dens = cloudDensity(planeM, shadow.params.z, shadow.windOffset.xy);
+  textureStore(shadowTex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(dens, dens, dens, 1.0));
+}
+`;
+
+// ── 消费模块生成器（与 CLOUD_SHADOW_BAKE_WGSL 的 CloudShadowParams 布局
+//    逐字段一致，96B）────────────────────────────────────────────────────────
+// 消费方按各自 bind group 组号/绑定号实例化：
+//  - LightingPass 地形（LightingShader 锚点注入）：组 3，UBO@0 / tex@1 / samp@2
+//  - OceanFFTWater 海面（OCEAN_FFT_RENDER_SHADER 拼接）：组 0，
+//    UBO@21 / tex@20 / samp@22
+export function cloudShadowReceiverModule(
+  group: number,
+  uboBinding: number,
+  texBinding: number,
+  sampBinding: number,
+): string {
+  return /* wgsl */`
+struct CloudShadowParams {
+  planeCenter : vec4<f32>,
+  eastDir     : vec4<f32>,
+  northDir    : vec4<f32>,
+  params      : vec4<f32>,
+  sunDir      : vec4<f32>,
+  windOffset  : vec4<f32>,
+}
+
+@group(${group}) @binding(${uboBinding}) var<uniform> cloudShadowParams : CloudShadowParams;
+@group(${group}) @binding(${texBinding}) var cloudShadowTex  : texture_2d<f32>;
+@group(${group}) @binding(${sampBinding}) var cloudShadowSamp : sampler;
+
+/**
+ * 世界点云影因子（1 = 无影）。地面点沿 UBO 太阳方向上投云高球面，
+ * 平面仿射取 uv 采样烘焙密度：光照 *= 1 - density * intensity。
+ * intensity <= 0 短路恒 1（未绑定/关闭路径零影响）。
+ */
+fn cloudShadowFactor(worldPos: vec3<f32>) -> f32 {
+  let intensity = cloudShadowParams.params.y;
+  if (intensity <= 0.0) { return 1.0; }
+  let rc = cloudShadowParams.planeCenter.w;
+  let b = dot(worldPos, cloudShadowParams.sunDir.xyz);
+  let c = dot(worldPos, worldPos) - rc * rc;
+  let disc = b * b - c;
+  if (disc <= 0.0) { return 1.0; }
+  let sq = sqrt(disc);
+  var t = -b - sq;
+  if (t <= 0.0) { t = -b + sq; }
+  if (t <= 0.0) { return 1.0; }
+  let d = worldPos + cloudShadowParams.sunDir.xyz * t - cloudShadowParams.planeCenter.xyz;
+  let uv = vec2<f32>(
+    dot(d, cloudShadowParams.eastDir.xyz),
+    dot(d, cloudShadowParams.northDir.xyz)
+  ) * cloudShadowParams.params.x + vec2<f32>(0.5);
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
+  let dens = textureSampleLevel(cloudShadowTex, cloudShadowSamp, uv, 0.0).r;
+  return clamp(1.0 - dens * intensity, 0.0, 1.0);
+}
+`;
+}
+
+/** LightingPass 地形消费实例（组 3；原导出逐字节不变）。 */
+export const CLOUD_SHADOW_RECEIVER_MODULE = cloudShadowReceiverModule(3, 0, 1, 2);

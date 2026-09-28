@@ -12,16 +12,20 @@ import { FULLSCREEN_VS } from './postprocess/Fullscreen';
  *      时雾更浓、抬头看水面时透光更强；
  *   2. 屏幕径向暗角：边缘视线穿水路径更长 → 雾更厚、色调更暗。
  *
- * 三个视觉成分（全部程序生成，零纹理采样）：
+ * 四个视觉成分（全部程序生成，零纹理采样）：
  *   - 蓝绿深度雾：水体染色，透明度随俯仰/暗角渐变；
  *   - 浮动颗粒：两层屏幕空间 hash 点阵，慢速漂移 + 闪烁，密度由
  *     particleDensity 调制；
  *   - 焦散光斑：两层正弦波纹相乘调制亮度（呼应 OceanCaustics 的观感，
- *     但独立实现），抬头方向权重更大。
+ *     但独立实现），抬头方向权重更大；
+ *   - 水下太阳光柱（Track G 联动）：太阳方向投影到屏幕位，视线→太阳夹角
+ *     用「像素到太阳屏幕位的距离」作代理，Henyey-Greenstein（g≈0.7）前向
+ *     峰值 × 径向角条纹 × 已有 shimmer（波浪间隙漏光），sunShaftIntensity
+ *     默认 0 = 完全关闭（零回归）。
  *
  * Uniform 布局：
  *   binding 0 : CameraUniforms（256 B，布局单一来源 src/renderer/CameraUniforms.ts）
- *   binding 1 : UWParams（48 B = 3 x vec4）
+ *   binding 1 : UWParams（64 B = 4 x vec4）
  *
  * 输出为 premultiplied 颜色（rgb 已乘覆盖权重），配合
  * { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } 混合。
@@ -41,6 +45,7 @@ struct UWParams {
   params0    : vec4<f32>,   // x = time (s), y = intensity, z = particleDensity, w = unused
   viewport   : vec4<f32>,   // xy = 画布尺寸 (px), zw = unused
   waterColor : vec4<f32>,   // rgb = 水体染色, w = unused
+  sunShaft   : vec4<f32>,   // xyz = 太阳方向（归一化 ECEF，指向太阳）, w = sunShaftIntensity（默认 0 = 关）
 }
 
 @group(0) @binding(0) var<uniform> cam : CameraUniforms;
@@ -113,11 +118,43 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let shimmer = pow(clamp(w1 * w2, 0.0, 1.0), 2.0);
   let shafts  = shimmer * (0.12 + 0.55 * lookUp) * intensity;
 
+  // ── 4、水下太阳光柱（Track G 联动，god rays 的水下侧近似）───────────
+  // 太阳方向投到屏幕（相机 + 无穷远点过 viewProj），视线→太阳夹角用
+  // 「像素到太阳屏幕位的距离」作屏幕空间代理；HG(g=0.7) 前向峰值近似
+  // 体积光各向异性，条纹沿径向角展开并乘已有 shimmer（波浪间隙漏光）。
+  var sunBeam = vec3<f32>(0.0);
+  let sInt = clamp(uw.sunShaft.w, 0.0, 4.0);
+  if (sInt > 0.0) {
+    // 太阳须在水面上方才进光（sunDir·up > 0；安全归一化防零向量）
+    let sunDir = uw.sunShaft.xyz / max(length(uw.sunShaft.xyz), 1e-6);
+    let above  = clamp(dot(sunDir, up) * 3.0, 0.0, 1.0);
+    if (above > 0.0) {
+      let target = cam.cameraPosition.xyz + sunDir * 10000.0;
+      let clip   = cam.viewProjMatrix * vec4<f32>(target, 1.0);
+      if (clip.w > 0.0) {
+        let sunUv = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+        let toSun = (sunUv - in.uv) * vec2<f32>(aspect, 1.0);
+        let d     = length(toSun);
+        // HG(g≈0.7)：cosθ 用 1-d² 近似（小屏幕角 → 前向峰值）
+        let g   = 0.7;
+        let g2  = g * g;
+        let ct  = max(1.0 - d * d, 0.0);
+        let hg  = (1.0 - g2) / (12.566371 * pow(max(1.0 + g2 - 2.0 * g * ct, 1e-3), 1.5));
+        // 条纹：径向角 + 距离的正弦条纹，随时间缓动；抬头方向权重更大
+        let ang    = atan2(toSun.y, toSun.x);
+        let streak = 0.55 + 0.45 * sin(ang * 9.0 + d * 14.0 - t * 0.7);
+        sunBeam = vec3<f32>(hg * streak * shimmer) * above * sInt * (0.35 + 0.65 * lookUp);
+      }
+    }
+  }
+
   // ── 输出：premultiplied（rgb 已乘覆盖权重），高光在薄雾区
-  //    自然呈加性提亮；intensity = 0 → rgb/alpha 全 0 → dst 原样保留 ──
-  let lift   = (particles * 0.35 + shafts * 0.30) * vec3<f32>(0.55, 0.85, 0.90);
+  //    自然呈加性提亮；intensity = 0 且 sInt = 0 → rgb/alpha 全 0 →
+  //    dst 原样保留（零贡献/零回归）──
+  let lift   = (particles * 0.35 + shafts * 0.30) * vec3<f32>(0.55, 0.85, 0.90)
+             + sunBeam * 0.5 * vec3<f32>(0.55, 0.85, 0.90);
   let rgb    = tint * fog + lift;
-  let alpha  = clamp(fog + (particles + shafts) * 0.25, 0.0, 1.0);
+  let alpha  = clamp(fog + (particles + shafts) * 0.25 + dot(sunBeam, vec3<f32>(0.3333)) * 0.4, 0.0, 1.0);
   return vec4<f32>(rgb, alpha);
 }
 `;
