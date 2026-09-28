@@ -151,7 +151,7 @@ struct CameraUniforms {
   nearFar         : vec2<f32>,     // @224 (8B)
 }
 
-// 112B 沙洲参数
+// 128B 沙洲参数
 struct FloorParams {
   sunLocal : vec4<f32>,  // @0   指向太阳，局部 ENU（x 东 / y 上 / z 北）
   upDir    : vec4<f32>,  // @16  每米归一化 ECEF 增量（向上，含极轴压扁）
@@ -160,6 +160,8 @@ struct FloorParams {
   sandCol  : vec4<f32>,  // @64  沙色 rgb
   skyCol   : vec4<f32>,  // @80  天空/雾色 rgb
   wet      : vec4<f32>,  // @96  x=湿沙强度 shoreStrength(0=关) y=time(s) z=高度模式(1=海拔已烘焙) w=保留
+  /** seabedUv 仿射（P[28..31]）：uv = planeXZ * seabed_uv.zw + seabed_uv.xy（高度场米域 → 纹理 [0,1]）。 */
+  seabed_uv: vec4<f32>,  // @112
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
@@ -167,6 +169,8 @@ struct FloorParams {
 @group(0) @binding(2) var causticsTex : texture_2d<f32>;
 @group(0) @binding(3) var derivTex : texture_2d_array<f32>;
 @group(0) @binding(4) var smp : sampler;
+// r32float 不可过滤格式，只允许 textureLoad（与 OceanFFTShader binding 13 同款）
+@group(0) @binding(5) var seabedTex : texture_2d<f32>;
 
 const EARTH_SCALE : f32 = 6378137.0;
 const FOG_DIST : f32 = 12000.0;
@@ -261,14 +265,29 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // ── 湿沙线（海洋 L4-B，tidewater Terrain.js 静态 fallback 直译）────────
   // shoreStrength=0 时 wetK/swashLine 恒 0，两个 mix 逐字节回到原着色；
   // 干沙（h > 2.0m）smoothstep 饱和为 0，完全不变色。
+  let distM = max( length( camPos - input.worldPos ), 1e-9 ) * EARTH_SCALE;
   let shoreStrength = max( floorParams.wet.x, 0.0 );
   let wt = floorParams.wet.y;
+  // 掠射条纹修复：seabedH 从顶点插值（3.28m/quad，掠射角混叠成竖条）升级为
+  // FS textureLoad 高度场（1.95m/texel，与海面岸线泡沫 binding 同源同精度）；
+  // 界外/平底模式回退顶点值（零回归路径）
+  var seabedH = input.seabedH;
+  if ( floorParams.wet.z > 0.5 ) {
+    let suv = input.planeXZ * floorParams.seabed_uv.zw + floorParams.seabed_uv.xy;
+    if ( all( suv >= vec2<f32>( 0.0 ) ) && all( suv <= vec2<f32>( 1.0 ) ) ) {
+      let dim = textureDimensions( seabedTex, 0 );
+      let tc = clamp( vec2<i32>( suv * vec2<f32>( dim ) ), vec2<i32>( 0 ), vec2<i32>( dim ) - vec2<i32>( 1 ) );
+      seabedH = textureLoad( seabedTex, tc, 0 ).r;
+    }
+  }
+  // 湿沙细节距离淡出：80m 内全量、180m 外归零（远处欠采样颗粒一并隐没）
+  let shoreFade = 1.0 - smoothstep( 80.0, 180.0, distM );
   // 浪痕爬升干湿呼吸：噪声采样点随 time 缓慢漂移（time*0.15 偏移）
   let nz  = vnoise( input.planeXZ * 0.35 + vec2<f32>( wt * 0.15 ) );
   let nz2 = vnoise( input.planeXZ * 0.9 + vec2<f32>( wt * 0.15 + 17.3 ) );
   // 干湿过渡带斑驳 + 湿沙变暗（0.58）+ 轻去饱和偏蓝（0.97,0.98,1.00）
   let mottle = 0.7 + 0.3 * nz2;
-  let wetK = smoothstep( 1.7, 0.5, input.seabedH + nz * 0.3 ) * shoreStrength * mottle;
+  let wetK = smoothstep( 1.7, 0.5, seabedH + nz * 0.3 ) * shoreStrength * mottle * shoreFade;
   col = mix( col, col * 0.58 * vec3<f32>( 0.97, 0.98, 1.0 ), wetK );
 
   let deepK = clamp( depthM * 0.08, 0.0, 0.5 );
@@ -278,11 +297,10 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 水线白沫线：runup 周期爬升（简化涌浪），在 h≈runup 处混白；surfCov 取
   // shoreStrength 作覆盖缩放，全关时同样归零
   let runup = 0.25 + 0.45 * sin( wt * 0.7 + nz * 3.0 );
-  let swashLine = smoothstep( 0.22, 0.0, abs( input.seabedH - runup ) ) * shoreStrength;
+  let swashLine = smoothstep( 0.22, 0.0, abs( seabedH - runup ) ) * shoreStrength * shoreFade;
   col = mix( col, vec3<f32>( 1.0 ), min( 0.5 * swashLine, 1.0 ) );
 
   // 距离雾 + 沙洲边缘 alpha 淡出（免 400m 网格硬边）
-  let distM = max( length( camPos - input.worldPos ), 1e-9 ) * EARTH_SCALE;
   let fog = 1.0 - exp( - distM / FOG_DIST );
   col = mix( col, floorParams.skyCol.rgb, fog * 0.9 );
   let b = max( abs( input.planeXZ.x ), abs( input.planeXZ.y ) ) / ( floorParams.spacing.y * 0.5 );
@@ -294,5 +312,5 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 
 /** CausticsParams uniform buffer 字节数（64B，见 struct 注释）。 */
 export const CAUSTICS_PARAMS_UBO_BYTES = 64;
-/** FloorParams uniform buffer 字节数（112B，见 struct 注释）。 */
-export const FLOOR_PARAMS_UBO_BYTES = 112;
+/** FloorParams uniform buffer 字节数（128B，见 struct 注释）。 */
+export const FLOOR_PARAMS_UBO_BYTES = 128;

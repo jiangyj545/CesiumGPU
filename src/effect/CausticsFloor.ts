@@ -62,6 +62,9 @@ export class CausticsFloor implements IPass {
   private _fft: FFTDataSource | null = null;
   private _source: OceanCaustics | null = null;
   private _seabed: SeabedHeightField | null = null;
+  /** seabedUv 仿射（P[28..31]）：scale 0 = 未绑定 → suv 恒 0 落界外，FS 回退顶点值。 */
+  private _seabedUvOffset: [number, number] = [0.5, 0.5];
+  private _seabedUvScale: [number, number] = [0, 0];
 
   private readonly _centerLon: number;
   private readonly _centerLat: number;
@@ -69,6 +72,9 @@ export class CausticsFloor implements IPass {
   private readonly _depthM: number;
   private readonly _sunLocal: [number, number, number];
   private readonly _upDir: [number, number, number];
+  /** ENU east/north 基（每米归一化 ECEF 增量，构造期缓存，bindSeabed uv 仿射用）。 */
+  private readonly _eastDir: [number, number, number];
+  private readonly _northDir: [number, number, number];
   private _geometry: { vertices: Float32Array; indices: Uint32Array; indexCount: number };
 
   // ── GPU 资源 ──
@@ -83,6 +89,11 @@ export class CausticsFloor implements IPass {
   /** 缓存当前绑定的两个纹理视图，变更时重建 bind group。 */
   private _boundCaustics: GPUTextureView | null = null;
   private _boundDeriv: GPUTextureView | null = null;
+  /** 缓存 binding 5 海床纹理视图身份（含 fallback），变更时重建 bind group。 */
+  private _bgSeabed: GPUTextureView | null = null;
+  /** 湿沙占位纹理（1×1 r32float 全 -1000 极深 = 无湿沙）：惰性创建。 */
+  private _seabedFallbackTex: GPUTexture | null = null;
+  private _seabedFallbackViewCache: GPUTextureView | null = null;
   /** 初始化失败闸：一次 console.error 后禁用，防每帧刷屏（OceanFFTWater 同款）。 */
   private _failed = false;
 
@@ -106,6 +117,8 @@ export class CausticsFloor implements IPass {
       a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     this._sunLocal = [dot(sun, enu.east), dot(sun, enu.up), dot(sun, enu.north)];
     this._upDir = enu.up;
+    this._eastDir = enu.east;
+    this._northDir = enu.north;
 
     this._geometry = CausticsFloor._buildGeometry(lon, lat, this._sizeM, FLOOR_SEGMENTS, null);
   }
@@ -127,6 +140,26 @@ export class CausticsFloor implements IPass {
     // prepare 已建过顶点缓冲时原位重写（几何拓扑固定 → 字节数恒定，无需重建）
     if (this._vertexBuffer) {
       this._context.writeBuffer(this._vertexBuffer, 0, CausticsFloor._asBytes(this._geometry.vertices));
+    }
+
+    // seabedUv 仿射（P[28..31]，OceanFFTWater.bindSeabed 同款原点差投影）：
+    // seabed 局部平面与沙面 planeXZ 同为 ENU 米域但原点不同，须做原点差换算
+    // ——基向量为「每米归一化增量」，需最小二乘投影还原米数（直接点积差 R 倍），
+    // uv = 原点差 / sizeMeters + 0.5。scale 0 = 未绑定 → FS 回退顶点 seabedH。
+    if (field) {
+      const p0 = CausticsFloor._ecef(this._centerLon, this._centerLat, 0);
+      const c = field.centerRadial;
+      const dx = p0[0] - c.x, dy = p0[1] - c.y, dz = p0[2] - c.z;
+      const e = this._eastDir;
+      const n = this._northDir;
+      const eastM = (dx * e[0] + dy * e[1] + dz * e[2]) / (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+      const northM = (dx * n[0] + dy * n[1] + dz * n[2]) / (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+      const s = 1 / field.sizeMeters;
+      this._seabedUvOffset = [eastM * s + 0.5, northM * s + 0.5];
+      this._seabedUvScale = [s, s];
+    } else {
+      this._seabedUvOffset = [0.5, 0.5];
+      this._seabedUvScale = [0, 0];
     }
   }
 
@@ -180,6 +213,8 @@ export class CausticsFloor implements IPass {
           { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
           { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
           { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+          // r32float 不可过滤高度场（湿沙 FS textureLoad），OceanFFTShader binding 13 同款
+          { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
         ],
       });
 
@@ -282,7 +317,7 @@ export class CausticsFloor implements IPass {
     });
     this._context.writeBuffer(this._cameraUBO, 0, camData);
 
-    // ── 参数 UBO（112B；P[0..23] 焦面深度/覆盖域与 OceanCaustics 保持一致）──
+    // ── 参数 UBO（128B；P[0..23] 焦面深度/覆盖域与 OceanCaustics 保持一致）──
     const P = this._paramsF32;
     P.set(this._sunLocal, 0);
     P.set(this._upDir, 4);
@@ -300,8 +335,14 @@ export class CausticsFloor implements IPass {
     P[25] = time;                                          // wet.y 效果时间（s，浪痕呼吸）
     P[26] = this._seabed ? 1.0 : 0.0;                      // wet.z 高度模式（1=ECEF 已含海拔）
     P[27] = 0;                                             // wet.w 保留对齐
+    P[28] = this._seabedUvOffset[0];                       // seabedUv 仿射 offset.xy
+    P[29] = this._seabedUvOffset[1];
+    P[30] = this._seabedUvScale[0];                        // seabedUv 仿射 scale.zw（0=未绑定）
+    P[31] = this._seabedUvScale[1];
 
-    if (this._boundCaustics !== caustics || this._boundDeriv !== deriv || !this._bindGroup) {
+    const seabedView = this._seabed?.seabedTexture ?? this._seabedFallbackView();
+    if (this._boundCaustics !== caustics || this._boundDeriv !== deriv
+      || this._bgSeabed !== seabedView || !this._bindGroup) {
       this._bindGroup = this._context.device.createBindGroup({
         layout: this._bgl!,
         entries: [
@@ -310,10 +351,12 @@ export class CausticsFloor implements IPass {
           { binding: 2, resource: caustics },
           { binding: 3, resource: deriv },
           { binding: 4, resource: this._sampler() },
+          { binding: 5, resource: seabedView },
         ],
       });
       this._boundCaustics = caustics;
       this._boundDeriv = deriv;
+      this._bgSeabed = seabedView;
     }
 
     this._context.writeBuffer(this._paramsUBO, 0, this._paramsF32);
@@ -337,6 +380,7 @@ export class CausticsFloor implements IPass {
     for (const b of [this._vertexBuffer, this._indexBuffer, this._cameraUBO, this._paramsUBO]) {
       b?.destroy();
     }
+    this._seabedFallbackTex?.destroy();
     this._vertexBuffer = null;
     this._indexBuffer = null;
     this._cameraUBO = null;
@@ -346,6 +390,9 @@ export class CausticsFloor implements IPass {
     this._bindGroup = null;
     this._boundCaustics = null;
     this._boundDeriv = null;
+    this._bgSeabed = null;
+    this._seabedFallbackTex = null;
+    this._seabedFallbackViewCache = null;
   }
 
   // ── 内部 ─────────────────────────────────────────────────────────────────
@@ -360,6 +407,31 @@ export class CausticsFloor implements IPass {
       minFilter: 'linear',
       mipmapFilter: 'linear',
     });
+  }
+
+  /**
+   * binding 5 占位纹理视图（惰性创建，视图身份恒一防每帧重建 bind group）：
+   * 1×1 r32float 全 -1000（极深 = 无湿沙；仅未绑 field 时使用，湿沙受
+   * shoreStrength/wet.z 门控走原路径，OceanFFTSeabedFallback 同款模式）。
+   */
+  private _seabedFallbackView(): GPUTextureView {
+    if (!this._seabedFallbackViewCache) {
+      const device = this._context.device;
+      this._seabedFallbackTex = device.createTexture({
+        label: 'CausticsFloorSeabedFallback',
+        size: [1, 1],
+        format: 'r32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      device.queue.writeTexture(
+        { texture: this._seabedFallbackTex },
+        new Float32Array([-1000]),
+        { bytesPerRow: 4, rowsPerImage: 1 },
+        [1, 1, 1],
+      );
+      this._seabedFallbackViewCache = this._seabedFallbackTex.createView();
+    }
+    return this._seabedFallbackViewCache;
   }
 
   /**

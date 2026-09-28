@@ -43,6 +43,13 @@ function makeContext() {
     createRenderPipeline: (d: GPURenderPipelineDescriptor) => ({ label: d.label }),
     createSampler: () => ({}),
     createBindGroup: () => ({ label: 'bg' }),
+    // binding 5 fallback 纹理（_seabedFallbackView 惰性创建需要，makeFieldContext 同款）
+    createTexture: (desc: GPUTextureDescriptor) => ({
+      label: desc.label,
+      createView: () => ({ label: `${desc.label}.View` }),
+      destroy: vi.fn(),
+    }),
+    queue: { writeTexture: vi.fn() },
   };
   const context = {
     initialized: true,
@@ -121,7 +128,7 @@ function vertexBufferOf(floor: CausticsFloor): object {
   return (floor as unknown as { _vertexBuffer: object })._vertexBuffer as object;
 }
 
-/** 触发一次 execute 并返回写入的 FloorParams UBO 快照（Float32Array，28 floats）。 */
+/** 触发一次 execute 并返回写入的 FloorParams UBO 快照（Float32Array，32 floats）。 */
 function paramsOf(floor: CausticsFloor, writeBuffer: ReturnType<typeof vi.fn>): Float32Array {
   floor.prepare();
   floor.updateCamera(makeCamera());
@@ -181,7 +188,7 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
 
     // UBO：P[0..23] 与旧版一致 + P[24..27] 全 0（湿沙全关）
     const P = paramsOf(floor, writeBuffer);
-    expect(FLOOR_PARAMS_UBO_BYTES).toBe(112);
+    expect(FLOOR_PARAMS_UBO_BYTES).toBe(128);
     expect(P.length).toBe(FLOOR_PARAMS_UBO_BYTES / 4);
     expect(P[8]).toBe(400);   // spacing.x = sizeM（无 caustics 回退）
     expect(P[9]).toBe(400);   // spacing.y
@@ -197,6 +204,7 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
     expect(P[25]).toBe(12.5); // time 透传
     expect(P[26]).toBe(0);    // 平底模式
     expect(P[27]).toBe(0);    // pad
+    expect([P[28], P[29], P[30], P[31]]).toEqual([0.5, 0.5, 0, 0]); // seabedUv 未绑定
   });
 
   it('bindSeabed(field)：顶点海拔 = sampleHeight，ECEF 经引擎单源投影（抽 5 顶点反算）', () => {
@@ -248,6 +256,9 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
     const P = paramsOf(floor, writeBuffer);
     expect(P[24]).toBe(Math.fround(0.8));
     expect(P[26]).toBe(1); // 高度场模式：VS 不再下移 depthM
+    // seabedUv 仿射：中心重合 → offset=(0.5,0.5)，scale=1/sizeMeters（默认 500）
+    expect([P[28], P[29]]).toEqual([0.5, 0.5]);
+    expect([P[30], P[31]]).toEqual([Math.fround(1 / 500), Math.fround(1 / 500)]);
 
     // 非法值钳 0（NaN/负数不进 UBO）
     floor.shoreStrength = Number.NaN;
@@ -258,19 +269,23 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
 
   it('shader 源串：wetK 公式 / 0.58 湿色 / runup 正弦 / shoreStrength 门', () => {
     expect(CAUSTICS_FLOOR_SHADER).toContain(
-      'smoothstep( 1.7, 0.5, input.seabedH + nz * 0.3 ) * shoreStrength * mottle'
+      'smoothstep( 1.7, 0.5, seabedH + nz * 0.3 ) * shoreStrength * mottle * shoreFade'
     );
     expect(CAUSTICS_FLOOR_SHADER).toContain('0.7 + 0.3 * nz2');                           // mottle
     expect(CAUSTICS_FLOOR_SHADER).toContain('col * 0.58 * vec3<f32>( 0.97, 0.98, 1.0 )'); // 湿色
     expect(CAUSTICS_FLOOR_SHADER).toContain('0.25 + 0.45 * sin( wt * 0.7 + nz * 3.0 )');  // runup
     expect(CAUSTICS_FLOOR_SHADER).toContain(
-      'smoothstep( 0.22, 0.0, abs( input.seabedH - runup ) ) * shoreStrength'
+      'smoothstep( 0.22, 0.0, abs( seabedH - runup ) ) * shoreStrength * shoreFade'
     );
     expect(CAUSTICS_FLOOR_SHADER).toContain('0.5 * swashLine');  // 混白
     expect(CAUSTICS_FLOOR_SHADER).toContain('wt * 0.15');        // time 噪声漂移
     expect(CAUSTICS_FLOOR_SHADER).toContain('let shoreStrength = max( floorParams.wet.x, 0.0 )'); // 门
     // 高度场模式 VS 门（wet.z）：烘焙模式不再下移 depthM
     expect(CAUSTICS_FLOOR_SHADER).toContain('select( flatDrop, vec3<f32>( 0.0 ), floorParams.wet.z > 0.5 )');
+    // 掠射条纹修复：FS textureLoad 高度场 + 湿沙细节距离淡出
+    expect(CAUSTICS_FLOOR_SHADER).toContain('textureLoad( seabedTex, tc, 0 ).r');
+    expect(CAUSTICS_FLOOR_SHADER).toContain('let shoreFade = 1.0 - smoothstep( 80.0, 180.0, distM )');
+    expect(CAUSTICS_FLOOR_SHADER).toContain('seabed_uv: vec4<f32>');
   });
 
   it('bindSeabed 幂等：同 field 不重建不重写，顶点缓冲对象恒一', () => {

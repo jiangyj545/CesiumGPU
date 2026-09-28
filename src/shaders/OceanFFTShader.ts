@@ -758,6 +758,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // L4-A 岸线泡沫：seabed 高度场（R = 海拔米）+ 波面高 varying → 瞬时水深。
   // flag 关闭时三分量保持初值，下游公式逐项退化回原路径
   // （covTotal = foam*1 + 0 + wakeFoam、edgeFade = 1 → 零回归）。
+  var shoreDepth = 1000.0; // 瞬时水深（米；岸线分支内更新，浅水色渐变消费）
   var jacW = 1.0;     // 近岸 Jacobian 泡沫减权（surf=1 打 5 折，tidewater:421 语义）
   var shoreCov = 0.0; // 破碎带泡沫增量
   var edgeFade = 1.0; // 浅水 alpha 收边（水膜结束在岸线，露出干沙给海床画）
@@ -770,6 +771,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
       seabedH = textureLoad( seabedTex, tc, 0 ).r;
     }
     let depth = input.waveH - seabedH;        // 瞬时水深（米）
+    shoreDepth = depth;
     let surf = smoothstep( 7.0, 3.0, depth ); // 破碎带：≤3m 全量、≥7m 归零（tidewater SurfFoam 同款语义）
     jacW = 1.0 - 0.5 * surf;
     shoreCov = surf * renderParams.shoreParams.y * ( 0.75 + 0.5 * fN );
@@ -793,9 +795,12 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     albedoJit = 1.0 + ( p.b - 0.5 ) * 0.2;
   }
 
-  // 水色：深水 → 地平线浅色（距离混合）；水下切换透射青绿（透光增强）
+  // 水色：深水 → 地平线浅色（距离混合）；水下切换透射青绿（透光增强）；
+  // 浅水碧绿：沙洲上方瞬时水深 0-7m 增亮偏绿（隔水看水下不再一片死蓝）
   let shallow = vec3<f32>( 0.075, 0.19, 0.27 );
-  let baseCol = mix( renderParams.deepColor.rgb, shallow, smoothstep( 150.0, 5000.0, distM ) );
+  var baseCol = mix( renderParams.deepColor.rgb, shallow, smoothstep( 150.0, 5000.0, distM ) );
+  let lime = vec3<f32>( 0.17, 0.46, 0.38 );
+  baseCol = mix( baseCol, lime, smoothstep( 8.0, 1.0, shoreDepth ) * 0.68 );
   let uwWater = vec3<f32>( 0.10, 0.46, 0.42 );
   let waterTint = select( baseCol, uwWater, uw );
   var col = waterTint * ( 0.82 + 0.18 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
