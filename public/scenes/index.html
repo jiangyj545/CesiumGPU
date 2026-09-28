@@ -175,6 +175,24 @@
     grid.appendChild(card);
   }
 
+  // F71 指挥大屏入口(非场景卡片:多机态势总览页,复用 bar 的 simUrl)
+  {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="row1">
+        <span class="badge">大屏</span>
+        <h3>指挥大屏</h3>
+      </div>
+      <div class="desc">低空多机态势总览:城市白模 + 航迹/遥测/事件流/SoC 电量一屏监视(97_dashboard,左栏可切场景与 seed;配套 battery 演示场景可看低电量橙色告警)。</div>
+      <div class="meta"><span class="chip">F71</span><span class="chip">态势监视</span><span class="chip">电池告警</span></div>
+      <div class="go">▶ 打开指挥大屏 <span class="arr">→</span></div>`;
+    card.addEventListener('click', () =>
+      window.open('/examples/97_dashboard.html?simUrl=' +
+        encodeURIComponent($('simUrl').value || 'http://localhost:8895'), '_blank'));
+    grid.appendChild(card);
+  }
+
   // 仿真服务在线检测(/health)
   (async () => {
     const dot = $('srvDot'), text = $('srvText');

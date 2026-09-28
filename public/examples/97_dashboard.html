@@ -144,7 +144,7 @@
         const r = await fetch('/@fs/' + (SPEC_DIR + file).replaceAll('\\', '/'));
         specCache[file] = r.ok ? JSON.parse(await r.text()) : null;
       } catch (e) {
-        console.warn('[92] 场景 spec 读取失败（vite /@fs）:', e.message);
+        console.warn('[97] 场景 spec 读取失败（vite /@fs）:', e.message);
         specCache[file] = null;
       }
       return specCache[file];
@@ -629,7 +629,7 @@
         setOriginFromSpec(spec);
         window.__DASH.specOk = true;
       } else {
-        console.warn('[92] 缺省场景 spec 读取失败（检查 vite /@fs 与平台仓路径）');
+        console.warn('[97] 缺省场景 spec 读取失败（检查 vite /@fs 与平台仓路径）');
       }
       let v;
       try {
