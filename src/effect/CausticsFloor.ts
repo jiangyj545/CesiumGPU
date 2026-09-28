@@ -3,6 +3,7 @@ import type { Camera } from '../scene/Camera';
 import type { Context } from '../renderer/Context';
 import type { FFTDataSource, OceanCaustics } from './OceanCaustics';
 import type { SeabedHeightField } from './SeabedHeightField';
+import type { SwashField } from './SwashField';
 import { ecefFromLonLatHeight } from '../terrain/TerrainProvider';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 import { CAUSTICS_FLOOR_SHADER, FLOOR_PARAMS_UBO_BYTES } from '../shaders/OceanCausticsShader';
@@ -71,6 +72,11 @@ export class CausticsFloor implements IPass {
   /** seabedUv 仿射（P[28..31]）：scale 0 = 未绑定 → suv 恒 0 落界外，FS 回退顶点值。 */
   private _seabedUvOffset: [number, number] = [0.5, 0.5];
   private _seabedUvScale: [number, number] = [0, 0];
+  /** SwashField 模拟场（Track W）：null = 湿沙/白沫走解析路径（零回归）。 */
+  private _swash: SwashField | null = null;
+  /** swashUv 仿射（P[32..35]）：scale 0 = 未绑定 → FS 走解析路径。 */
+  private _swashUvOffset: [number, number] = [0.5, 0.5];
+  private _swashUvScale: [number, number] = [0, 0];
 
   private readonly _centerLon: number;
   private readonly _centerLat: number;
@@ -97,9 +103,14 @@ export class CausticsFloor implements IPass {
   private _boundDeriv: GPUTextureView | null = null;
   /** 缓存 binding 5 海床纹理视图身份（含 fallback），变更时重建 bind group。 */
   private _bgSeabed: GPUTextureView | null = null;
+  /** 缓存 binding 6 swash 纹理视图身份（含 fallback），变更时重建 bind group。 */
+  private _bgSwash: GPUTextureView | null = null;
   /** 湿沙占位纹理（1×1 r32float 全 -1000 极深 = 无湿沙）：惰性创建。 */
   private _seabedFallbackTex: GPUTexture | null = null;
   private _seabedFallbackViewCache: GPUTextureView | null = null;
+  /** swash 占位纹理（1×1 rgba16float 零初始化 = 静水）：惰性创建。 */
+  private _swashFallbackTex: GPUTexture | null = null;
+  private _swashFallbackViewCache: GPUTextureView | null = null;
   /** 初始化失败闸：一次 console.error 后禁用，防每帧刷屏（OceanFFTWater 同款）。 */
   private _failed = false;
   /** T5 真 HDR：当前管线目标格式（构造期 = preferredFormat，Scene 逐帧下发后跟随）。 */
@@ -179,6 +190,38 @@ export class CausticsFloor implements IPass {
   }
 
   /**
+   * 绑定 SwashField 浅水模拟场（tidewater Track W）：湿沙线/白沫线/着水色
+   * 改采样 swash 纹理（uv 仿射同 seabedUv 模式写 P[32..35]，wet.w 门控不变），
+   * 涨落动态由模拟自带；传 `null` 恢复解析 run-up 路径（零回归）。同一
+   * field 引用重复调用为无操作（幂等）。
+   *
+   * 注意：SwashField 自身是 IPass，须一并加入 EffectManager 才会步进
+   * （本类不代步进，避免双步进歧义）；其窗口应与本类绑定的海床同源
+   * （SwashField.bindSeabed 同一 SeabedHeightField）。
+   */
+  bindSwash(field: SwashField | null): void {
+    if (this._swash === field) return;
+    this._swash = field;
+    // swashUv 仿射（与 bindSeabed 的 seabedUv 同款原点差投影，field 侧域为
+    // 其 centerRadial ± sizeMeters/2）：scale 0 = 未绑定 → FS 走解析路径。
+    if (field) {
+      const p0 = CausticsFloor._ecef(this._centerLon, this._centerLat, 0);
+      const c = field.centerRadial;
+      const dx = p0[0] - c.x, dy = p0[1] - c.y, dz = p0[2] - c.z;
+      const e = this._eastDir;
+      const n = this._northDir;
+      const eastM = (dx * e[0] + dy * e[1] + dz * e[2]) / (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+      const northM = (dx * n[0] + dy * n[1] + dz * n[2]) / (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+      const s = 1 / field.windowSizeMeters;
+      this._swashUvOffset = [eastM * s + 0.5, northM * s + 0.5];
+      this._swashUvScale = [s, s];
+    } else {
+      this._swashUvOffset = [0.5, 0.5];
+      this._swashUvScale = [0, 0];
+    }
+  }
+
+  /**
    * swash 岸线动态冲刷强度（写 UBO wet.w，与 shoreStrength 独立叠加；默认
    * 0 = 逐字节零回归）。非法值钳 [0,1]：NaN/负数 → 0，>1 → 1（T6 接线入口）。
    */
@@ -246,6 +289,8 @@ export class CausticsFloor implements IPass {
           { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
           // r32float 不可过滤高度场（湿沙 FS textureLoad），OceanFFTShader binding 13 同款
           { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+          // SwashField 模拟场（rgba16float filterable，线性采样）
+          { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
         ],
       });
 
@@ -372,10 +417,17 @@ export class CausticsFloor implements IPass {
     P[29] = this._seabedUvOffset[1];
     P[30] = this._seabedUvScale[0];                        // seabedUv 仿射 scale.zw（0=未绑定）
     P[31] = this._seabedUvScale[1];
+    P[32] = this._swashUvOffset[0];                        // swashUv 仿射 offset.xy
+    P[33] = this._swashUvOffset[1];
+    P[34] = this._swashUvScale[0];                         // swashUv 仿射 scale.zw（0=未绑定→解析路径）
+    P[35] = this._swashUvScale[1];
 
     const seabedView = this._seabed?.seabedTexture ?? this._seabedFallbackView();
+    const swashView = this._swash?.swashView ?? this._swashFallbackView();
     if (this._boundCaustics !== caustics || this._boundDeriv !== deriv
-      || this._bgSeabed !== seabedView || !this._bindGroup) {
+      || this._bgSeabed !== seabedView || this._bgSwash !== swashView || !this._bindGroup) {
+      // 注：swashView 随模拟 ping-pong 逐帧交替 → 绑定模拟场时 bind group
+      // 逐帧重建（GPUBindGroup 为 GC 管理资源，无显式 destroy，业界常见做法）
       this._bindGroup = this._context.device.createBindGroup({
         layout: this._bgl!,
         entries: [
@@ -385,11 +437,13 @@ export class CausticsFloor implements IPass {
           { binding: 3, resource: deriv },
           { binding: 4, resource: this._sampler() },
           { binding: 5, resource: seabedView },
+          { binding: 6, resource: swashView },
         ],
       });
       this._boundCaustics = caustics;
       this._boundDeriv = deriv;
       this._bgSeabed = seabedView;
+      this._bgSwash = swashView;
     }
 
     this._context.writeBuffer(this._paramsUBO, 0, this._paramsF32);
@@ -424,8 +478,12 @@ export class CausticsFloor implements IPass {
     this._boundCaustics = null;
     this._boundDeriv = null;
     this._bgSeabed = null;
+    this._bgSwash = null;
     this._seabedFallbackTex = null;
     this._seabedFallbackViewCache = null;
+    this._swashFallbackTex?.destroy();
+    this._swashFallbackTex = null;
+    this._swashFallbackViewCache = null;
   }
 
   // ── 内部 ─────────────────────────────────────────────────────────────────
@@ -465,6 +523,25 @@ export class CausticsFloor implements IPass {
       this._seabedFallbackViewCache = this._seabedFallbackTex.createView();
     }
     return this._seabedFallbackViewCache;
+  }
+
+  /**
+   * binding 6 占位纹理视图（惰性创建，视图身份恒一防每帧重建 bind group）：
+   * 1×1 rgba16float 零初始化 = 静水（仅未绑 SwashField 时使用；FS 侧
+   * swash_uv.z == 0 门控根本不采样，内容仅为满足绑定合法性）。
+   */
+  private _swashFallbackView(): GPUTextureView {
+    if (!this._swashFallbackViewCache) {
+      const device = this._context.device;
+      this._swashFallbackTex = device.createTexture({
+        label: 'CausticsFloorSwashFallback',
+        size: [1, 1],
+        format: 'rgba16float',
+        usage: GPUTextureUsage.TEXTURE_BINDING,
+      });
+      this._swashFallbackViewCache = this._swashFallbackTex.createView({ label: 'CausticsFloorSwashFallback.View' });
+    }
+    return this._swashFallbackViewCache;
   }
 
   /**

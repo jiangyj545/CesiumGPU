@@ -28,6 +28,10 @@
  *   var<uniform> atmosphereParams : AtmosphereParams   —— 64 B，布局同上
  *   var atmSkyViewLUT : texture_2d<f32>                —— skyView LUT
  *   var atmLinearClamp : sampler                       —— linear/clamp
+ *
+ * Track A 大气透视（aerial perspective）：ATMO_AERIAL_WGSL 供地形雾拼接
+ * （LightingShader AP 变体），atmAerialColor 同源采样 skyView LUT，
+ * 绑定契约见该块上方注释；AerialParams 32B 布局单一来源 AERIAL_PARAMS_STRUCT_WGSL。
  */
 
 /** 大气底（行星地表）半径，km（tidewater RG）。 */
@@ -634,3 +638,66 @@ fn atmSkyReflectionRadiance(
   return L;
 }
 `;
+
+// ── Track A 大气透视（aerial perspective）模块：地形雾随太阳/视角物理染色 ─────
+//
+// 原理（务实 AP，不建第四张 LUT）：远物的 inscatter 颜色 ≈ 该视线方向的天空
+// 辐射 —— skyView LUT 已按 (视线天顶角, 相对太阳方位) 参数化，直接采样即可让
+// 远山「融进那个方向的天空」：黄昏地平线方向天空本就橙红 → 远处地形自然染
+// 橙红；朝太阳看时前向散射更亮 → 雾更浓。距离混合系数由消费方用
+// fogAmount = 1 - exp(-dist / distM) 计算后 mix（见 LightingShader.HAZE_APPLIED）。
+//
+// **AP 绑定契约**（消费方——目前仅 LightingShader AP 变体——须先于本块声明，
+// WGSL 声明先于使用；名字必须一致）：
+//   struct AtmosphereParams（ATMO_PARAMS_STRUCT_WGSL，64 B）
+//   @group(X) @binding(A) var<uniform> atmosphereParams : AtmosphereParams;
+//   @group(X) @binding(B) var atmSkyViewLUT : texture_2d<f32>;   —— 绑 skyViewTexture
+//   @group(X) @binding(C) var atmLinearClamp : sampler;
+// 入口函数 `atmAerialColor(dirWorld, up, sunDirWorld) -> vec3f`：
+//   dirWorld    归一化视线方向（相机 → 地物，ECEF）；
+//   up          地物点归一化 ECEF 天顶方向；
+//   sunDirWorld 归一化 ECEF 太阳方向（与 AtmosphereSky.setSunDirection 同源）。
+// 内部 = atmSkyLuminance 同源查询，**无日/月盘、无星空**（雾不该发光点）。
+//
+// 注意：本块内含 atmSkyLuminance 定义，**不可与 ATMO_SKY_REFLECTION_WGSL 拼
+// 进同一 shader 模块**（重复定义）。局部基函数独立命名 atmAerialLocalBasis
+// （算法与 atmLocalBasis 逐行一致），保证两块即使同仓库并存也无符号冲突。
+
+/** AerialParams uniform 字节数（strength/distM/sunDir 布局见下方 struct）。 */
+export const AERIAL_PARAMS_UBO_BYTES = 32;
+
+/** AerialParams struct 文本（导出：AP 消费方拼接声明；布局单一来源）。 */
+export const AERIAL_PARAMS_STRUCT_WGSL = /* wgsl */`
+struct AerialParams {
+  strength : f32,      // @0  总开关/强度（0 = 恒走旧路径，零回归）
+  distM    : f32,      // @4  参考雾距（米，默认 25000 ≈ 25 km）
+  _pad0    : f32,      // @8
+  _pad1    : f32,      // @12
+  sunDir   : vec3f,    // @16 归一化 ECEF 太阳方向（vec3f 16B 对齐 → @16）
+}
+`;
+
+const ATMO_AERIAL_BODY_WGSL = /* wgsl */`
+// 局地基（与 ATMO_SKY_REFLECTION_WGSL.atmLocalBasis 同算法，独立命名防拼冲突）
+fn atmAerialLocalBasis(up: vec3f) -> mat3x3<f32> {
+  // refAxis：ref 是 WGSL 保留字，用 ref 会使模块解析失败（真机 CDP 验证发现）
+  let refAxis = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(up.y) > 0.9);
+  let east = normalize(cross(refAxis, up));
+  let north = cross(up, east);
+  return mat3x3<f32>(east, up, north); // 列: east / up / north
+}
+
+${ATMO_SKY_LUMINANCE_WGSL}
+
+// 大气透视雾色（无日/月盘/星空的天空辐射），契约见文件级注释。
+fn atmAerialColor(dirWorld: vec3f, up: vec3f, sunDirWorld: vec3f) -> vec3f {
+  let B = atmAerialLocalBasis(up);
+  let dirL = vec3f(dot(dirWorld, B[0]), dot(dirWorld, B[1]), dot(dirWorld, B[2]));
+  let sunL = vec3f(dot(sunDirWorld, B[0]), dot(sunDirWorld, B[1]), dot(sunDirWorld, B[2]));
+  return atmSkyLuminance(dirL, sunL);
+}
+`;
+
+/** AP 模块（地形雾用，LightingShader AP 变体拼接；绑定契约见上方注释）。 */
+export const ATMO_AERIAL_WGSL = ATMO_AERIAL_BODY_WGSL;
+

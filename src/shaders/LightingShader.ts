@@ -11,6 +11,11 @@
  */
 import { SHADOW_RECEIVER_MODULE } from './ShadowShader';
 import { CLOUD_SHADOW_RECEIVER_MODULE } from './CloudShader';
+import {
+  ATMO_PARAMS_STRUCT_WGSL,
+  AERIAL_PARAMS_STRUCT_WGSL,
+  ATMO_AERIAL_WGSL,
+} from './AtmosphereSkyShader';
 
 const SHADER_CORE = /* wgsl */`
 // ── Uniforms ──────────────────────────────────────────────────────────────────
@@ -266,5 +271,144 @@ export const LIGHTING_SHADER_SHADOW_CLOUD =
 /** CSSM 阴影 + 云影 + HDR 直通尾段（配 ToneMappingPass）。 */
 export const LIGHTING_SHADER_SHADOW_CLOUD_HDR =
   injectCloudShadowCore(injectShadowCore(SHADER_CORE)) + TAIL_HDR;
+
+// ── Track A 大气透视（aerial perspective，组 4）变体 ──────────────────────────
+//
+// injectShadowCore / injectCloudShadowCore 同款锚点拼接：把 AP_RECEIVER_MODULE
+// （组 4 uniform/纹理/采样器声明 + atmAerialColor）注入并替换雾尾段。组 0-3 已被
+// 相机+光照 UBO / G-Buffer / CSSM / 云影占用 → AP 落**组 4**，对 8 个既有变体
+// 零影响（它们逐字节不变）。AP 与 CSSM/云影正交组合成 8 个新变体（共 16）。
+//
+// **T6 接线契约**（LightingPass.setAerialSource 仿 setCloudShadowSource）：
+//  1. 变体：接 AP 后按 CSSM/云影状态选对应 `LIGHTING_SHADER_AP_*` 变体；
+//     未接时走原 8 变体（零回归）。
+//  2. 管线布局：bindGroupLayouts 追加第 5 个 BGL（组 4，全 FRAGMENT）：
+//     binding 0 uniform（AerialParams，minBindingSize 32）
+//     binding 1 texture（sampleType 'float'）
+//     binding 2 sampler（type 'filtering'）
+//     binding 3 uniform（AtmosphereParams，minBindingSize 64）
+//  3. 组 4 资源（4 个）：
+//     - 0: T6 新建 32B AerialParams UBO，每帧写（布局 = AERIAL_PARAMS_STRUCT_WGSL）：
+//          @0 strength（0 = 恒旧 limb haze，零回归闸）/ @4 distM（米，默认 25000）
+//          / @16 sunDir（归一化 ECEF，与 AtmosphereSky.setSunDirection 同源）
+//     - 1: `AtmosphereSky.skyViewTexture`（getter 身份稳定，勿逐帧重建 bind group）
+//     - 2: linear/clamp sampler（T6 自建即可）
+//     - 3: `AtmosphereSky.atmosphereParamsBuffer`（64B，AtmosphereSky 每帧维护）
+//  4. 语义：fogAmount = 1 - exp(-dist / distM)，雾色 = atmAerialColor(-viewDir,
+//     normalize(worldPos), sunDir)（视线方向天空辐射，无日月盘）。
+
+/** AP receiver 模块：组 4 声明 + atmAerialColor（WGSL 声明先于使用，插在 fs_main 前）。 */
+const AP_RECEIVER_MODULE = /* wgsl */`
+${ATMO_PARAMS_STRUCT_WGSL}
+${AERIAL_PARAMS_STRUCT_WGSL}
+// 组 4：大气透视绑定（T6 契约见文件内「Track A 大气透视」注释）。
+@group(4) @binding(0) var<uniform> aerialParams     : AerialParams;
+@group(4) @binding(1) var atmSkyViewLUT             : texture_2d<f32>;
+@group(4) @binding(2) var atmLinearClamp            : sampler;
+@group(4) @binding(3) var<uniform> atmosphereParams : AtmosphereParams;
+${ATMO_AERIAL_WGSL}
+`;
+
+/** 旧雾尾段锚点：SHADER_CORE 中 limb haze 计算 + 叠加，唯一匹配。 */
+const HAZE_ANCHOR = `  // Atmospheric haze: slight blue tint near limb
+  let earthCenter = vec3<f32>(0.0, 0.0, 0.0);
+  let toSurface   = normalize(worldPos - earthCenter);
+  let limbFactor  = 1.0 - abs(dot(toSurface, viewDir));
+  let haze = vec3<f32>(0.1, 0.2, 0.4) * pow(limbFactor, 3.0) * 0.8;
+
+  color = color + haze;`;
+
+/** AP 雾尾段：保留 limb 前置计算作回退分支；strength = 0 恒走旧路径（零回归）。 */
+const HAZE_APPLIED = `  // Atmospheric haze: slight blue tint near limb（AP 关闭时回退分支，零回归）
+  let earthCenter = vec3<f32>(0.0, 0.0, 0.0);
+  let toSurface   = normalize(worldPos - earthCenter);
+  let limbFactor  = 1.0 - abs(dot(toSurface, viewDir));
+  // Track A 大气透视：远物按视距混入「沿视线方向的天空辐射」（skyView LUT 同源
+  // 查询，无日月盘）。黄昏地平线方向天空本就橙红 → 远山自然染橙；朝太阳看前向
+  // 散射更亮 → 雾更浓。apStrength = 0 恒走旧 limb haze（零回归）。
+  if (aerialParams.strength > 0.0) {
+    let apDist    = length(worldPos - camera.cameraPosition.xyz);
+    let fogAmount = 1.0 - exp(-apDist / max(aerialParams.distM, 1.0));
+    let fogCol    = atmAerialColor(-viewDir, normalize(worldPos), normalize(aerialParams.sunDir));
+    color = mix(color, fogCol, clamp(fogAmount * aerialParams.strength, 0.0, 1.0));
+  } else {
+    let haze = vec3<f32>(0.1, 0.2, 0.4) * pow(limbFactor, 3.0) * 0.8;
+    color = color + haze;
+  }`;
+
+/**
+ * 把 AP receiver 模块注入光照核心（可与 injectShadowCore / injectCloudShadowCore
+ * 任意先后链式组合——三方互不改对方锚点区）。雾尾段锚点与声明锚点必须恰好
+ * 命中，否则抛错（禁止静默产出错误 shader）。
+ */
+export function injectAPCore(core: string): string {
+  if (!core.includes(FRAGMENT_ANCHOR) || !core.includes(HAZE_ANCHOR)) {
+    throw new Error('LightingShader.injectAPCore: SHADER_CORE anchors drifted — update HAZE_ANCHOR/FRAGMENT_ANCHOR');
+  }
+  return core
+    .replace(FRAGMENT_ANCHOR, AP_RECEIVER_MODULE + FRAGMENT_ANCHOR)
+    .replace(HAZE_ANCHOR, HAZE_APPLIED);
+}
+
+/** AP + LDR 尾段。 */
+export const LIGHTING_SHADER_AP = injectAPCore(SHADER_CORE) + TAIL_LDR;
+
+/** AP + HDR 直通尾段（配 ToneMappingPass）。 */
+export const LIGHTING_SHADER_AP_HDR = injectAPCore(SHADER_CORE) + TAIL_HDR;
+
+/** AP + CSSM 阴影 + LDR 尾段。 */
+export const LIGHTING_SHADER_AP_SHADOW =
+  injectAPCore(injectShadowCore(SHADER_CORE)) + TAIL_LDR;
+
+/** AP + CSSM 阴影 + HDR 直通尾段。 */
+export const LIGHTING_SHADER_AP_SHADOW_HDR =
+  injectAPCore(injectShadowCore(SHADER_CORE)) + TAIL_HDR;
+
+/** AP + 云影 + LDR 尾段。 */
+export const LIGHTING_SHADER_AP_CLOUD =
+  injectAPCore(injectCloudShadowCore(SHADER_CORE)) + TAIL_LDR;
+
+/** AP + 云影 + HDR 直通尾段。 */
+export const LIGHTING_SHADER_AP_CLOUD_HDR =
+  injectAPCore(injectCloudShadowCore(SHADER_CORE)) + TAIL_HDR;
+
+/** AP + CSSM 阴影 + 云影 + LDR 尾段。 */
+export const LIGHTING_SHADER_AP_SHADOW_CLOUD =
+  injectAPCore(injectCloudShadowCore(injectShadowCore(SHADER_CORE))) + TAIL_LDR;
+
+/** AP + CSSM 阴影 + 云影 + HDR 直通尾段（配 ToneMappingPass）。 */
+export const LIGHTING_SHADER_AP_SHADOW_CLOUD_HDR =
+  injectAPCore(injectCloudShadowCore(injectShadowCore(SHADER_CORE))) + TAIL_HDR;
+
+/**
+ * 16 变体选择单一来源（LightingPass.prepare 与单测共用）：hdr × CSSM 阴影 ×
+ * 云影 × AP 四开关正交组合 → 对应 shader 源串。任一未就绪开关恒走原变体
+ * （逐字节零回归——关闭 AP/CSSM/云影时管线与 T5 前完全一致）。
+ */
+export function selectLightingShader(
+  hdr: boolean,
+  shadowReady: boolean,
+  cloudReady: boolean,
+  aerialReady: boolean,
+): string {
+  if (aerialReady) {
+    if (shadowReady) {
+      return cloudReady
+        ? (hdr ? LIGHTING_SHADER_AP_SHADOW_CLOUD_HDR : LIGHTING_SHADER_AP_SHADOW_CLOUD)
+        : (hdr ? LIGHTING_SHADER_AP_SHADOW_HDR       : LIGHTING_SHADER_AP_SHADOW);
+    }
+    return cloudReady
+      ? (hdr ? LIGHTING_SHADER_AP_CLOUD_HDR : LIGHTING_SHADER_AP_CLOUD)
+      : (hdr ? LIGHTING_SHADER_AP_HDR       : LIGHTING_SHADER_AP);
+  }
+  if (shadowReady) {
+    return cloudReady
+      ? (hdr ? LIGHTING_SHADER_SHADOW_CLOUD_HDR : LIGHTING_SHADER_SHADOW_CLOUD)
+      : (hdr ? LIGHTING_SHADER_SHADOW_HDR       : LIGHTING_SHADER_SHADOW);
+  }
+  return cloudReady
+    ? (hdr ? LIGHTING_SHADER_CLOUD_HDR : LIGHTING_SHADER_CLOUD)
+    : (hdr ? LIGHTING_SHADER_HDR       : LIGHTING_SHADER);
+}
 
 export default LIGHTING_SHADER;

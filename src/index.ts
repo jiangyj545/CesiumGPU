@@ -170,6 +170,9 @@ export { CausticsFloor } from './effect/CausticsFloor';
 export type { CausticsFloorOptions } from './effect/CausticsFloor';
 export { AtmosphereSky } from './effect/AtmosphereSky';
 export type { AtmosphereSkyOptions } from './effect/AtmosphereSky';
+// Track W 岸线冲刷浅水模拟场（IPass；CausticsFloor.bindSwash 消费其 swashView）
+export { SwashField } from './effect/SwashField';
+export type { SwashFieldOptions } from './effect/SwashField';
 export { FoamPatternTexture } from './effect/FoamPatternTexture';
 export type { FoamPatternTextureOptions } from './effect/FoamPatternTexture';
 export { WakeField } from './effect/WakeField';

@@ -62,6 +62,10 @@
       <label class="checkline"><input id="godRaysToggle" type="checkbox" checked /> 光柱</label>
       <label class="checkline"><input id="swashToggle" type="checkbox" checked /> 岸线冲刷</label>
       <label class="checkline"><input id="sunShaftToggle" type="checkbox" checked /> 水下光柱</label>
+      <label class="checkline"><input id="peelToggle" type="checkbox" checked /> 卷唇破碎</label>
+      <label class="checkline"><input id="cirrusToggle" type="checkbox" checked /> 卷云层</label>
+      <label class="checkline"><input id="swashSimToggle" type="checkbox" checked /> 冲刷模拟</label>
+      <label class="checkline"><input id="aerialToggle" type="checkbox" checked /> 大气透视</label>
     </div>
     <button id="diveBtn" style="margin-top:10px;width:100%;padding:6px 0;cursor:pointer;
       background:#12395c;color:#8ee6ff;border:1px solid rgba(120,180,255,.4);border-radius:6px;
@@ -112,6 +116,7 @@
       clouds.setDepthView(() => viewer.scene.gbufferPass
         ? viewer.scene.gbufferPass.getDepthView()
         : null);
+      clouds.setCirrus({ coverage: 0.42, density: 0.55 }); // Track V：纤维状卷云第二层（enable 默认 true）
 
       // ── 4. 海面本体（FFTDataSource + A3/A4/折射接线）─────────────────
       const foamPattern = new engine.FoamPatternTexture(context, { size: 512 });
@@ -168,6 +173,16 @@
       floor.shoreStrength = 0.8;
       floor.setSwash(0.85);           // Track C：岸线冲刷（run-up 涨落 + 退潮白沫）
 
+      // ── 5b+. Track W 冲刷模拟：浅水解析模拟场（SwashField IPass，须
+      //    effects.add 才会步进；与 floor 绑同一 seabedField）。CausticsFloor
+      //    消费其 swashView（湿沙线/白沫线/着水色切到模拟路径），关 =
+      //    bindSwash(null) 回退解析路径。放 effects 里 floor 之前 ──────
+      const PEEL = { enable: true, curl: 1.0, speed: 2.2, threshold: 0.6 };
+      const swashField = new engine.SwashField(context, {
+        gridN: 128, seabed: seabedField, wavePeriod: 7, waveAmplitude: 0.35,
+      });
+      floor.bindSwash(swashField);
+
       // ── 5c. L5 物大气接线（tidewater 观感追赶）：海面逐像素反射 / 太阳染色 /
       //    波峰 SSS 直接绑 AtmosphereSky 的 LUT/UBO。getter 每帧惰性求值——
       //    sky prepare 后资源才存在，未就绪帧自动回退旧平色路径（零回归）。
@@ -180,6 +195,19 @@
       ocean.bindAtmosphere(bindAtmo);
       ocean.setSubsurfaceStrength(1.0);
 
+      // ── 5c+. Track A 大气透视：LightingPass 组 4 消费 sky 的 skyView LUT +
+      //    atmosphereParams UBO（getter 身份稳定，工厂每帧新包装不触发管线
+      //    重建）；sunDir 取 sky.sunDirection（归一化 ECEF 同源）。
+      //    未就绪帧工厂返回 null → 自动走原 8 变体管线（零回归）。强度 /
+      //    雾距由 scene.aerialPerspective 驱动（0.6 / 25 km 默认）。
+      const bindAerial = () => {
+        const v = sky.skyViewTexture;
+        const b = sky.atmosphereParamsBuffer;
+        return (v && b) ? { view: v, atmosphereParamsBuffer: b, sunDir: sky.sunDirection } : null;
+      };
+      viewer.scene.aerialSource = bindAerial;
+      viewer.scene.aerialPerspective = { strength: 0.6, distM: 25000 };
+
       // ── 5d. T4 深度感知破碎波：沙洲岸线带（VS 波形变形 + FS 泡沫花边/内卷
       //    水幕）；BreakSpray 吸附源复用同一张 SeabedHeightField 视图 + 位移
       //    纹理（ocean.breakSpraySeabed getter，每帧惰性求值）。
@@ -187,6 +215,10 @@
         ampScale: 1.3, lean: 0.55, laceGain: 0.85,
         bandNearM: 3, bandFarM: 8, curlShade: 0.55, laceThresholdM: 1.6,
       });
+      // T-P 真 peeling 卷唇水舌（须 setBreakWave 先行；雾日光染色须上方
+      // bindAtmosphere 已接 + 太阳染色默认开 _sunTintOn=true）
+      ocean.setPeelWave(PEEL);
+      ocean.setFogSunTint(0.5);
       const sbEnu = enuBasis(sbLon, sbLat);   // 函数声明提升，section 8 定义
       const breakCenter = [0, 0, 0];
       engine.ecefFromLonLatHeight(sbLon, sbLat, 0, breakCenter);
@@ -220,6 +252,7 @@
       viewer.scene.effects.add(clouds); // Track C 体积云：sky 之后 ocean 之前
       viewer.scene.effects.add(ocean);
       viewer.scene.effects.add(caustics);
+      viewer.scene.effects.add(swashField); // Track W 冲刷模拟：floor 之前（floor 消费其 swashView）
       viewer.scene.effects.add(floor);
       viewer.scene.effects.add(breakSpray); // T4 破碎喷雾：ocean/floor 之后（吸附当帧视图）
       viewer.scene.effects.add(spray); // L4 船首喷雾：floor 之后、uwFog 之前
@@ -511,6 +544,19 @@
       document.getElementById('sunShaftToggle').addEventListener('change', (e) => {
         uwFog.setSunShaftIntensity(e.target.checked ? 1.2 : 0);
       });
+      // T-P/W/V/A 开关：卷唇破碎 / 卷云层 / 冲刷模拟 / 大气透视
+      document.getElementById('peelToggle').addEventListener('change', (e) => {
+        ocean.setPeelWave(e.target.checked ? PEEL : null); // null = 二次 draw 跳过
+      });
+      document.getElementById('cirrusToggle').addEventListener('change', (e) => {
+        clouds.setCirrus({ enable: e.target.checked, coverage: 0.42, density: 0.55 });
+      });
+      document.getElementById('swashSimToggle').addEventListener('change', (e) => {
+        floor.bindSwash(e.target.checked ? swashField : null); // 关 = 回退解析路径
+      });
+      document.getElementById('aerialToggle').addEventListener('change', (e) => {
+        viewer.scene.aerialSource = e.target.checked ? bindAerial : null; // null = 原 8 变体
+      });
 
       // ── 11. QA 钩子（CDP 终验用：等效于面板操作）──────────────────────
       const ck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
@@ -548,6 +594,11 @@
         setGodRays(b) { viewer.scene.postProcess.godRays.enabled = b; ck('godRaysToggle', b); },
         setSwash(b) { floor.setSwash(b ? 0.85 : 0); ck('swashToggle', b); },
         setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 1.2 : 0); ck('sunShaftToggle', b); },
+        // ── T-P/W/V/A 探针扩展：卷唇破碎 / 卷云层 / 冲刷模拟 / 大气透视 ──
+        setPeel(b) { ocean.setPeelWave(b ? PEEL : null); ck('peelToggle', b); },
+        setCirrus(b) { clouds.setCirrus({ enable: b, coverage: 0.42, density: 0.55 }); ck('cirrusToggle', b); },
+        setSwashSim(b) { floor.bindSwash(b ? swashField : null); ck('swashSimToggle', b); },
+        setAP(b) { viewer.scene.aerialSource = b ? bindAerial : null; ck('aerialToggle', b); },
         cloudInfo: () => ({
           show: clouds.show,
           seaShadow: clouds.cloudShadow !== null,       // 海面通道（prepare 后非 null）

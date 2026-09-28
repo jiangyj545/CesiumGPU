@@ -188,7 +188,7 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
 
     // UBO：P[0..23] 与旧版一致 + P[24..27] 全 0（湿沙全关）
     const P = paramsOf(floor, writeBuffer);
-    expect(FLOOR_PARAMS_UBO_BYTES).toBe(128);
+    expect(FLOOR_PARAMS_UBO_BYTES).toBe(160); // 128B + swash_uv 仿射（Track W）
     expect(P.length).toBe(FLOOR_PARAMS_UBO_BYTES / 4);
     expect(P[8]).toBe(400);   // spacing.x = sizeM（无 caustics 回退）
     expect(P[9]).toBe(400);   // spacing.y
@@ -205,6 +205,7 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
     expect(P[26]).toBe(0);    // 平底模式
     expect(P[27]).toBe(0);    // swash 默认关（零回归）
     expect([P[28], P[29], P[30], P[31]]).toEqual([0.5, 0.5, 0, 0]); // seabedUv 未绑定
+    expect([P[32], P[33], P[34], P[35]]).toEqual([0.5, 0.5, 0, 0]); // swashUv 未绑定（解析路径）
   });
 
   it('bindSeabed(field)：顶点海拔 = sampleHeight，ECEF 经引擎单源投影（抽 5 顶点反算）', () => {

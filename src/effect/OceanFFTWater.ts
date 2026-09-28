@@ -144,6 +144,21 @@ export interface OceanBreakWaveConfig {
 }
 
 /**
+ * T-P 真 peeling 卷唇水舌参数（{@link OceanFFTWater.setPeelWave}）。
+ * 依赖破碎波变形——须先 {@link OceanFFTWater.setBreakWave}（breakW 恒 0 时无卷曲）。
+ */
+export interface OceanPeelWaveConfig {
+  /** 卷唇开关。Default: `true` */
+  enable?: boolean;
+  /** 卷曲角上限（弧度，π/2 ≈ 舌面翻平）。Default: `1.1` */
+  curl?: number;
+  /** 卷曲动画速度（rad/s）。Default: `2.2` */
+  speed?: number;
+  /** 卷唇权重阈值（breakW 门，0-1）。Default: `0.6` */
+  threshold?: number;
+}
+
+/**
  * T4 破碎喷雾吸附源（{@link OceanFFTWater.breakSpraySeabed} → BreakSpray）：
  * compute 端 textureLoad seabed + disp 级联0 做粒子高度吸附与水深门。
  */
@@ -229,6 +244,8 @@ export class OceanFFTWater implements IPass {
   private _seabed: SeabedHeightField | null = null;
   /** 岸线泡沫强度（UBO shoreParams.y，默认 1.0，0 = 等效关闭）。 */
   private _shoreStrength = 1.0;
+  /** T-P 海面雾太阳染色强度（UBO shoreParams.z / RP[26]，默认 0 = 旧路径零回归）。 */
+  private _fogSunTint = 0;
   /** 海面中心归一化 ECEF（水位折入模长）+ east/north 基——seabedUv 原点差投影用。 */
   private readonly _centerEcef: [number, number, number];
   private readonly _eastDir: [number, number, number];
@@ -278,6 +295,8 @@ export class OceanFFTWater implements IPass {
 
   // ── 渲染侧 GPU 资源 ──
   private _renderPipeline: GPURenderPipeline | null = null;
+  /** T-P 真 peeling 卷唇第二管线（同 BGL，peel_vs/peel_fs entryPoint）。 */
+  private _peelPipeline: GPURenderPipeline | null = null;
   /** T5 真 HDR：Scene 经 TargetFormatAware 协议下发的场景目标格式。
    *  null = 未下发（跟随 preferredFormat 旧行为，postProcess 关闭的 90 页零回归）。 */
   private _targetFormat: GPUTextureFormat | null = null;
@@ -300,6 +319,8 @@ export class OceanFFTWater implements IPass {
   private _sssStrength = 0;
   /** T4 破碎波配置（null = 关闭，gain.x=0 零回归）。 */
   private _breakCfg: OceanBreakWaveConfig | null = null;
+  /** T-P 卷唇配置（null = 关闭，peel.x=0 → 二次 draw 跳过；须先 setBreakWave）。 */
+  private _peelCfg: OceanPeelWaveConfig | null = null;
   /** T4 破碎波 UBO 载荷（64B，每帧整体写入）。 */
   private readonly _breakParamsF32 = new Float32Array(OCEAN_BREAK_PARAMS_UBO_BYTES / 4);
   /** L5 大气 fallback：全零 UBO（binding 17/18 共用；LUT 复用 _fallbackView 1×1 黑）。 */
@@ -591,6 +612,40 @@ export class OceanFFTWater implements IPass {
   }
 
   /**
+   * 真 peeling 卷唇水舌（T-P：同一海面网格第二个 draw——peel_vs 绕波峰线
+   * 卷曲波峰顶点 + peel_fs 白沫半透明叠加）。须先 setBreakWave（卷曲门
+   * breakW 依赖破碎变形）；null = 关闭（peel.x=0 → 二次 draw 跳过，零回归）。
+   */
+  setPeelWave(cfg: OceanPeelWaveConfig | null): void {
+    if (cfg) this._validatePeel(cfg);
+    this._peelCfg = cfg;
+  }
+
+  /** 卷唇参数校验：curl ∈ (0, π]、speed >= 0、threshold ∈ [0,1]。 */
+  private _validatePeel(cfg: OceanPeelWaveConfig): void {
+    const curl = cfg.curl ?? 1.1;
+    const speed = cfg.speed ?? 2.2;
+    const th = cfg.threshold ?? 0.6;
+    if (!Number.isFinite(curl) || curl <= 0 || curl > Math.PI) {
+      throw new Error(`OceanFFTWater.setPeelWave: curl 须 (0, π]，收到 ${curl}`);
+    }
+    if (!Number.isFinite(speed) || speed < 0) {
+      throw new Error(`OceanFFTWater.setPeelWave: speed 须 >= 0，收到 ${speed}`);
+    }
+    if (!Number.isFinite(th) || th < 0 || th > 1) {
+      throw new Error(`OceanFFTWater.setPeelWave: threshold 须 [0,1]，收到 ${th}`);
+    }
+  }
+
+  /** 海面雾太阳染色强度（aerial perspective 海面侧，UBO shoreParams.z；0 = 关）。 */
+  setFogSunTint(v: number): void {
+    if (!Number.isFinite(v) || v < 0 || v > 1) {
+      throw new Error(`OceanFFTWater.setFogSunTint: 须 [0,1]，收到 ${v}`);
+    }
+    this._fogSunTint = v;
+  }
+
+  /**
    * T4 破碎喷雾吸附源（BreakSpray options.seabed 用）：seabed 视图 + 海面
    * ENU 基 + uv 仿射，compute 端 textureLoad 做高度吸附。场未绑定/已 dispose
    * 时返回 null（BreakSpray 换占位资源，粒子不做水深门）。
@@ -652,6 +707,7 @@ export class OceanFFTWater implements IPass {
     if (this._failed || format === (this._targetFormat ?? this._context.preferredFormat)) return;
     this._targetFormat = format;
     this._renderPipeline = null;
+    this._peelPipeline = null;
     this._renderBindGroupLayout = null;
     this._renderBindGroup = null;
   }
@@ -750,6 +806,8 @@ export class OceanFFTWater implements IPass {
     const sbActive = !!(this._seabed && this._seabed.seabedTexture);
     RP[24] = sbActive ? 1 : 0;
     RP[25] = this._shoreStrength;
+    // T-P 海面雾太阳染色强度（shoreParams.z / RP[26]，0 = 旧路径零回归）
+    RP[26] = this._fogSunTint;
     if (sbActive) {
       RP[28] = this._seabedUvOffset[0];
       RP[29] = this._seabedUvOffset[1];
@@ -778,6 +836,11 @@ export class OceanFFTWater implements IPass {
       BK[5] = this._breakCfg.bandFarM ?? 8;
       BK[6] = this._breakCfg.curlShade ?? 0.55;
       BK[7] = this._breakCfg.laceThresholdM ?? 1.6;
+      // T-P 卷唇（peel vec4 @32）：null / enable=false → peel.x=0 短路
+      BK[8] = (this._peelCfg && (this._peelCfg.enable ?? true)) ? 1 : 0;
+      BK[9] = this._peelCfg?.curl ?? 1.1;
+      BK[10] = this._peelCfg?.speed ?? 2.2;
+      BK[11] = this._peelCfg?.threshold ?? 0.6;
     } else {
       BK.fill(0);
     }
@@ -892,6 +955,14 @@ export class OceanFFTWater implements IPass {
     pass.setVertexBuffer(0, this._vertexBuffer!);
     pass.setIndexBuffer(this._indexBuffer!, 'uint32');
     pass.drawIndexed(this._geometry.indexCount);
+    // T-P 真 peeling：同顶点/索引缓冲第二个 draw——peel_vs 卷曲变形 +
+    // peel_fs 白沫半透明叠加（loadOp load alpha 叠加、无深度写入、双面）。
+    // 门 = 破碎波 + 卷唇双开（breakW 恒 0 时无卷曲，二次 draw 无意义）。
+    if (this._peelPipeline && this._breakCfg && this._peelCfg
+      && (this._peelCfg.enable ?? true)) {
+      pass.setPipeline(this._peelPipeline);
+      pass.drawIndexed(this._geometry.indexCount);
+    }
     pass.end();
   }
 
@@ -954,6 +1025,7 @@ export class OceanFFTWater implements IPass {
     this._dispViews = [];
     this._derivViews = [];
     this._renderPipeline = null;
+    this._peelPipeline = null;
     this._renderBindGroup = null;
     this._sampler = null;
     this._initK = null;
@@ -1286,6 +1358,38 @@ export class OceanFFTWater implements IPass {
         },
         primitive: { topology: 'triangle-list', cullMode: 'none' },
         // 无深度附件：遮挡在片元内用射线-球求交处理（与 FloodWater 一致）
+      });
+
+      // T-P 卷唇第二管线：同 BGL / 同顶点布局，peel_vs/peel_fs entryPoint；
+      // blend 与主面一致（loadOp load 上 alpha 叠加），无深度附件 + 双面。
+      this._peelPipeline = device.createRenderPipeline({
+        label: 'OceanFFTPeelPipeline',
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+        vertex: {
+          module,
+          entryPoint: 'peel_vs',
+          buffers: [{
+            arrayStride: 20, // 5 floats：[ecefX, ecefY, ecefZ, planeX_m, planeZ_m]
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' },  // ecef
+              { shaderLocation: 1, offset: 12, format: 'float32x2' }, // planeXZ（米）
+            ],
+          }],
+        },
+        fragment: {
+          module,
+          entryPoint: 'peel_fs',
+          targets: [
+            {
+              format: this._targetFormat ?? this._context.preferredFormat,
+              blend: {
+                color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              },
+            },
+          ],
+        },
+        primitive: { topology: 'triangle-list', cullMode: 'none' },
       });
     }
 

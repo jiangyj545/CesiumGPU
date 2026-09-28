@@ -22,7 +22,7 @@ import { PostProcessManager } from '../postprocessing/PostProcessManager';
 import { RenderTexture } from '../renderer/RenderTexture';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 import { ShadowMap } from '../shadow/ShadowMap';
-import type { CloudShadowReceiverBinding } from './passes/LightingPass';
+import type { CloudShadowReceiverBinding, AerialReceiverBinding } from './passes/LightingPass';
 
 /**
  * Scene - Orchestrates all rendering passes.
@@ -87,6 +87,27 @@ export class Scene {
    * （原 4 变体管线，零回归）。
    */
   cloudShadowSource: (() => CloudShadowReceiverBinding | null) | null = null;
+
+  /**
+   * Track A 大气透视代理挂点（工厂模式，同 cloudShadowSource —— AtmosphereSky
+   * prepare 前 skyViewTexture / atmosphereParamsBuffer getter 为 null）。
+   * 示例接线（getter 身份稳定，工厂每帧返回新包装对象亦不触发管线重建）：
+   * ```js
+   * scene.aerialSource = () => {
+   *   const v = sky.skyViewTexture, b = sky.atmosphereParamsBuffer;
+   *   return v && b ? { view: v, atmosphereParamsBuffer: b, sunDir: sky.sunDirection } : null;
+   * };
+   * ```
+   * render() 每帧求值后喂 LightingPass（组 4）；null = 无 AP（原 8 变体管线，
+   * 零回归）。
+   */
+  aerialSource: (() => AerialReceiverBinding | null) | null = null;
+
+  /**
+   * Track A 大气透视场景参数（LightingPass 每帧写 AerialParams UBO：
+   * strength = 雾强度权重，0 可作运行时零回归闸；distM = 参考雾距，米）。
+   */
+  aerialPerspective: { strength: number; distM: number } = { strength: 0.6, distM: 25000 };
 
   /**
    * Toggles per-primitive frustum culling (G-Buffer opaque loop, transparent
@@ -385,6 +406,15 @@ export class Scene {
     // ── Track C 云影挂点：每帧惰性求值工厂（CloudLayer prepare 前为 null，
     // LightingPass 同引用零开销早退内置；null 时保持原 4 变体管线零回归）──
     this._lightingPass.setCloudShadowSource(this.cloudShadowSource?.() ?? null);
+
+    // ── Track A 大气透视挂点：每帧惰性求值工厂（同上；null / 天空资源未就绪
+    // 时保持原 8 变体管线零回归）+ AerialParams UBO 每帧写（未接时 no-op）──
+    const aerial = this.aerialSource?.() ?? null;
+    this._lightingPass.setAerialSource(aerial);
+    this._lightingPass.writeAerialParams(
+      this.aerialPerspective.strength,
+      this.aerialPerspective.distM,
+    );
 
     // ── Pass loop: gbuffer → lighting → overlay → transparent ─────────────
     const swapChainView = ctx.getCurrentTextureView();

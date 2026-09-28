@@ -534,7 +534,7 @@ struct OceanRenderParams {
   flags       : vec4<f32>,  // x 泡沫图案开 / y 船迹开 / z 折射开 / w 折射强度
   wakeUv      : vec4<f32>,  // 船迹 uv = planeXZ*zw + xy（窗口米 → [0,1)）
   underwater  : vec4<f32>,  // x L3 水下视角开 / y L5 时间秒 / z L5 SSS 总强度 / w L5 featureFlags
-  shoreParams : vec4<f32>,  // L4-A x 岸线泡沫开 / y shoreStrength（zw 保留）
+  shoreParams : vec4<f32>,  // L4-A x 岸线泡沫开 / y shoreStrength / z 海面雾太阳染色强度（w 保留）
   seabedUv    : vec4<f32>,  // L4-A seabed uv = planeXZ*zw + xy（海面局部米 → [0,1]）
 }
 
@@ -581,6 +581,7 @@ ${SKY_PARAMS_STRUCT_WGSL}
 struct BreakParams {
   gain : vec4<f32>,  // x=enable / y=振幅缩放 / z=波峰前倾 / w=泡沫花边增益
   band : vec4<f32>,  // x=bandNear(m) / y=bandFar(m) / z=内卷水幕染色 / w=花边阈值(m)
+  peel : vec4<f32>,  // T-P x=卷唇开关 / y=卷曲角(rad) / z=卷曲速度 / w=卷唇权重阈值
 }
 
 @group(0) @binding(14) var atmSkyViewLUT : texture_2d<f32>;
@@ -944,12 +945,150 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   foamWhite = select( foamWhite, foamWhite * vec3<f32>( 0.35, 0.60, 0.62 ), uw ); // 水下泡沫偏暗青
   col = mix( col, foamWhite * albedoJit, foamMask * 0.92 );
 
-  // 距离雾：远处融入天空色（弱化网格边缘接缝）；水下远景融入水色
-  let fogCol = select( renderParams.skyColor.rgb, uwWater, uw );
+  // 距离雾：远处融入天空色（弱化网格边缘接缝）；水下远景融入水色。
+  // T-P 海面雾太阳染色（aerial perspective 海面侧）：朝太阳方向的雾色染
+  // 大气透射色（落日把远方海面雾染橙）。apStrength（shoreParams.z）= 0 恒
+  // 旧值（零回归）；bit3 未开时 sunTint 未计算（fallback 黑 LUT 会染黑雾）
+  // → 双门短路。1.4 为透射染色增益（透射色偏暗，乘增益补回雾亮度）。
+  var fogCol = select( renderParams.skyColor.rgb, uwWater, uw );
+  let apStrength = renderParams.shoreParams.z;
+  if ( apStrength > 0.0 && flagSpecTint > 0.5 && !uw ) {
+    let toSun = sat( dot( viewDir, sunDir ) * 0.5 + 0.5 );
+    fogCol = mix( fogCol, fogCol * sunTint * 1.4, toSun * apStrength );
+  }
   let fog = 1.0 - exp( - distM / FOG_DIST );
   col = mix( col, fogCol, fog * 0.95 );
 
   return vec4<f32>( col, edgeFade );
+}
+
+// ── T-P 真 peeling 卷唇（破碎波水舌卷曲面：同一海面网格第二个 draw）─────────
+// peel_vs 在 vs_main 同款位移之后，对破碎带波峰顶点绕「波峰线」（级联0 梯度
+// 垂直方向）卷曲：波前进方向 = 梯度反方向，卷曲角 roll ∝ peel.y(卷曲角) ×
+// 破碎权重 × 动画相位（sin(time×speed + 沿前进方向空间相位)）。卷曲几何 =
+// 波峰上部高度 h 绕波峰轴转 roll：水平前移 h·sin(roll)、垂直下压 h·(1−cos(roll))
+// ——顶点翻过波峰形成向前的水舌面片。peel.x=0 时 roll 恒 0（退化回主面），
+// CPU 侧在此情形直接跳过第二个 draw（零回归）。
+struct PeelVSOut {
+  @builtin(position) clipPos : vec4<f32>,
+  @location(0) worldPos : vec3<f32>,
+  @location(1) planeXZ : vec2<f32>,   // 泡沫密度图案采样（与主 FS 同一 A3 图案源）
+  @location(2) curlW : f32,           // 卷唇权重（roll 归一，FS 白沫密度/alpha 门）
+  @location(3) nTongue : vec3<f32>,   // 卷曲面法线（up 绕波峰轴转 roll）
+}
+
+@vertex
+fn peel_vs( input : VSIn ) -> PeelVSOut {
+  // 位移采样与 vs_main 完全同款（前 3 级联 + 船迹 + 破碎变形）——保持两
+  // draw 的基准面一致，卷曲面片才贴合主水面波峰
+  var disp = vec3<f32>( 0.0 );
+  for ( var c = 0; c < OCEAN_CASCADES - 1; c++ ) {
+    let d = textureSampleLevel( dispTex, smp, input.planeXZ / ocean.sizes[ c ].x, c, 0.0 );
+    disp += d.xyz;
+  }
+  if ( renderParams.flags.y > 0.5 ) {
+    let wuv = input.planeXZ * renderParams.wakeUv.zw + renderParams.wakeUv.xy;
+    let wh = textureSampleLevel( wakeTex, clampSmp, wuv, 0.0 ).r;
+    disp.y += wh;
+  }
+  var breakW = 0.0;
+  var g0 = vec4<f32>( 0.0 );
+  if ( breakParams.gain.x > 0.5 && renderParams.shoreParams.x > 0.5 ) {
+    let buv = input.planeXZ * renderParams.seabedUv.zw + renderParams.seabedUv.xy;
+    var sbH = -1000.0;
+    if ( all( buv >= vec2<f32>( 0.0 ) ) && all( buv <= vec2<f32>( 1.0 ) ) ) {
+      let bdim = textureDimensions( seabedTex, 0 );
+      let btc = clamp( vec2<i32>( buv * vec2<f32>( bdim ) ), vec2<i32>( 0 ), vec2<i32>( bdim ) - vec2<i32>( 1 ) );
+      sbH = textureLoad( seabedTex, btc, 0 ).r;
+    }
+    breakW = smoothstep( breakParams.band.y, breakParams.band.x, disp.y - sbH );
+    g0 = textureSampleLevel( derivTex, smp, input.planeXZ / ocean.sizes[ 0 ].x, 0, 0.0 );
+    disp.y *= mix( 1.0, breakParams.gain.y, breakW );
+    disp.xz -= g0.xy * max( disp.y, 0.0 ) * breakParams.gain.z * breakW;
+  }
+
+  // 卷唇变形：breakW 越过 peel.w 阈值且梯度非退化的波峰顶点才翻卷
+  var roll = 0.0;
+  var advEcef = vec3<f32>( 0.0 );
+  let gLen = length( g0.xy );
+  if ( breakParams.peel.x > 0.5 && breakW > breakParams.peel.w && gLen > 1e-5 ) {
+    let adv2 = - g0.xy / vec2<f32>( gLen );  // 波前进方向（局部平面）
+    let phase = dot( input.planeXZ, adv2 ) * 0.35 + ocean.time * breakParams.peel.z;
+    let w = smoothstep( breakParams.peel.w, breakParams.peel.w + 0.25, breakW );
+    roll = breakParams.peel.y * w * ( 0.65 + 0.35 * sin( phase ) )
+         * smoothstep( 0.0, 0.6, disp.y );   // 只卷波峰之上（波谷不翻）
+    let h = max( disp.y, 0.0 );
+    disp.xz += adv2 * ( h * sin( roll ) );   // 绕波峰线前移
+    disp.y    -= h * ( 1.0 - cos( roll ) );  // 绕波峰线下压（舌面翻过波峰）
+    advEcef = ocean.eastDir * adv2.x + ocean.northDir * adv2.y;
+  }
+  let dispVec = ocean.eastDir * disp.x + ocean.upDir * disp.y + ocean.northDir * disp.z;
+
+  // 基准/位移分别过 viewProj 再相加（与 vs_main 同款精度处理）
+  let clipBase = camera.viewProjMatrix * vec4<f32>( input.ecef, 1.0 );
+  let clipDisp = camera.viewProjMatrix * vec4<f32>( dispVec, 0.0 );
+
+  var out : PeelVSOut;
+  out.clipPos = clipBase + clipDisp;
+  out.worldPos = input.ecef + dispVec;
+  out.planeXZ = input.planeXZ;
+  out.curlW = clamp( roll * 1.4, 0.0, 1.0 );
+  // 卷曲面法线：up 绕波峰轴转 roll → 舌面翻卷后背面朝后上（roll→π/2 时
+  // 法线水平指回观察者，即经典卷唇内壁）
+  out.nTongue = normalize( ocean.upDir * cos( roll ) - advEcef * sin( roll ) );
+  return out;
+}
+
+// ── T-P peeling FS：白沫材质 + 半透明叠加 + 边缘 fresnel 增亮 ───────────────
+// 无深度写入（loadOp load alpha 叠加）+ cullMode none 双面：舌面内外壁都出片；
+// 未卷区域（curlW≈0）discard 避免与主水面 z 争抢闪烁。
+@fragment
+fn peel_fs( input : PeelVSOut ) -> @location(0) vec4<f32> {
+  if ( input.curlW < 0.02 ) { discard; }
+
+  let camPos = camera.cameraPosition.xyz;
+
+  // 地球遮挡（IPass 无深度附件，片元级射线-球求交，与 fs_main 同款）
+  let oc = input.worldPos - camPos;
+  let qa = dot( oc, oc );
+  let qb = 2.0 * dot( camPos, oc );
+  let qc = dot( camPos, camPos ) - GLOBE_OCCLUDE_R2;
+  let disc = qb * qb - 4.0 * qa * qc;
+  if ( disc > 0.0 ) {
+    let t = ( - qb - sqrt( disc ) ) / ( 2.0 * qa );
+    if ( t > 1e-3 && t < 1.0 - 1e-3 ) {
+      discard;
+    }
+  }
+
+  let toCam = camPos - input.worldPos;
+  let distN = length( toCam );
+  let distM = distN * EARTH_SCALE;
+  let viewDir = toCam / max( distN, 1e-9 );
+
+  // 法线内翻（-n）：舌面内壁朝向观察者 → fresnel 在卷唇边缘增亮
+  let n = - normalize( input.nTongue );
+  let ndv = clamp( dot( n, viewDir ), 0.0, 1.0 );
+  let fres = pow( 1.0 - ndv, 3.0 );
+
+  // 白沫材质：A3 密度图案（开图案时）阈值化或 vnoise 兜底；白 0.95 基色 +
+  // 卷唇边缘 fresnel 增亮
+  let fN = vnoise( input.planeXZ * 1.7 ) * 0.6 + vnoise( input.planeXZ * 5.3 ) * 0.4;
+  var dens = 0.9 + 0.1 * fN;
+  if ( renderParams.flags.x > 0.5 ) {
+    let p = textureSampleLevel( foamTex, smp, input.planeXZ * ( 1.0 / FOAM_TILE_M ), 0.0 );
+    dens = clamp( p.r + p.g * 0.3 * input.curlW, 0.35, 1.0 );
+  }
+  var col = mix( vec3<f32>( 0.9, 0.94, 0.97 ),
+                 vec3<f32>( 0.95 ) * ( 0.8 + 0.2 * fN ) + vec3<f32>( fres * 0.35 ),
+                 dens );
+
+  // 距离雾融入天空色（与主 FS 同款）：防远处卷唇片跳色
+  let fog = 1.0 - exp( - distM / FOG_DIST );
+  col = mix( col, renderParams.skyColor.rgb, fog * 0.95 );
+
+  // 半透明 0.85 封顶：alpha ∝ 卷唇权重 × 密度
+  return vec4<f32>( col, clamp( input.curlW * 0.85 * dens, 0.0, 0.85 ) );
 }
 `;
 
@@ -957,5 +1096,5 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 export const OCEAN_PARAMS_UBO_BYTES = 288;
 /** OceanRenderParams uniform buffer 字节数（128B：sunDir/deep/sky/flags/wakeUv/underwater/shoreParams/seabedUv）。 */
 export const OCEAN_RENDER_PARAMS_UBO_BYTES = 128;
-/** BreakParams uniform buffer 字节数（64B：gain/band 两 vec4 + 32B 预留位）。 */
-export const OCEAN_BREAK_PARAMS_UBO_BYTES = 64;
+/** BreakParams uniform buffer 字节数（96B：gain/band/peel 三 vec4）。 */
+export const OCEAN_BREAK_PARAMS_UBO_BYTES = 96;

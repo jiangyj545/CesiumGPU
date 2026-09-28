@@ -5,15 +5,9 @@ import { Camera } from '../Camera';
 import type { IPass } from './IPass';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../../renderer/CameraUniforms';
 import {
-  LIGHTING_SHADER,
-  LIGHTING_SHADER_HDR,
-  LIGHTING_SHADER_SHADOW,
-  LIGHTING_SHADER_SHADOW_HDR,
-  LIGHTING_SHADER_CLOUD,
-  LIGHTING_SHADER_CLOUD_HDR,
-  LIGHTING_SHADER_SHADOW_CLOUD,
-  LIGHTING_SHADER_SHADOW_CLOUD_HDR,
+  selectLightingShader,
 } from '../../shaders/LightingShader';
+import { AERIAL_PARAMS_UBO_BYTES } from '../../shaders/AtmosphereSkyShader';
 import type { ShadowReceiverBinding } from '../../shadow/ShadowMap';
 
 /** Maximum directional lights supported in the WGSL shader. */
@@ -32,6 +26,21 @@ export interface CloudShadowReceiverBinding {
   ubo: GPUBuffer;
   /** filtering 线性采样器。 */
   sampler: GPUSampler;
+}
+
+/**
+ * Track A 大气透视天空资源（生产方 AtmosphereSky getter 的结构契约）。
+ * view / atmosphereParamsBuffer getter 身份稳定（勿逐帧重建 bind group）；
+ * sunDir 为归一化 ECEF（与 AtmosphereSky.setSunDirection 同源，每帧随工厂
+ * 求值取最新）。工厂每帧可返回新包装对象 —— 本 pass 按资源身份做重建判定。
+ */
+export interface AerialReceiverBinding {
+  /** skyView LUT 纹理视图（AtmosphereSky.skyViewTexture）。 */
+  view: GPUTextureView;
+  /** AtmosphereParams UBO（64B，AtmosphereSky 每帧维护）。 */
+  atmosphereParamsBuffer: GPUBuffer;
+  /** 归一化 ECEF 太阳方向（AerialParams.sunDir 写入源）。 */
+  sunDir: number[];
 }
 
 /**
@@ -82,6 +91,18 @@ export class LightingPass implements IPass {
   private _cloudShadowActive = false;
   private _cloudShadowBindGroup: GPUBindGroup | null = null;
 
+  /**
+   * Track A 大气透视源（工厂求值产物）。null = 无 AP 管线变体（原 8 变体
+   * 逐字节原样 —— 关闭时零回归，90 页不接 AP 不受影响）。
+   */
+  private _aerialSource: AerialReceiverBinding | null = null;
+  private _aerialActive = false;
+  private _aerialBindGroup: GPUBindGroup | null = null;
+  /** AerialParams UBO（32B，本 pass 所有，writeAerialParams 每帧写）。 */
+  private _aerialUBO: GPUBuffer;
+  /** skyView LUT 线性 clamp 采样器（本 pass 所有，T6 契约 b2）。 */
+  private _aerialSampler: GPUSampler;
+
   constructor(context: Context, gbufferPass: GBufferPass, outputFormat: GPUTextureFormat) {
     this._context      = context;
     this._gbufferPass  = gbufferPass;
@@ -103,6 +124,20 @@ export class LightingPass implements IPass {
       label: 'LightingPass.LightingUBO',
       size:  Math.ceil((MAX_LIGHTS * LIGHT_STRIDE + 16) / 16) * 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // T6 AerialParams UBO（32B，布局单一来源 AERIAL_PARAMS_STRUCT_WGSL）
+    this._aerialUBO = device.createBuffer({
+      label: 'LightingPass.AerialUBO',
+      size:  AERIAL_PARAMS_UBO_BYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this._aerialSampler = device.createSampler({
+      label: 'LightingPass.AerialSampler',
+      magFilter:     'linear',
+      minFilter:     'linear',
+      addressModeU:  'clamp-to-edge',
+      addressModeV:  'clamp-to-edge',
     });
   }
 
@@ -145,25 +180,63 @@ export class LightingPass implements IPass {
     this.prepare();
   }
 
+  /**
+   * Track A：接入 / 摘除大气透视源（Scene.render 每帧传 `aerialSource()`）。
+   * 工厂每帧返回新包装对象 → 除引用同一性外再按 skyView/atmosphereParams
+   * 资源身份判定（两者 getter 身份稳定 → 资源未变时仅换壳不重建管线）。
+   * 资源就绪 → 管线切到对应 AP 变体并建组 4；null 或未就绪 → 原 8 变体
+   * （零回归）。sunDir 由 writeAerialParams 每帧从最新包装对象读取。
+   */
+  setAerialSource(source: AerialReceiverBinding | null): void {
+    const prev = this._aerialSource;
+    if (source === prev) return;
+    if (prev && source &&
+        prev.view === source.view &&
+        prev.atmosphereParamsBuffer === source.atmosphereParamsBuffer) {
+      this._aerialSource = source; // 资源身份未变 → 仅换壳（sunDir 取新值）
+      return;
+    }
+    this._aerialSource = source;
+    this._aerialActive = source !== null &&
+      !!source.view && !!source.atmosphereParamsBuffer;
+    this._pipeline = null;
+    this.prepare();
+  }
+
+  /**
+   * Track A：AerialParams UBO 每帧写（strength/distM 由 Scene.aerialPerspective
+   * 驱动，sunDir 取当前源的归一化 ECEF）。未接 AP 时 no-op（零开销）。
+   */
+  writeAerialParams(strength: number, distM: number): void {
+    const src = this._aerialSource;
+    if (!this._aerialActive || !src) return;
+    const data = new Float32Array(AERIAL_PARAMS_UBO_BYTES / 4); // 8 floats
+    data[0] = strength; // @0 strength（0 = 恒旧 limb haze，零回归闸）
+    data[1] = distM;    // @4 distM（米，参考雾距）
+    const sd = src.sunDir;
+    data[4] = sd[0]; data[5] = sd[1]; data[6] = sd[2]; // @16 sunDir vec3f
+    this._context.writeBuffer(this._aerialUBO, 0, data);
+  }
+
   /** Build or rebuild the render pipeline and bind groups. */
   prepare(): void {
     const device = this._context.device;
 
     // A1 CSSM：阴影开关 × HDR 开关 → 4 个 shader 变体；Track C 再与
-    // 云影开关正交组合 → 8 变体（未接云影走原 4 变体，逐字节零回归）。
+    // 云影开关正交组合 → 8 变体；Track A AP 开关再正交 → 16 变体
+    // （任一未就绪恒走原变体，逐字节零回归；选择逻辑单一来源
+    // selectLightingShader，LightingShader 单测穷举 16 组合）。
     const src = this._shadowSource;
     const shadowReady = this._shadowActive &&
       src !== null && !!src.ubo && !!src.textureView && !!src.comparisonSampler;
     const cloud = this._cloudShadowSource;
     const cloudReady = this._cloudShadowActive &&
       cloud !== null && !!cloud.view && !!cloud.ubo && !!cloud.sampler;
-    const shaderCode = this._hdr
-      ? (shadowReady
-          ? (cloudReady ? LIGHTING_SHADER_SHADOW_CLOUD_HDR : LIGHTING_SHADER_SHADOW_HDR)
-          : (cloudReady ? LIGHTING_SHADER_CLOUD_HDR       : LIGHTING_SHADER_HDR))
-      : (shadowReady
-          ? (cloudReady ? LIGHTING_SHADER_SHADOW_CLOUD    : LIGHTING_SHADER_SHADOW)
-          : (cloudReady ? LIGHTING_SHADER_CLOUD           : LIGHTING_SHADER));
+    const aerial = this._aerialSource;
+    const aerialReady = this._aerialActive &&
+      aerial !== null && !!aerial.view && !!aerial.atmosphereParamsBuffer;
+    const shaderCode = selectLightingShader(
+      this._hdr, shadowReady, cloudReady, aerialReady);
 
     const shader = device.createShaderModule({
       code: shaderCode,
@@ -218,9 +291,25 @@ export class LightingPass implements IPass {
       });
     }
 
+    // 组 4 仅在 AP 激活时存在（T6 契约：uniform + skyView 纹理 + filtering
+    // 采样器 + atmosphereParams uniform）。
+    let bindGroupLayout4: GPUBindGroupLayout | null = null;
+    if (aerialReady && aerial) {
+      bindGroupLayout4 = device.createBindGroupLayout({
+        label: 'Lighting.BGL4',
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: 32 } },
+          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+          { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+          { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: 64 } },
+        ],
+      });
+    }
+
     const bindGroupLayouts = [bindGroupLayout0, bindGroupLayout1];
     if (bindGroupLayout2) bindGroupLayouts.push(bindGroupLayout2);
     if (bindGroupLayout3) bindGroupLayouts.push(bindGroupLayout3);
+    if (bindGroupLayout4) bindGroupLayouts.push(bindGroupLayout4);
 
     this._pipeline = device.createRenderPipeline({
       label:  'LightingPipeline',
@@ -286,6 +375,22 @@ export class LightingPass implements IPass {
           { binding: 0, resource: { buffer: cloud.ubo } },
           { binding: 1, resource: cloud.view },
           { binding: 2, resource: cloud.sampler },
+        ],
+      });
+    }
+
+    // Group 4: 大气透视（AerialParams UBO + skyView LUT + linear/clamp 采样器
+    // + AtmosphereParams UBO；本 pass 自有 UBO/采样器，天空资源为外部身份）。
+    this._aerialBindGroup = null;
+    if (aerialReady && aerial && bindGroupLayout4) {
+      this._aerialBindGroup = device.createBindGroup({
+        label:  'Lighting.BG4',
+        layout: bindGroupLayout4,
+        entries: [
+          { binding: 0, resource: { buffer: this._aerialUBO } },
+          { binding: 1, resource: aerial.view },
+          { binding: 2, resource: this._aerialSampler },
+          { binding: 3, resource: { buffer: aerial.atmosphereParamsBuffer } },
         ],
       });
     }
@@ -395,6 +500,10 @@ export class LightingPass implements IPass {
     if (this._cloudShadowActive && this._cloudShadowBindGroup) {
       pass.setBindGroup(3, this._cloudShadowBindGroup);
     }
+    // Track A：AP 激活时补组 4（管线布局已含 BGL4）。
+    if (this._aerialActive && this._aerialBindGroup) {
+      pass.setBindGroup(4, this._aerialBindGroup);
+    }
     pass.draw(3); // full-screen triangle
     pass.end();
   }
@@ -402,6 +511,7 @@ export class LightingPass implements IPass {
   destroy(): void {
     this._cameraUniformBuffer.destroy();
     this._lightingUniformBuffer.destroy();
+    this._aerialUBO.destroy();
   }
 }
 

@@ -3,13 +3,16 @@
  *
  * 两个入口：
  *  - {@link CLOUD_RENDER_WGSL}    全屏三角形渲染：相机射线 × 云高球面求交，
- *    FBM 云密度场 + 朝太阳 2D 梯度光照 + 黄昏染色，预乘 alpha 叠加在
- *    已合成场景之上（depthCompare equal 只写背景像素，同 AtmosphereSky）。
- *  - {@link CLOUD_SHADOW_BAKE_WGSL}  compute 正交烘焙：同款云密度场写入
- *    rgba8unorm storage 纹理 R 通道（r8unorm 不可作 storage，WebGPU 限制），
- *    供地形（LightingPass 组 3）与海面（主会话 T6 接线）作云影采样。
+ *    主云（Beer-Powder 散射 + 银边 + 半球环境光 + 3 方向能量传播）与
+ *    卷云第二层（纤维状 FBM，同一 pass 内先后两次球面求交 over 叠加），
+ *    预乘 alpha 叠加在已合成场景之上（depthCompare equal 只写背景像素，
+ *    同 AtmosphereSky）。
+ *  - {@link CLOUD_SHADOW_BAKE_WGSL}  compute 正交烘焙：同款云密度场 + 卷云
+ *    密度×0.3 叠加写入 rgba8unorm storage 纹理 R 通道（r8unorm 不可作
+ *    storage，WebGPU 限制），供地形（LightingPass 组 3）与海面（主会话
+ *    T6 接线）作云影采样。
  *
- * UBO 布局单一来源（三份，与 CloudLayer.ts 的 CPU 写入严格对应）：
+ * UBO 布局单一来源（四份，与 CloudLayer.ts 的 CPU 写入严格对应）：
  *
  *  CloudCamera（96B）——渲染专用：
  *    @0   invViewProj : mat4x4<f32>   逆 viewProj（CPU 逐帧算好上传）
@@ -25,6 +28,12 @@
  *    @80  params1      : vec4<f32>    xy=风漂移(公里) z=保留 w=保留
  *    @96  tintLow      : vec4<f32>    云底色（rgb, a 未用）
  *    @112 tintHigh     : vec4<f32>    云顶色（rgb, a 未用）
+ *
+ *  CirrusParams（48B）——渲染 FS binding 2 与烘焙 compute binding 2 共用
+ *  同一 UBO（eastDir/northDir/风漂移与主云共用，无需重复传）：
+ *    @0   planeCenter : vec4<f32>    xyz 卷云球心（归一化 ECEF），w = 卷云球半径（归一化）
+ *    @16  params0     : vec4<f32>    x=enable(0/1) y=coverage z=density w=保留
+ *    @32  params1     : vec4<f32>    x=stretchRad(弧度) y=streak(横向扰动) z=保留 w=保留
  *
  *  CloudShadowParams（96B）——烘焙 compute 与 LightingPass 组 3 消费共用：
  *    @0   planeCenter : vec4<f32>    xyz 云高平面中心（归一化 ECEF），w = 云球半径（归一化）
@@ -44,6 +53,7 @@ const EARTH_SCALE = 6378137.0;
 
 export const CLOUD_CAMERA_UBO_BYTES = 96;
 export const CLOUD_PARAMS_UBO_BYTES = 128;
+export const CIRRUS_PARAMS_UBO_BYTES = 48;
 export const CLOUD_SHADOW_PARAMS_UBO_BYTES = 96;
 
 // ── 云密度场公共段（渲染 FS 与烘焙 compute 同一份文本）──────────────────────
@@ -92,6 +102,26 @@ fn cloudDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>) -> f32 {
   let thr = mix(0.74, 0.28, clamp(coverage, 0.0, 1.0));
   return smoothstep(thr, thr + 0.18, n);
 }
+
+/**
+ * 卷云密度场：纤维状马尾/条纹。把 FBM 的 uv 旋转到拉伸方向坐标系后沿
+ * 该方向压缩 ×0.15（噪声沿拉伸向被拉长 6.7×），叠加高频横向扰动让纤维
+ * 丝摆动。与主云同坐标系（planeM 米 + windKm 漂移）；stretchRad 为切平面
+ * 内拉伸方向（弧度），streak 为横向扰动强度。
+ */
+fn cirrusDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>, stretchRad: f32, streak: f32) -> f32 {
+  let cs = cos(stretchRad);
+  let sn = sin(stretchRad);
+  let p = planeM * 0.00042 + windKm;
+  let q = vec2<f32>(p.x * cs + p.y * sn, -p.x * sn + p.y * cs);
+  // 纤维状：拉伸方向压缩 ×0.15，横向 ×1.35 提高频带密度。
+  let squashed = vec2<f32>(q.x * 0.15, q.y * 1.35);
+  // 高频横向扰动：纤维丝沿垂直条纹方向摆动。
+  let wobble = (cloudFbm(vec2<f32>(q.x * 0.4, q.y * 2.6)) - 0.5) * streak;
+  let n = cloudFbm(squashed + vec2<f32>(0.0, wobble));
+  let thr = mix(0.68, 0.3, clamp(coverage, 0.0, 1.0));
+  return smoothstep(thr, thr + 0.22, n);
+}
 `;
 
 // ── 渲染入口 ─────────────────────────────────────────────────────────────────
@@ -113,10 +143,21 @@ struct CloudParams {
   tintHigh     : vec4<f32>,
 }
 
+// 卷云第二层参数（与烘焙 compute binding 2 共用同一 UBO，布局见头注释）。
+struct CirrusParams {
+  planeCenter : vec4<f32>,
+  params0     : vec4<f32>,
+  params1     : vec4<f32>,
+}
+
 @group(0) @binding(0) var<uniform> cloudCam : CloudCamera;
 @group(0) @binding(1) var<uniform> cloud    : CloudParams;
+@group(0) @binding(2) var<uniform> cirrus   : CirrusParams;
 
 const CLOUD_EARTH_SCALE: f32 = ${EARTH_SCALE.toFixed(1)};
+
+// Beer 消光系数（Beer-Powder 散射能量 exp(-dens*σ) 的光学深度标定）。
+const CLOUD_EXTINCTION: f32 = 3.2;
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -160,46 +201,108 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let far = farH.xyz / farH.w;
   let ro = cloudCam.cameraPos.xyz;
   let rd = normalize(far - ro);
-
-  let hit = cloudRaySphereNearest(ro, rd, cloud.planeCenter.w);
-  if (hit <= 0.0) { discard; }
-
-  // 地平线渐隐：贴地平的掠射交点拉得极远，alpha 压零防摩尔纹。
   let up = normalize(ro);
+
+  // 地平线渐隐：贴地平的掠射交点拉得极远，alpha 压零防摩尔纹（两层共用）。
   let el = dot(rd, up);
   let horizon = smoothstep(0.015, 0.015 + 0.105 * max(cloud.params0.z, 0.001), el);
   if (horizon <= 0.002) { discard; }
 
-  // 云高交点 → 中心切平面米坐标（与云影烘焙同一坐标系）。
-  let d = ro + rd * hit - cloud.planeCenter.xyz;
-  let planeM = vec2<f32>(
-    dot(d, cloud.eastDir.xyz),
-    dot(d, cloud.northDir.xyz)
-  ) * CLOUD_EARTH_SCALE;
+  // 预乘域远→近 over 累积：先卷云（高、远），再主云（低、近）。
+  var premul = vec3<f32>(0.0);
+  var alpha = 0.0;
 
-  let coverage = cloud.params0.x;
-  let dens = cloudDensity(planeM, coverage, cloud.params1.xy);
-  if (dens <= 0.004) { discard; }
+  // ── 卷云第二层：更高云高球面求交 + 纤维状噪声，alpha 压 ≤ 0.5 ──
+  if (cirrus.params0.x > 0.5) {
+    let hitC = cloudRaySphereNearest(ro, rd, cirrus.planeCenter.w);
+    if (hitC > 0.0) {
+      let dC = ro + rd * hitC - cirrus.planeCenter.xyz;
+      let planeMC = vec2<f32>(
+        dot(dC, cloud.eastDir.xyz),
+        dot(dC, cloud.northDir.xyz)
+      ) * CLOUD_EARTH_SCALE;
+      let cDens = cirrusDensity(
+        planeMC, cirrus.params0.y, cloud.params1.xy,
+        cirrus.params1.x, cirrus.params1.y
+      );
+      if (cDens > 0.004) {
+        // 卷云冰晶薄层：正午近白，黄昏染金橙（卷云比主云更受低角度阳光）。
+        let duskC = 1.0 - clamp(dot(cloud.sunDirection.xyz, up) * 1.6, 0.0, 1.0);
+        var cCol = mix(vec3<f32>(1.04, 1.02, 1.0), vec3<f32>(1.25, 0.6, 0.38), duskC * 0.9);
+        // 卷云银边：视线朝太阳时纤维丝前向散射增亮。
+        let cSilver = pow(clamp(dot(rd, cloud.sunDirection.xyz), 0.0, 1.0), 4.0) * (1.0 - cDens);
+        cCol += vec3<f32>(cSilver * 0.6);
+        let cA = min(clamp(cDens * cirrus.params0.z, 0.0, 1.0), 0.5) * horizon;
+        premul = cCol * cA + premul * (1.0 - cA);
+        alpha = cA + alpha * (1.0 - cA);
+      }
+    }
+  }
 
-  // 朝太阳 2D 密度差分 → 迎光面提亮 / 背光面压暗。
-  let sun2 = vec2<f32>(
-    dot(cloud.sunDirection.xyz, cloud.eastDir.xyz),
-    dot(cloud.sunDirection.xyz, cloud.northDir.xyz)
-  );
-  let sunL2 = select(-sun2 / max(length(sun2), 1e-4), vec2<f32>(0.0), length(sun2) < 1e-4);
-  let densSun = cloudDensity(planeM + sunL2 * 140.0, coverage, cloud.params1.xy);
-  let grad = (densSun - dens) * 2.2;
-  let light = clamp(1.0 + grad, 0.35, 1.65);
+  // ── 主云层 ──
+  let hit = cloudRaySphereNearest(ro, rd, cloud.planeCenter.w);
+  if (hit > 0.0) {
+    // 云高交点 → 中心切平面米坐标（与云影烘焙同一坐标系）。
+    let d = ro + rd * hit - cloud.planeCenter.xyz;
+    let planeM = vec2<f32>(
+      dot(d, cloud.eastDir.xyz),
+      dot(d, cloud.northDir.xyz)
+    ) * CLOUD_EARTH_SCALE;
 
-  // 太阳高度染色：正午近云顶白，黄昏整体染橙红（transmittance 近似）。
-  let sunUp = dot(cloud.sunDirection.xyz, up);
-  let dusk = 1.0 - clamp(sunUp * 1.6, 0.0, 1.0);
-  var col = mix(cloud.tintHigh.rgb, cloud.tintLow.rgb, clamp(dens, 0.0, 1.0));
-  col *= light;
-  col = mix(col, col * vec3<f32>(1.3, 0.55, 0.32), dusk * 0.85);
+    let coverage = cloud.params0.x;
+    let dens = cloudDensity(planeM, coverage, cloud.params1.xy);
+    if (dens > 0.004) {
+      // 朝太阳切平面方向（两层共用 ENU 基）。
+      let sun2 = vec2<f32>(
+        dot(cloud.sunDirection.xyz, cloud.eastDir.xyz),
+        dot(cloud.sunDirection.xyz, cloud.northDir.xyz)
+      );
+      let sunLen = length(sun2);
+      let sunL2 = select(-sun2 / max(sunLen, 1e-4), vec2<f32>(0.0), sunLen < 1e-4);
 
-  let alpha = clamp(dens * cloud.params0.y, 0.0, 1.0) * horizon;
-  return vec4<f32>(col * alpha, alpha); // 预乘 alpha
+      // 多方向能量传播近似：太阳向 + 平面内 ±60° 正交抖动，加权差分
+      //（+2 次 FBM 采样）——比单梯度差分更平滑的方向性光照。
+      let perp2 = vec2<f32>(-sunL2.y, sunL2.x);
+      let sideA = (sunL2 + perp2 * 1.732) * 0.5;
+      let sideB = (sunL2 - perp2 * 1.732) * 0.5;
+      let dSun = cloudDensity(planeM + sunL2 * 140.0, coverage, cloud.params1.xy);
+      let dSideA = cloudDensity(planeM + sideA * 160.0, coverage, cloud.params1.xy);
+      let dSideB = cloudDensity(planeM + sideB * 160.0, coverage, cloud.params1.xy);
+      let grad3 = (dSun - dens) * 0.5 + (dSideA - dens) * 0.25 + (dSideB - dens) * 0.25;
+      let directional = clamp(1.0 + grad3 * 2.2, 0.35, 1.65);
+
+      // Beer-Powder 散射能量：穿透项 exp(-dens*σ) × 粉末项
+      // (1 - exp(-dens*σ*2))——峰形曲线让云心更亮、边缘透光。
+      let beer = exp(-dens * CLOUD_EXTINCTION);
+      let powder = 1.0 - exp(-dens * CLOUD_EXTINCTION * 2.0);
+      let beerPowder = beer * powder;
+
+      // 云底环境光：半球近似（天顶向云受天光多、地平向偏暗蓝）×0.35。
+      let hemi = 0.5 + 0.5 * dot(rd, up);
+      let ambient = mix(cloud.tintLow.rgb, cloud.tintHigh.rgb, hemi) * 0.35;
+
+      // 银边 silver lining：视线朝太阳穿薄云区的向阳轮廓发丝光
+      //（薄处 1-dens 增强，厚处无）。
+      let silver = pow(clamp(dot(rd, cloud.sunDirection.xyz), 0.0, 1.0), 4.0) * (1.0 - dens) * 0.85;
+
+      // 太阳高度染色：正午近云顶白，黄昏整体染橙红（transmittance 近似）。
+      let sunUp = dot(cloud.sunDirection.xyz, up);
+      let dusk = 1.0 - clamp(sunUp * 1.6, 0.0, 1.0);
+      var mCol = mix(cloud.tintHigh.rgb, cloud.tintLow.rgb, clamp(dens, 0.0, 1.0));
+      // 太阳直接散射：Beer-Powder 能量（峰值 ≈ 0.38，×2.6 归一）× 方向传播。
+      mCol = mCol * (ambient + vec3<f32>(beerPowder * 2.6 * directional));
+      // 银边加色（黄昏偏金），随整体 dusk 透射染色乘法耦合。
+      mCol += vec3<f32>(silver) * mix(vec3<f32>(1.0, 0.98, 0.94), vec3<f32>(1.2, 0.72, 0.42), dusk);
+      mCol = mix(mCol, mCol * vec3<f32>(1.3, 0.55, 0.32), dusk * 0.85);
+
+      let a = clamp(dens * cloud.params0.y, 0.0, 1.0) * horizon;
+      premul = mCol * a + premul * (1.0 - a);
+      alpha = a + alpha * (1.0 - a);
+    }
+  }
+
+  if (alpha <= 0.0015) { discard; }
+  return vec4<f32>(premul, alpha); // premul 已含 alpha（预乘输出）
 }
 `;
 
@@ -214,7 +317,15 @@ struct CloudShadowParams {
   windOffset  : vec4<f32>,
 }
 
+// 卷云参数（与渲染 FS binding 2 共用同一 UBO，布局见头注释）。
+struct CirrusParams {
+  planeCenter : vec4<f32>,
+  params0     : vec4<f32>,
+  params1     : vec4<f32>,
+}
+
 @group(0) @binding(0) var<uniform> shadow : CloudShadowParams;
+@group(0) @binding(2) var<uniform> cirrus : CirrusParams;
 // r8unorm 不可作 storage（WebGPU 限制）：rgba8unorm 写 R 通道。
 @group(0) @binding(1) var shadowTex : texture_storage_2d<rgba8unorm, write>;
 
@@ -229,7 +340,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // uv → 覆盖区平面米坐标（params.x = EARTH_SCALE / extentM）。
   let planeM = (uv01 - vec2<f32>(0.5)) / max(shadow.params.x, 1e-9);
   let dens = cloudDensity(planeM, shadow.params.z, shadow.windOffset.xy);
-  textureStore(shadowTex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(dens, dens, dens, 1.0));
+  // 卷云投影叠加（低权重 ×0.3）：地面上淡淡纤维条纹影。
+  var total = dens;
+  if (cirrus.params0.x > 0.5) {
+    let cD = cirrusDensity(
+      planeM, cirrus.params0.y, shadow.windOffset.xy,
+      cirrus.params1.x, cirrus.params1.y
+    );
+    total = clamp(dens + cD * 0.3, 0.0, 1.0);
+  }
+  textureStore(shadowTex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(total, total, total, 1.0));
 }
 `;
 

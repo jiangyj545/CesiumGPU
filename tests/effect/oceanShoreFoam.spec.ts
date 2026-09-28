@@ -54,6 +54,7 @@ interface MockHarness {
   texWrites: { label: string; data: Float32Array }[];
   bindGroups: { entries: { binding: number; resource: unknown }[] }[];
   layouts: { label: string; entries: BglEntry[] }[];
+  renderPipelines: Array<Record<string, unknown>>;
 }
 
 /** 记录型 mock Context：UBO 写入 / 纹理上传 / bind group / BGL 全量捕获。 */
@@ -62,6 +63,7 @@ function makeHarness(): MockHarness {
   const texWrites: { label: string; data: Float32Array }[] = [];
   const bindGroups: { entries: { binding: number; resource: unknown }[] }[] = [];
   const layouts: { label: string; entries: BglEntry[] }[] = [];
+  const renderPipelines: Array<Record<string, unknown>> = [];
 
   const device = {
     createBuffer: (d: { label: string; size: number }) => ({ label: d.label, size: d.size, destroy() {} }),
@@ -82,7 +84,10 @@ function makeHarness(): MockHarness {
     },
     createPipelineLayout: (d: { bindGroupLayouts: unknown[] }) => ({ bindGroupLayouts: d.bindGroupLayouts }),
     createComputePipeline: (d: { label: string }) => ({ label: d.label }),
-    createRenderPipeline: (d: { label: string }) => ({ label: d.label }),
+    createRenderPipeline: (d: Record<string, unknown>) => {
+      renderPipelines.push(d);
+      return { label: d.label };
+    },
     createBindGroup: (d: { entries: { binding: number; resource: unknown }[] }) => {
       const bg = { entries: d.entries };
       bindGroups.push(bg);
@@ -112,7 +117,7 @@ function makeHarness(): MockHarness {
     },
   } as unknown as Context;
 
-  return { ctx, uboWrites, texWrites, bindGroups, layouts };
+  return { ctx, uboWrites, texWrites, bindGroups, layouts, renderPipelines };
 }
 
 /** writeCameraUniforms 只读 enumerated 字段（viewProj 矩阵 / position / frustum）——全零即可。 */
@@ -129,9 +134,12 @@ function makeCamera(): Camera {
 const computePass = {
   setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {},
 };
+/** drawIndexed 首参记录（T-P 二次 peeling draw 门控断言用；测试前手动清空）。 */
+const drawCounts: number[] = [];
 const renderPass = {
   setPipeline() {}, setBindGroup() {}, setVertexBuffer() {}, setIndexBuffer() {},
-  drawIndexed() {}, end() {},
+  drawIndexed(...args: number[]) { drawCounts.push(args[0]); },
+  end() {},
 };
 const encoder = {
   beginComputePass: () => computePass,
@@ -333,7 +341,7 @@ describe('OCEAN_FFT_RENDER_SHADER 岸线泡沫源串', () => {
     expect(s).toContain('@binding(19)var<uniform>breakParams:BreakParams');
     expect(s).toContain('gain:vec4<f32>');
     expect(s).toContain('band:vec4<f32>');
-    expect(OCEAN_BREAK_PARAMS_UBO_BYTES).toBe(64);
+    expect(OCEAN_BREAK_PARAMS_UBO_BYTES).toBe(96);
     // VS：海床 textureLoad → 水深 → 破碎权重；振幅调制 + 波峰前倾
     expect(s).toContain('@location(4)breakW:f32');
     expect(s).toContain('breakW=smoothstep(breakParams.band.y,breakParams.band.x,disp.y-sbH)');
@@ -345,7 +353,7 @@ describe('OCEAN_FFT_RENDER_SHADER 岸线泡沫源串', () => {
     expect(s).toContain('foamMask=clamp(foamMask+foamW*0.5,0.0,1.0)');
   });
 
-  it('T4 binding 19 BGL 双阶段 + minBindingSize 64B', () => {
+  it('T4 binding 19 BGL 双阶段 + minBindingSize 96B（T-P peel vec4 @32 扩容）', () => {
     const h = makeHarness();
     const ocean = makeOcean(h.ctx);
     ocean.updateCamera(makeCamera());
@@ -356,5 +364,145 @@ describe('OCEAN_FFT_RENDER_SHADER 岸线泡沫源串', () => {
     expect(bgl.entries[19].buffer?.type).toBe('uniform');
     expect(bgl.entries[19].buffer?.minBindingSize).toBe(OCEAN_BREAK_PARAMS_UBO_BYTES);
     expect(bgl.entries[19].visibility).toBe(STAGE_VERTEX | STAGE_FRAGMENT);
+  });
+});
+
+describe('T-P 真 peeling 卷唇（二次 draw 卷曲面 + 海面雾太阳染色）', () => {
+  const s = OCEAN_FFT_RENDER_SHADER.replace(/\s+/g, '');
+
+  /** 第 n 帧（负 = 尾倒数）BreakParams UBO 内容。 */
+  function bkAt(h: MockHarness, n: number): Float32Array {
+    const writes = h.uboWrites.filter((w) => w.label === 'OceanFFTBreakParamsUBO');
+    if (n < 0) n = writes.length + n;
+    return writes[n].f32;
+  }
+
+  it('源串：peel_vs/peel_fs + 卷曲变形（绕波峰线前移/下压）+ 内翻法线白沫材质', () => {
+    expect(s).toContain('fnpeel_vs(input:VSIn)->PeelVSOut');
+    expect(s).toContain('fnpeel_fs(input:PeelVSOut)->@location(0)vec4<f32>');
+    // 卷曲几何：波前进方向 = 级联0 梯度反方向；h 绕波峰轴转 roll
+    expect(s).toContain('letadv2=-g0.xy/vec2<f32>(gLen)');
+    expect(s).toContain('disp.xz+=adv2*(h*sin(roll))');
+    expect(s).toContain('disp.y-=h*(1.0-cos(roll))');
+    expect(s).toContain('ocean.time*breakParams.peel.z');
+    // FS：curlW 低 discard / 法线内翻（-n）/ 白 0.95 / 半透明 0.85 封顶
+    expect(s).toContain('if(input.curlW<0.02){discard;}');
+    expect(s).toContain('letn=-normalize(input.nTongue)');
+    expect(s).toContain('vec3<f32>(0.95)');
+    expect(s).toContain('clamp(input.curlW*0.85*dens,0.0,0.85)');
+  });
+
+  it('源串：BreakParams.peel 第三 vec4 + 雾太阳染色（shoreParams.z + bit3 双门）', () => {
+    expect(s).toContain('peel:vec4<f32>');
+    expect(s).toContain('breakParams.peel.x>0.5');
+    expect(OCEAN_BREAK_PARAMS_UBO_BYTES).toBe(96);
+    // 雾染色：apStrength=0 恒旧值；bit3 未开（fallback 黑 LUT）双门短路
+    expect(s).toContain('letapStrength=renderParams.shoreParams.z');
+    expect(s).toContain('mix(fogCol,fogCol*sunTint*1.4,toSun*apStrength)');
+  });
+
+  it('setPeelWave 写 peel UBO @32（x 开关/y curl/z speed/w threshold）；null 归零', () => {
+    const h = makeHarness();
+    const ocean = makeOcean(h.ctx);
+    ocean.updateCamera(makeCamera());
+    ocean.bindSeabed(makeSeabed(h.ctx, 121.0, 31.0));
+    ocean.setBreakWave({ bandNearM: 3, bandFarM: 8 });
+
+    ocean.execute(encoder, {} as GPUTextureView, 0.016);
+    expect(bkAt(h, -1).length).toBe(OCEAN_BREAK_PARAMS_UBO_BYTES / 4);
+    expect(bkAt(h, -1)[8]).toBe(0); // 默认无 peel（零回归）
+
+    ocean.setPeelWave({ curl: 1.2, speed: 3.0, threshold: 0.5 });
+    ocean.execute(encoder, {} as GPUTextureView, 0.032);
+    expect(bkAt(h, -1)[8]).toBe(1);
+    expect(bkAt(h, -1)[9]).toBeCloseTo(1.2, 6);
+    expect(bkAt(h, -1)[10]).toBeCloseTo(3.0, 6);
+    expect(bkAt(h, -1)[11]).toBe(0.5);
+
+    ocean.setPeelWave({ enable: false, curl: 0.8 });
+    ocean.execute(encoder, {} as GPUTextureView, 0.048);
+    expect(bkAt(h, -1)[8]).toBe(0);
+
+    ocean.setPeelWave(null);
+    ocean.execute(encoder, {} as GPUTextureView, 0.064);
+    expect(bkAt(h, -1)[8]).toBe(0);
+  });
+
+  it('setPeelWave 非法输入抛错（curl/speed/threshold 域校验）', () => {
+    const h = makeHarness();
+    const ocean = makeOcean(h.ctx);
+    expect(() => ocean.setPeelWave({ curl: 0 })).toThrow(/curl/);
+    expect(() => ocean.setPeelWave({ curl: 4 })).toThrow(/curl/);
+    expect(() => ocean.setPeelWave({ speed: -0.1 })).toThrow(/speed/);
+    expect(() => ocean.setPeelWave({ threshold: 1.5 })).toThrow(/threshold/);
+    expect(() => ocean.setPeelWave({ threshold: NaN })).toThrow(/threshold/);
+    expect(() => ocean.setPeelWave({ curl: 1.1 })).not.toThrow();
+  });
+
+  it('二次 draw 门：默认 1 次；break+peel 开 2 次；仅 peel 无 break 仍 1 次', () => {
+    const h = makeHarness();
+    const ocean = makeOcean(h.ctx);
+    ocean.updateCamera(makeCamera());
+    ocean.bindSeabed(makeSeabed(h.ctx, 121.0, 31.0));
+
+    drawCounts.length = 0;
+    ocean.execute(encoder, {} as GPUTextureView, 0.016);
+    expect(drawCounts.length).toBe(1);
+
+    ocean.setBreakWave({ bandNearM: 3, bandFarM: 8 });
+    ocean.setPeelWave({ curl: 1.1 });
+    ocean.execute(encoder, {} as GPUTextureView, 0.032);
+    expect(drawCounts.length).toBe(3);           // 累计 1 + 2
+    expect(drawCounts[1]).toBe(drawCounts[2]);   // 同顶点/索引缓冲
+
+    // 仅 peel 无 break：breakW 恒 0 无卷曲 → CPU 跳过二次 draw
+    const h2 = makeHarness();
+    const ocean2 = makeOcean(h2.ctx);
+    ocean2.updateCamera(makeCamera());
+    ocean2.bindSeabed(makeSeabed(h2.ctx, 121.0, 31.0));
+    ocean2.setPeelWave({});
+    drawCounts.length = 0;
+    ocean2.execute(encoder, {} as GPUTextureView, 0.016);
+    expect(drawCounts.length).toBe(1);
+  });
+
+  it('卷唇第二管线：peel_vs/peel_fs entryPoint + 同 blend + cullMode none', () => {
+    const h = makeHarness();
+    const ocean = makeOcean(h.ctx);
+    ocean.updateCamera(makeCamera());
+    ocean.execute(encoder, {} as GPUTextureView, 0.016);
+
+    const peel = h.renderPipelines.find(
+      (p) => (p as { label?: string }).label === 'OceanFFTPeelPipeline',
+    ) as unknown as
+      | {
+          vertex: { entryPoint: string };
+          fragment: { entryPoint: string; targets: Array<{ blend: { color: { srcFactor: string; dstFactor: string } } }> };
+          primitive: { cullMode: string };
+        }
+      | undefined;
+    expect(peel).toBeDefined();
+    expect(peel!.vertex.entryPoint).toBe('peel_vs');
+    expect(peel!.fragment.entryPoint).toBe('peel_fs');
+    expect(peel!.fragment.targets[0].blend.color).toEqual({
+      srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add',
+    });
+    expect(peel!.primitive.cullMode).toBe('none');
+  });
+
+  it('setFogSunTint 走 RP[26]（shoreParams.z），默认 0 零回归', () => {
+    const h = makeHarness();
+    const ocean = makeOcean(h.ctx);
+    ocean.updateCamera(makeCamera());
+    ocean.bindSeabed(makeSeabed(h.ctx, 121.0, 31.0));
+
+    ocean.execute(encoder, {} as GPUTextureView, 0.016);
+    expect(rpAt(h, -1)[26]).toBe(0);
+
+    ocean.setFogSunTint(0.7);
+    ocean.execute(encoder, {} as GPUTextureView, 0.032);
+    expect(rpAt(h, -1)[26]).toBeCloseTo(0.7, 6);
+    expect(() => ocean.setFogSunTint(1.5)).toThrow(/setFogSunTint/);
+    expect(() => ocean.setFogSunTint(NaN)).toThrow(/setFogSunTint/);
   });
 });

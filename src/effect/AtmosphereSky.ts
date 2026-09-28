@@ -244,6 +244,15 @@ export class AtmosphereSky implements IPass {
   }
 
   /**
+   * 归一化 ECEF 太阳方向（构造 `sunDirection` / {@link setSunDirection} 同源，
+   * 已归一化）。LightingPass AP（AerialParams.sunDir）等消费方直接引用，
+   * 保证与天空渲染同一太阳。
+   */
+  get sunDirection(): [number, number, number] {
+    return this._sunDir;
+  }
+
+  /**
    * 可选导出：供海面反射（B1）拼接的 WGSL 采样函数文本。
    * 依赖四个外部绑定符号（名字必须一致）：`atmosphereParams`（64B uniform，
    * 布局同 AtmosphereParams）、`atmSkyViewLUT`（texture_2d<f32>，绑

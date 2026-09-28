@@ -138,8 +138,9 @@ export const OCEAN_CAUSTICS_GEN_BROAD_DEEP = genLayerShader({
  * seabedH varying 供湿沙线着色。着色 = 沙色 × 焦散采样（双焦平面按沙面
  * 真实深度混合，长波斜率使焦散网摇摆），叠深水衰减蓝；湿沙变暗 + 水线
  * 白沫线（tidewater Terrain.js 静态 fallback 直译，shoreStrength=0 全关，
- * 逐字节回到原着色）；swash 岸线动态冲刷（第二批 Track S，wet.w>0：
- * run-up 水位沿岸线切向错峰涨落 + 退潮白沫线，wet.w=0 整块分支跳过零回归）；
+ * 逐字节回到原着色）；swash 岸线动态冲刷（wet.w>0 双路径：swash_uv.z≠0 采样
+ * SwashField 浅水模拟纹理——湿沙上限=海床+η、白沫∝|u|、无人工相位呼吸；
+ * 未绑定走 Track S 解析 run-up 正弦路径逐字节零回归）；
  * 半透明混合 + 距离雾 + 网格边缘 alpha 淡出免硬边。
  */
 export const CAUSTICS_FLOOR_SHADER = /* wgsl */`
@@ -164,6 +165,8 @@ struct FloorParams {
   wet      : vec4<f32>,  // @96  x=湿沙强度 shoreStrength(0=关) y=time(s) z=高度模式(1=海拔已烘焙) w=swash 冲刷强度(0=关)
   /** seabedUv 仿射（P[28..31]）：uv = planeXZ * seabed_uv.zw + seabed_uv.xy（高度场米域 → 纹理 [0,1]）。 */
   seabed_uv: vec4<f32>,  // @112
+  /** swashUv 仿射（P[32..35]）：swash 纹理米域 → [0,1]；scale 0 = 未绑定 → 解析路径。 */
+  swash_uv : vec4<f32>,  // @128
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
@@ -173,6 +176,8 @@ struct FloorParams {
 @group(0) @binding(4) var smp : sampler;
 // r32float 不可过滤格式，只允许 textureLoad（与 OceanFFTShader binding 13 同款）
 @group(0) @binding(5) var seabedTex : texture_2d<f32>;
+// SwashField 模拟场（rgba16float：R=水位η G=流速u，filterable，linear 采样）
+@group(0) @binding(6) var swashTex : texture_2d<f32>;
 
 const EARTH_SCALE : f32 = 6378137.0;
 const FOG_DIST : f32 = 12000.0;
@@ -309,6 +314,32 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 涨落 + 浸水湿润衰减 + 退潮白沫线（色与海面泡沫一致）+ 着水色随动态水深微调。
   let swashAmt = max( floorParams.wet.w, 0.0 );
   if ( swashAmt > 0.001 ) {
+  if ( floorParams.swash_uv.z != 0.0 ) {
+    // ── SwashField 模拟路径（Track W）：采样浅水场，湿沙上限 = 海床海拔 +
+    // 采样水位 η、白沫 ∝ |u|（流速大 = 前沿翻滚）、着水色按动态水深微调；
+    // 涨落动态由模拟自带（无人工相位呼吸）。界外不采样（保持本帧着色）。
+    let wuv = input.planeXZ * floorParams.swash_uv.zw + floorParams.swash_uv.xy;
+    if ( all( wuv >= vec2<f32>( 0.0 ) ) && all( wuv <= vec2<f32>( 1.0 ) ) ) {
+      let sw = textureSampleLevel( swashTex, smp, wuv, 0.0 );
+      let etaSw = sw.r;
+      let uSw = sw.g;
+      let dSw = max( etaSw - seabedH, 0.0 );
+      // 动态湿沙带：海床低于当前水位即湿（前沿推进由模拟给出），0.3m 毛细
+      // 边缘带 + 刚退出的湿痕渐隐
+      let underW = smoothstep( 0.30, -0.10, seabedH - etaSw );
+      col = mix( col, col * 0.45 * vec3<f32>( 0.96, 0.98, 1.0 ),
+                 min( underW * swashAmt * shoreFade, 1.0 ) );
+      // 着水色联动：动态水深（与解析路径同款 ±0.15 钳制防过冲）
+      let dkDyn = clamp( dSw * 0.08, 0.0, 0.5 );
+      col = mix( col, col * vec3<f32>( 0.45, 0.72, 1.0 ),
+                 clamp( dkDyn - depthM * 0.08, -0.15, 0.15 ) * swashAmt );
+      // 白沫：|u| 大 = 翻滚白沫（m/s 门限 ~ √(g·A) 量级低段），色同海面泡沫
+      let foamK = smoothstep( 0.35, 1.0, abs( uSw ) );
+      col = mix( col, vec3<f32>( 0.90, 0.94, 0.97 ),
+                 min( 0.6 * foamK * swashAmt * shoreFade, 1.0 ) );
+    }
+  } else {
+    // ── 解析路径（第二批 Track S 原实现：未绑 SwashField 时逐字节零回归）──
     // 海床梯度（米/米）：岸线 = 等高线，法向 = 梯度方向
     var grad = vec2<f32>( 0.0 );
     if ( floorParams.wet.z > 0.5 ) {
@@ -355,6 +386,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     let foamTrail = smoothstep( envH + 0.1, frontH - 0.1, hN ) * 0.5;
     let foamK = max( foamFront, foamTrail ) * recede * swashAmt * shoreFade;
     col = mix( col, vec3<f32>( 0.90, 0.94, 0.97 ), min( 0.6 * foamK, 1.0 ) );
+  } // 解析路径 else 分支结束（swash_uv.z == 0）
   }
 
   // 距离雾 + 沙洲边缘 alpha 淡出（免 400m 网格硬边）
@@ -369,5 +401,5 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 
 /** CausticsParams uniform buffer 字节数（64B，见 struct 注释）。 */
 export const CAUSTICS_PARAMS_UBO_BYTES = 64;
-/** FloorParams uniform buffer 字节数（128B，见 struct 注释）。 */
-export const FLOOR_PARAMS_UBO_BYTES = 128;
+/** FloorParams uniform buffer 字节数（160B = 128B + swash_uv 仿射，见 struct 注释）。 */
+export const FLOOR_PARAMS_UBO_BYTES = 160;

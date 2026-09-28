@@ -9,6 +9,7 @@ import {
   CLOUD_SHADOW_BAKE_WGSL,
   CLOUD_CAMERA_UBO_BYTES,
   CLOUD_PARAMS_UBO_BYTES,
+  CIRRUS_PARAMS_UBO_BYTES,
   CLOUD_SHADOW_PARAMS_UBO_BYTES,
 } from '../shaders/CloudShader';
 
@@ -78,8 +79,29 @@ export interface CloudLayerOptions {
   followCamera?: boolean;
   /** 地平线渐隐强度 0-1（0 = 关闭）。Default: `1` */
   horizonFade?: number;
+  /** 卷云层参数（{@link CirrusOptions}）。Default: 见 {@link CirrusOptions} */
+  cirrus?: CirrusOptions;
   /** 是否绘制。Default: `true` */
   show?: boolean;
+}
+
+/**
+ * 卷云层参数（第二层：更高云高球面 + 纤维状马尾噪声，alpha 压 ≤ 0.5）。
+ * {@link CloudLayer.setCirrus} 与构造器 `cirrus` 共用此契约。
+ */
+export interface CirrusOptions {
+  /** 是否启用卷云层。Default: `true`（卷云常态存在） */
+  enable?: boolean;
+  /** 卷云覆盖 0-1。Default: `0.42` */
+  coverage?: number;
+  /** 卷云浓度乘数（α 系数，0-4）。Default: `0.55` */
+  density?: number;
+  /** 纤维条纹方向（度，切平面内，0 = 沿东向拉伸）。Default: `32` */
+  stretchDirDeg?: number;
+  /** 纤维丝横向扰动强度 0-2。Default: `0.35` */
+  streak?: number;
+  /** 卷云离地高度（米，>= 50，须显著高于主云）。Default: `8000` */
+  heightM?: number;
 }
 
 /**
@@ -87,15 +109,17 @@ export interface CloudLayerOptions {
  * （tidewater 观感追赶 Track C）。
  *
  * 渲染：逆 viewProj 重建相机射线，与云高球面（|p| = 地表半径 + 云高）
- * 求交，交点投影到中心切平面取 FBM 云密度；朝太阳 2D 密度差分做
- * 迎光/背光，太阳高度驱动黄昏橙红染色；预乘 alpha（loadOp load）
- * 叠加在已合成场景之上，depthCompare equal 只写背景像素（同
- * AtmosphereSky 安全闸——未 setDepthView 不绘制，绝不盖球体 imagery）。
+ * 求交，交点投影到中心切平面取 FBM 云密度；Beer-Powder 散射 + 银边 +
+ * 半球环境光 + 3 方向能量传播做光照，太阳高度驱动黄昏橙红染色；更高
+ * 的卷云第二层（{@link setCirrus}，纤维状噪声、alpha ≤ 0.5）在同一
+ * pass 内先后两次球面求交 over 叠加；预乘 alpha（loadOp load）叠加在
+ * 已合成场景之上，depthCompare equal 只写背景像素（同 AtmosphereSky
+ * 安全闸——未 setDepthView 不绘制，绝不盖球体 imagery）。
  *
- * 云影：compute 逐帧把同款密度场正交烘焙进 rgba8unorm（r8unorm 不可作
- * storage），覆盖区以中心（或相机星下点）为中心 extentM² 米；经
- * {@link cloudShadowSource}（身份稳定）接 LightingPass 组 3（地形），
- * 海面接线由主会话 T6 按 {@link cloudShadow} 契约消费。
+ * 云影：compute 逐帧把同款密度场 + 卷云密度×0.3 正交烘焙进 rgba8unorm
+ * （r8unorm 不可作 storage），覆盖区以中心（或相机星下点）为中心
+ * extentM² 米；经 {@link cloudShadowSource}（身份稳定）接 LightingPass
+ * 组 3（地形），海面接线由主会话 T6 按 {@link cloudShadow} 契约消费。
  */
 export class CloudLayer implements IPass {
   readonly label = 'CloudLayer';
@@ -119,12 +143,21 @@ export class CloudLayer implements IPass {
   private _followCamera: boolean;
   private _horizonFade: number;
   private _show: boolean;
+  // ── 卷云第二层（CirrusOptions 默认值收敛在构造器）──
+  private _cirrusEnable = true;
+  private _cirrusCoverage = 0.42;
+  private _cirrusDensity = 0.55;
+  private _cirrusStretchDeg = 32;
+  private _cirrusStreak = 0.35;
+  private _cirrusHeightM = 8000;
 
   // ── 派生几何（_refreshDerived 维护）──
   private _planeCenter: [number, number, number] = [0, 0, 1];
   private _eastDir: [number, number, number] = [1, 0, 0];
   private _northDir: [number, number, number] = [0, 1, 0];
   private _rcNorm = 1.001;
+  private _cirrusCenter: [number, number, number] = [0, 0, 1.001];
+  private _cirrusRcNorm = 1.002;
 
   // ── 运行状态 ──
   private _windKm: [number, number] = [0, 0];
@@ -139,6 +172,7 @@ export class CloudLayer implements IPass {
   // ── GPU 资源 ──
   private _cameraUBO: GPUBuffer | null = null;
   private _paramsUBO: GPUBuffer | null = null;
+  private _cirrusUBO: GPUBuffer | null = null;
   private _shadowUBO: GPUBuffer | null = null;
   private _shadowTex: GPUTexture | null = null;
   private _shadowView: GPUTextureView | null = null;
@@ -154,6 +188,7 @@ export class CloudLayer implements IPass {
   // ── CPU 侧 UBO 载荷（F32 视图）──
   private readonly _camF32 = new Float32Array(CLOUD_CAMERA_UBO_BYTES / 4);
   private readonly _paramsF32 = new Float32Array(CLOUD_PARAMS_UBO_BYTES / 4);
+  private readonly _cirrusF32 = new Float32Array(CIRRUS_PARAMS_UBO_BYTES / 4);
   private readonly _shadowF32 = new Float32Array(CLOUD_SHADOW_PARAMS_UBO_BYTES / 4);
   private readonly _scratchInv = new Matrix4();
 
@@ -176,6 +211,7 @@ export class CloudLayer implements IPass {
     this._followCamera = options.followCamera ?? false;
     this._horizonFade = CloudLayer._clamp01(options.horizonFade ?? 1);
     this._show = options.show ?? true;
+    if (options.cirrus) this._applyCirrus(options.cirrus);
     this._refreshDerived();
   }
 
@@ -247,6 +283,16 @@ export class CloudLayer implements IPass {
     this._flushIfReady();
   }
 
+  /**
+   * 卷云第二层参数（部分字段可选，只更新传入字段；非法值抛错）。
+   * 卷云常态存在（默认 enable=true），传 `{ enable: false }` 关闭整层
+   * （渲染跳过 + 云影烘焙不再叠加卷云条纹影）。
+   */
+  setCirrus(opts: CirrusOptions): void {
+    this._applyCirrus(opts);
+    this._flushIfReady();
+  }
+
   setShow(v: boolean): void {
     this._show = v;
   }
@@ -299,7 +345,7 @@ export class CloudLayer implements IPass {
     this.prepare();
     if (this._failed || !this._show) return;
     if (!this._pipeline || !this._renderBindGroup || !this._bakePipeline || !this._bakeBindGroup
-      || !this._cameraUBO || !this._paramsUBO || !this._shadowUBO) {
+      || !this._cameraUBO || !this._paramsUBO || !this._cirrusUBO || !this._shadowUBO) {
       if (!this._warned) {
         this._warned = true;
         console.warn(`[${this.label}] 管线未就绪，跳过绘制`);
@@ -371,10 +417,12 @@ export class CloudLayer implements IPass {
     this._destroyed = true;
     this._cameraUBO?.destroy();
     this._paramsUBO?.destroy();
+    this._cirrusUBO?.destroy();
     this._shadowUBO?.destroy();
     this._shadowTex?.destroy();
     this._cameraUBO = null;
     this._paramsUBO = null;
+    this._cirrusUBO = null;
     this._shadowUBO = null;
     this._shadowTex = null;
     this._shadowView = null;
@@ -435,6 +483,11 @@ export class CloudLayer implements IPass {
       size: CLOUD_PARAMS_UBO_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+    this._cirrusUBO ??= device.createBuffer({
+      label: 'CloudLayer.CirrusUBO',
+      size: CIRRUS_PARAMS_UBO_BYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
     this._shadowUBO ??= device.createBuffer({
       label: 'CloudLayer.ShadowUBO',
       size: CLOUD_SHADOW_PARAMS_UBO_BYTES,
@@ -465,6 +518,7 @@ export class CloudLayer implements IPass {
         entries: [
           { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
           { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+          { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         ],
       });
       const module = this._context.createShaderModule(CLOUD_RENDER_WGSL, 'CloudLayer.Render.Module');
@@ -493,6 +547,7 @@ export class CloudLayer implements IPass {
         entries: [
           { binding: 0, resource: { buffer: this._cameraUBO } },
           { binding: 1, resource: { buffer: this._paramsUBO } },
+          { binding: 2, resource: { buffer: this._cirrusUBO! } },
         ],
       });
     }
@@ -508,6 +563,7 @@ export class CloudLayer implements IPass {
             visibility: GPUShaderStage.COMPUTE,
             storageTexture: { access: 'write-only', format: 'rgba8unorm' },
           },
+          { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
         ],
       });
       const module = this._context.createShaderModule(CLOUD_SHADOW_BAKE_WGSL, 'CloudLayer.Bake.Module');
@@ -522,6 +578,7 @@ export class CloudLayer implements IPass {
         entries: [
           { binding: 0, resource: { buffer: this._shadowUBO } },
           { binding: 1, resource: this._shadowView! }, // 上方纹理块已同步创建视图
+          { binding: 2, resource: { buffer: this._cirrusUBO! } }, // 与渲染侧共用同一 CirrusParams UBO
         ],
       });
     }
@@ -560,6 +617,14 @@ export class CloudLayer implements IPass {
       dir[2] * this._rcNorm,
     ];
 
+    // 卷云第二层：同方向更高的独立球面（球心/半径独立，ENU 基与主云共用）。
+    this._cirrusRcNorm = Math.max(surfaceR, 1e-6) + this._cirrusHeightM / Camera.EARTH_SCALE;
+    this._cirrusCenter = [
+      dir[0] * this._cirrusRcNorm,
+      dir[1] * this._cirrusRcNorm,
+      dir[2] * this._cirrusRcNorm,
+    ];
+
     // ENU 基（单位方向，×EARTH_SCALE = 米）：east = ẑ×up，north = up×east。
     const e = [dir[2], 0, -dir[0]];
     const eLen = Math.hypot(e[0], e[1], e[2]);
@@ -590,6 +655,18 @@ export class CloudLayer implements IPass {
     p[24] = this._tintLow[0]; p[25] = this._tintLow[1]; p[26] = this._tintLow[2]; p[27] = 0;
     p[28] = this._tintHigh[0]; p[29] = this._tintHigh[1]; p[30] = this._tintHigh[2]; p[31] = 0;
 
+    const c = this._cirrusF32;
+    // CirrusParams（渲染 FS binding 2 与烘焙 compute binding 2 共用）
+    c[0] = this._cirrusCenter[0]; c[1] = this._cirrusCenter[1];
+    c[2] = this._cirrusCenter[2]; c[3] = this._cirrusRcNorm;
+    c[4] = this._cirrusEnable ? 1 : 0;
+    c[5] = this._cirrusCoverage;
+    c[6] = this._cirrusDensity;
+    c[7] = 0;
+    c[8] = this._cirrusStretchDeg * Math.PI / 180; // stretchRad（弧度）
+    c[9] = this._cirrusStreak;
+    c[10] = 0; c[11] = 0;
+
     const s = this._shadowF32;
     // CloudShadowParams
     s[0] = this._planeCenter[0]; s[1] = this._planeCenter[1];
@@ -604,7 +681,51 @@ export class CloudLayer implements IPass {
     s[20] = this._windKm[0]; s[21] = this._windKm[1]; s[22] = 0; s[23] = 0;
 
     if (this._paramsUBO) this._context.writeBuffer(this._paramsUBO, 0, p);
+    if (this._cirrusUBO) this._context.writeBuffer(this._cirrusUBO, 0, c);
     if (this._shadowUBO) this._context.writeBuffer(this._shadowUBO, 0, s);
+  }
+
+  /**
+   * 卷云参数校验并落状态（构造器与 {@link setCirrus} 共用；
+   * 非法值抛错，仿 OceanFFTWater setter 风格）。
+   */
+  private _applyCirrus(opts: CirrusOptions): void {
+    if (opts.enable !== undefined) {
+      if (typeof opts.enable !== 'boolean') {
+        throw new Error(`CloudLayer.setCirrus: enable 须为 boolean，收到 ${opts.enable}`);
+      }
+      this._cirrusEnable = opts.enable;
+    }
+    if (opts.coverage !== undefined) {
+      if (!Number.isFinite(opts.coverage)) {
+        throw new Error(`CloudLayer.setCirrus: coverage 非法值 ${opts.coverage}`);
+      }
+      this._cirrusCoverage = CloudLayer._clamp01(opts.coverage);
+    }
+    if (opts.density !== undefined) {
+      if (!Number.isFinite(opts.density)) {
+        throw new Error(`CloudLayer.setCirrus: density 非法值 ${opts.density}`);
+      }
+      this._cirrusDensity = Math.min(Math.max(opts.density, 0), 4);
+    }
+    if (opts.stretchDirDeg !== undefined) {
+      if (!Number.isFinite(opts.stretchDirDeg)) {
+        throw new Error(`CloudLayer.setCirrus: stretchDirDeg 非法值 ${opts.stretchDirDeg}`);
+      }
+      this._cirrusStretchDeg = opts.stretchDirDeg;
+    }
+    if (opts.streak !== undefined) {
+      if (!Number.isFinite(opts.streak)) {
+        throw new Error(`CloudLayer.setCirrus: streak 非法值 ${opts.streak}`);
+      }
+      this._cirrusStreak = Math.min(Math.max(opts.streak, 0), 2);
+    }
+    if (opts.heightM !== undefined) {
+      if (!Number.isFinite(opts.heightM) || opts.heightM < 50) {
+        throw new Error(`CloudLayer.setCirrus: heightM 非法值 ${opts.heightM}`);
+      }
+      this._cirrusHeightM = opts.heightM;
+    }
   }
 
   /** setter 后即时生效（GPU 资源已创建时）。 */

@@ -16,8 +16,10 @@ import {
 import {
   CLOUD_RENDER_WGSL,
   CLOUD_SHADOW_BAKE_WGSL,
+  CLOUD_SHADOW_RECEIVER_MODULE,
   CLOUD_CAMERA_UBO_BYTES,
   CLOUD_PARAMS_UBO_BYTES,
+  CIRRUS_PARAMS_UBO_BYTES,
   CLOUD_SHADOW_PARAMS_UBO_BYTES,
 } from '../../src/shaders/CloudShader';
 import type { GBufferPass } from '../../src/scene/passes/GBufferPass';
@@ -213,7 +215,10 @@ describe('CloudLayer - IPass 生命周期', () => {
     expect(h.textures).toHaveLength(1);
     expect(h.samplers).toHaveLength(1);
     expect(h.buffers.map((b) => b.size).sort((a, b) => a - b))
-      .toEqual([CLOUD_CAMERA_UBO_BYTES, CLOUD_PARAMS_UBO_BYTES, CLOUD_SHADOW_PARAMS_UBO_BYTES].sort((a, b) => a - b));
+      .toEqual(
+        [CLOUD_CAMERA_UBO_BYTES, CLOUD_PARAMS_UBO_BYTES, CIRRUS_PARAMS_UBO_BYTES, CLOUD_SHADOW_PARAMS_UBO_BYTES]
+          .sort((a, b) => a - b),
+      );
   });
 
   it('execute 全链路：compute 烘焙 + loadOp load 渲染 + 深度透传', () => {
@@ -333,19 +338,141 @@ describe('CloudLayer - 云影契约', () => {
   });
 });
 
+describe('CloudLayer - 卷云第二层', () => {
+  it('默认参数零回归：enable=true 常态存在，48B UBO 布局写入正确', () => {
+    const { layer, h } = makeLayer();
+    layer.setDepthView(() => ({}) as unknown as GPUTextureView);
+    layer.updateCamera(makeCamera());
+    layer.prepare();
+    const { encoder } = makeEncoder();
+    layer.execute(encoder, {} as GPUTextureView, 1.0);
+
+    const c = lastWrite(h, 'CloudLayer.CirrusUBO')!;
+    expect(c.f32.length).toBe(CIRRUS_PARAMS_UBO_BYTES / 4);
+    expect(c.f32[4]).toBe(1); // params0.x = enable（默认 true，卷云常态存在）
+    expect(c.f32[5]).toBeCloseTo(0.42, 6); // params0.y = coverage
+    expect(c.f32[6]).toBeCloseTo(0.55, 6); // params0.z = density
+    expect(c.f32[8]).toBeCloseTo(32 * Math.PI / 180, 6); // params1.x = stretchRad
+    expect(c.f32[9]).toBeCloseTo(0.35, 6); // params1.y = streak
+  });
+
+  it('setCirrus 部分字段更新 + heightM 独立云高球面（高于主云）', () => {
+    const { layer, h } = makeLayer();
+    layer.prepare();
+    layer.setCirrus({ coverage: 0.7, enable: false });
+    let c = lastWrite(h, 'CloudLayer.CirrusUBO')!;
+    expect(c.f32[4]).toBe(0); // 关闭整层
+    expect(c.f32[5]).toBeCloseTo(0.7, 6);
+    expect(c.f32[6]).toBeCloseTo(0.55, 6); // 未传字段不动
+
+    layer.setCirrus({ enable: true, stretchDirDeg: 120, streak: 0.8, heightM: 9000 });
+    c = lastWrite(h, 'CloudLayer.CirrusUBO')!;
+    expect(c.f32[4]).toBe(1);
+    expect(c.f32[8]).toBeCloseTo(120 * Math.PI / 180, 6);
+    expect(c.f32[9]).toBeCloseTo(0.8, 6);
+    // 卷云半径 @12B 高于主云半径（CloudParams.planeCenter.w @16B）。
+    const p = lastWrite(h, 'CloudLayer.ParamsUBO')!;
+    expect(c.f32[3]).toBeGreaterThan(p.f32[7]);
+    expect(c.f32[3] - p.f32[7]).toBeCloseTo((9000 - 2200) / ES, 6);
+  });
+
+  it('非法 setCirrus 值抛错（部分字段校验，合法字段不受牵连）', () => {
+    const { layer } = makeLayer();
+    expect(() => layer.setCirrus({ coverage: NaN })).toThrow();
+    expect(() => layer.setCirrus({ heightM: 10 })).toThrow();
+    expect(() => layer.setCirrus({ density: Infinity })).toThrow();
+    expect(() => layer.setCirrus({ stretchDirDeg: NaN })).toThrow();
+    expect(() => layer.setCirrus({ streak: NaN })).toThrow();
+    expect(() => layer.setCirrus({ enable: 'yes' as unknown as boolean })).toThrow();
+  });
+
+  it('渲染与烘焙 bind group 均挂 CirrusUBO（binding 2 同一 buffer）', () => {
+    const { layer, h } = makeLayer();
+    layer.prepare();
+    const renderBG = h.bindGroups.find((b) => b.label === 'CloudLayer.Render.BG')!;
+    const bakeBG = h.bindGroups.find((b) => b.label === 'CloudLayer.Bake.BG')!;
+    expect(renderBG.entries).toHaveLength(3);
+    expect(bakeBG.entries).toHaveLength(3);
+    const cirrusBuf = h.buffers.find((b) => b.label === 'CloudLayer.CirrusUBO');
+    // 两处 entry 资源是同一底层 buffer（mock 记录对象同引用）。
+    expect(renderBG.entries[2].resource).toEqual({ buffer: cirrusBuf });
+    expect(bakeBG.entries[2].resource).toEqual({ buffer: cirrusBuf });
+  });
+
+  it('构造器 cirrus 选项与 setCirrus 等价', () => {
+    const { layer, h } = makeLayer();
+    const layer2 = new CloudLayer(h.ctx, {
+      center: [121.5, 31.0],
+      cirrus: { enable: false, coverage: 0.9, heightM: 10500 },
+    });
+    layer2.setDepthView(() => ({}) as unknown as GPUTextureView);
+    layer2.updateCamera(makeCamera());
+    layer2.prepare();
+    layer2.execute(makeEncoder().encoder, {} as GPUTextureView, 1.0);
+    const c = lastWrite(h, 'CloudLayer.CirrusUBO')!;
+    expect(c.f32[4]).toBe(0);
+    expect(c.f32[5]).toBeCloseTo(0.9, 6);
+  });
+});
+
 describe('CloudShader 源串结构', () => {
   it('渲染 / 烘焙入口与 UBO 字节常量自洽', () => {
     expect(CLOUD_CAMERA_UBO_BYTES).toBe(96);
     expect(CLOUD_PARAMS_UBO_BYTES).toBe(128);
+    expect(CIRRUS_PARAMS_UBO_BYTES).toBe(48);
     expect(CLOUD_SHADOW_PARAMS_UBO_BYTES).toBe(96);
     // 渲染：云高球面求交 + 预乘 alpha；烘焙：rgba8unorm storage（r8 不可 storage）。
     expect(CLOUD_RENDER_WGSL).toContain('cloudRaySphereNearest');
-    expect(CLOUD_RENDER_WGSL).toContain('col * alpha');
+    expect(CLOUD_RENDER_WGSL).toContain('return vec4<f32>(premul, alpha)');
     expect(CLOUD_RENDER_WGSL).toContain('CLOUD_EARTH_SCALE');
     expect(CLOUD_RENDER_WGSL).toContain('cloudDensity');
     expect(CLOUD_SHADOW_BAKE_WGSL).toContain('texture_storage_2d<rgba8unorm, write>');
     expect(CLOUD_SHADOW_BAKE_WGSL).toContain('@workgroup_size(8, 8)');
     expect(CLOUD_SHADOW_BAKE_WGSL).toContain('cloudDensity');
+  });
+
+  it('主云散射升级：Beer-Powder + 银边 + 半球环境光 + 3 方向能量传播', () => {
+    // Beer-Powder：穿透项 × 粉末项（峰形能量，云心亮边缘透光）。
+    expect(CLOUD_RENDER_WGSL).toContain('exp(-dens * CLOUD_EXTINCTION)');
+    expect(CLOUD_RENDER_WGSL).toContain('1.0 - exp(-dens * CLOUD_EXTINCTION * 2.0)');
+    // 银边：视线朝太阳 × 薄云 (1-dens) 的发丝光。
+    expect(CLOUD_RENDER_WGSL).toContain(
+      'pow(clamp(dot(rd, cloud.sunDirection.xyz), 0.0, 1.0), 4.0) * (1.0 - dens) * 0.85',
+    );
+    // 云底环境光：半球近似 ×0.35。
+    expect(CLOUD_RENDER_WGSL).toContain(
+      'mix(cloud.tintLow.rgb, cloud.tintHigh.rgb, hemi) * 0.35',
+    );
+    // 多方向能量传播：太阳向 + ±60° 正交抖动，0.5/0.25/0.25 加权。
+    expect(CLOUD_RENDER_WGSL).toContain('let dSun = cloudDensity');
+    expect(CLOUD_RENDER_WGSL).toContain('let dSideA = cloudDensity');
+    expect(CLOUD_RENDER_WGSL).toContain('let dSideB = cloudDensity');
+    expect(CLOUD_RENDER_WGSL).toContain(
+      '(dSun - dens) * 0.5 + (dSideA - dens) * 0.25 + (dSideB - dens) * 0.25',
+    );
+    // 黄昏染色保留且与 Beer 能量乘法耦合（染色在 Beer 项之后整乘）。
+    expect(CLOUD_RENDER_WGSL).toContain(
+      'mix(mCol, mCol * vec3<f32>(1.3, 0.55, 0.32), dusk * 0.85)',
+    );
+  });
+
+  it('卷云第二层：纤维噪声 / alpha 压顶 / 烘焙条纹影叠加', () => {
+    // 纤维状：拉伸方向 uv 压缩 ×0.15 + 高频横向扰动。
+    expect(CLOUD_RENDER_WGSL).toContain('fn cirrusDensity');
+    expect(CLOUD_RENDER_WGSL).toContain('q.x * 0.15');
+    // 同一 pass 内先卷云（远）后主云（近）over 叠加。
+    expect(CLOUD_RENDER_WGSL).toContain('cirrus.params0.x > 0.5');
+    expect(CLOUD_RENDER_WGSL).toContain('cirrus.planeCenter.w');
+    // alpha 压 ≤ 0.5。
+    expect(CLOUD_RENDER_WGSL).toContain('min(clamp(cDens * cirrus.params0.z, 0.0, 1.0), 0.5)');
+    // 烘焙：卷云密度 ×0.3 低权重叠加（enable 闸）。
+    expect(CLOUD_SHADOW_BAKE_WGSL).toContain('cirrusDensity');
+    expect(CLOUD_SHADOW_BAKE_WGSL).toContain('clamp(dens + cD * 0.3, 0.0, 1.0)');
+    // 烘焙与渲染共用同一 CirrusParams UBO（binding 2），96B 影 UBO 契约不动。
+    expect(CLOUD_SHADOW_BAKE_WGSL).toContain('@group(0) @binding(2) var<uniform> cirrus : CirrusParams');
+    expect(CLOUD_SHADOW_BAKE_WGSL).toContain('struct CloudShadowParams');
+    // 消费侧生成器契约零回归：receiver module 无卷云痕迹（逐字节稳定）。
+    expect(CLOUD_SHADOW_RECEIVER_MODULE).not.toContain('cirrus');
   });
 });
 
