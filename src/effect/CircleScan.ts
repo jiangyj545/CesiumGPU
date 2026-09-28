@@ -82,6 +82,8 @@ export class CircleScan implements IPass {
   private _bindGroup: GPUBindGroup | null = null;
   private _indexCount = 0;
   private _destroyed = false;
+  /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
 
   /** 每帧上传的 uniform 暂存：[viewProj(16), color(4), params(4)]。 */
   private _uniformData = new Float32Array(UNIFORM_BYTES / 4);
@@ -109,6 +111,25 @@ export class CircleScan implements IPass {
   /** 提供用于投影的相机（viewProj 每帧重传）。挂载后调用一次即可。 */
   setCamera(camera: Camera): void {
     this._camera = camera;
+  }
+
+  /**
+   * T5 真 HDR：目标格式下发（EffectManager 可选协议，Scene.render 逐帧调用
+   * 当前渲染目标格式）。变更时置空管线/缓冲由 prepare() 惰性守卫整体重建
+   * （_prepare 为单体式——管线建在缓冲之后，须一并销毁旧缓冲防泄漏）；同
+   * 格式幂等早退。未接线的调用路径保持 preferredFormat 旧行为。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (this._destroyed || format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._pipeline = null;
+    this._bindGroup = null;
+    this._vertexBuffer?.destroy();
+    this._indexBuffer?.destroy();
+    this._uniformBuffer?.destroy();
+    this._vertexBuffer = null;
+    this._indexBuffer = null;
+    this._uniformBuffer = null;
   }
 
   /** 幂等初始化（管线 / 缓冲 / bindGroup）。 */
@@ -302,7 +323,7 @@ export class CircleScan implements IPass {
         module,
         entryPoint: 'fs_main',
         targets: [{
-          format: this._context.preferredFormat,
+          format: this._targetFormat ?? this._context.preferredFormat,
           blend: {
             color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
             alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },

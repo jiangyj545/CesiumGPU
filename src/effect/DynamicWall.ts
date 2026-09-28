@@ -81,6 +81,8 @@ export class DynamicWall implements IPass {
   private _indexBuffer: GPUBuffer | null = null;
   private _cameraUBO: GPUBuffer | null = null;
   private _paramsUBO: GPUBuffer | null = null;
+  /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
 
   /** 与 Scene._uploadCameraUBO 相同的 256B 布局。 */
   private static readonly CAMERA_UBO_BYTES = CAMERA_UBO_SIZE;
@@ -103,6 +105,27 @@ export class DynamicWall implements IPass {
   /** 流速倍率（实时可调，下一帧生效）。 */
   get speed(): number { return this._speed; }
   set speed(v: number) { this._speed = Math.max(0, v); }
+
+  /**
+   * T5 真 HDR：目标格式下发（EffectManager 可选协议，Scene.render 逐帧调用
+   * 当前渲染目标格式）。变更时置空管线/缓冲由 prepare() 惰性守卫整体重建
+   * （prepare 为单体式——须一并销毁旧缓冲防泄漏）；同格式幂等早退。未接线
+   * 的调用路径保持 preferredFormat 旧行为。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._pipeline = null;
+    this._bindGroup = null;
+    this._cameraUBO?.destroy();
+    this._paramsUBO?.destroy();
+    this._vertexBuffer?.destroy();
+    this._indexBuffer?.destroy();
+    this._cameraUBO = null;
+    this._paramsUBO = null;
+    this._vertexBuffer = null;
+    this._indexBuffer = null;
+  }
 
   /** @inheritdoc IPass - 幂等初始化（管线 / 缓冲 / bindGroup）。 */
   prepare(): void {
@@ -138,7 +161,7 @@ export class DynamicWall implements IPass {
         entryPoint: 'fs_main',
         targets: [
           {
-            format: this._context.preferredFormat,
+            format: this._targetFormat ?? this._context.preferredFormat,
             // 叠加发光：color = src.rgb * src.a + dst（premultiplied-ish additive）。
             blend: {
               color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },

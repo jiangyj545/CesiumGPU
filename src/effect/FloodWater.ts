@@ -107,6 +107,8 @@ export class FloodWater implements IPass {
   private _indexBuffer: GPUBuffer | null = null;
   private _cameraUBO: GPUBuffer | null = null;
   private _paramsUBO: GPUBuffer | null = null;
+  /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
 
   /** 与 Scene._uploadCameraUBO 相同的 256B 布局。 */
   private static readonly CAMERA_UBO_BYTES = CAMERA_UBO_SIZE;
@@ -183,6 +185,24 @@ export class FloodWater implements IPass {
     this._indexBuffer = null;
   }
 
+  /**
+   * T5 真 HDR：目标格式下发（EffectManager 可选协议，Scene.render 逐帧调用
+   * 当前渲染目标格式）。变更时置空管线由 prepare() 的 `if (!this._pipeline)`
+   * 守卫惰性重建（管线/BGL/UBO/bindGroup 同在该守卫块内——销毁旧 UBO 防泄
+   * 漏；顶/索引缓冲与格式无关保留复用）；同格式幂等早退。未接线的调用路径
+   * 保持 preferredFormat 旧行为。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._cameraUBO?.destroy();
+    this._paramsUBO?.destroy();
+    this._pipeline = null;
+    this._bindGroup = null;
+    this._cameraUBO = null;
+    this._paramsUBO = null;
+  }
+
   /** @inheritdoc IPass - 幂等初始化（管线 / 缓冲 / bindGroup）。 */
   prepare(): void {
     if (this._pipeline && this._vertexBuffer && this._indexBuffer && this._bindGroup) return;
@@ -219,7 +239,7 @@ export class FloodWater implements IPass {
           entryPoint: 'fs_main',
           targets: [
             {
-              format: this._context.preferredFormat,
+              format: this._targetFormat ?? this._context.preferredFormat,
               // 半透明覆盖底图；岸线以上片元 FS 输出 alpha 0 随混合剔除。
               blend: {
                 color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },

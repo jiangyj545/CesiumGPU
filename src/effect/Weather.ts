@@ -118,7 +118,11 @@ export class Weather implements IPass {
   private readonly _paramsBuffer: GPUBuffer;
   private readonly _seedBuffer: GPUBuffer;
   private readonly _quadBuffer: GPUBuffer;
-  private readonly _pipeline: GPURenderPipeline;
+  /** 渲染管线共享 BGL（setTargetFormat 重建管线时 bind group 原样复用）。 */
+  private readonly _bgl: GPUBindGroupLayout;
+  /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
+  private _pipeline: GPURenderPipeline;
   private readonly _bindGroup: GPUBindGroup;
 
   private readonly _params = new Float32Array(PARAMS_FLOATS);
@@ -179,61 +183,15 @@ export class Weather implements IPass {
     );
 
     // ── Render pipeline (instanced quads; blending by weather type) ────────
-    const module = context.createShaderModule(WEATHER_SHADER, `${this.label}.Module`);
-    const bgl = device.createBindGroupLayout({
+    this._bgl = device.createBindGroupLayout({
       label: `${this.label}.BGL`,
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
     });
-    const isRain = this._type === 'rain';
-    this._pipeline = device.createRenderPipeline({
-      label: `${this.label}.Pipeline`,
-      layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
-      vertex: {
-        module,
-        entryPoint: isRain ? 'vs_rain' : 'vs_snow',
-        buffers: [
-          {
-            // Per-vertex quad corner.
-            arrayStride: 8,
-            stepMode: 'vertex',
-            attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
-          },
-          {
-            // Per-instance seed vec4.
-            arrayStride: 16,
-            stepMode: 'instance',
-            attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x4' }],
-          },
-        ],
-      },
-      fragment: {
-        module,
-        entryPoint: isRain ? 'fs_rain' : 'fs_snow',
-        targets: [{
-          format: context.preferredFormat,
-          blend: isRain
-            ? { // additive: pale streaks glow over the lit scene
-                color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
-                alpha: { srcFactor: 'one',       dstFactor: 'one', operation: 'add' },
-              }
-            : { // standard alpha for soft white flakes
-                color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-                alpha: { srcFactor: 'one',       dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              },
-        }],
-      },
-      primitive: { topology: 'triangle-strip' },
-      // Depth-test against the G-Buffer depth; never write it.
-      depthStencil: {
-        format: 'depth32float',
-        depthWriteEnabled: false,
-        depthCompare: 'less',
-      },
-    });
+    this._pipeline = this._buildRenderPipeline();
     this._bindGroup = device.createBindGroup({
-      layout: bgl,
+      layout: this._bgl,
       entries: [{ binding: 0, resource: { buffer: this._paramsBuffer } }],
     });
   }
@@ -266,6 +224,19 @@ export class Weather implements IPass {
   setDepthView(view: GPUTextureView | null): void {
     this._depthView = view;
     if (view !== null) this._warnedNoDepth = false;
+  }
+
+  /**
+   * T5 真 HDR: target format delivery (optional EffectManager protocol;
+   * Scene.render calls it every frame with the current render target format).
+   * On change the render pipeline is rebuilt (buffers / BGL / bind group are
+   * format-independent and reused as-is); same format returns early (idempotent).
+   * Call paths without this protocol keep the previous preferredFormat behavior.
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (this._destroyed || format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._pipeline = this._buildRenderPipeline();
   }
 
   /** IPass: GPU resources are built in the constructor; nothing to do. */
@@ -390,6 +361,64 @@ export class Weather implements IPass {
     this._paramsBuffer.destroy();
     this._seedBuffer.destroy();
     this._quadBuffer.destroy();
+  }
+
+  /**
+   * Build / rebuild the render pipeline (shared by the constructor and
+   * setTargetFormat; the descriptor matches the pre-extraction one field for
+   * field, with the target format taken from _targetFormat, falling back to
+   * the context preferredFormat while null). Instanced quads with per-type
+   * blending and the read-only G-Buffer depth test are unchanged.
+   */
+  private _buildRenderPipeline(): GPURenderPipeline {
+    const device = this._context.device;
+    const module = this._context.createShaderModule(WEATHER_SHADER, `${this.label}.Module`);
+    const isRain = this._type === 'rain';
+    return device.createRenderPipeline({
+      label: `${this.label}.Pipeline`,
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this._bgl] }),
+      vertex: {
+        module,
+        entryPoint: isRain ? 'vs_rain' : 'vs_snow',
+        buffers: [
+          {
+            // Per-vertex quad corner.
+            arrayStride: 8,
+            stepMode: 'vertex',
+            attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
+          },
+          {
+            // Per-instance seed vec4.
+            arrayStride: 16,
+            stepMode: 'instance',
+            attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x4' }],
+          },
+        ],
+      },
+      fragment: {
+        module,
+        entryPoint: isRain ? 'fs_rain' : 'fs_snow',
+        targets: [{
+          format: this._targetFormat ?? this._context.preferredFormat,
+          blend: isRain
+            ? { // additive: pale streaks glow over the lit scene
+                color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                alpha: { srcFactor: 'one',       dstFactor: 'one', operation: 'add' },
+              }
+            : { // standard alpha for soft white flakes
+                color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                alpha: { srcFactor: 'one',       dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              },
+        }],
+      },
+      primitive: { topology: 'triangle-strip' },
+      // Depth-test against the G-Buffer depth; never write it.
+      depthStencil: {
+        format: 'depth32float',
+        depthWriteEnabled: false,
+        depthCompare: 'less',
+      },
+    });
   }
 
   /**

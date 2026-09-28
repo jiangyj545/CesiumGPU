@@ -112,6 +112,8 @@ export class HeatmapLayer implements IPass {
   private _paramsUBO: GPUBuffer | null = null;
   private _texture: GPUTexture | null = null;
   private _sampler: GPUSampler | null = null;
+  /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
 
   /** 当前纹理覆盖的经纬度包围盒 [minLon, minLat, maxLon, maxLat]（度）。 */
   private _bounds: [number, number, number, number] | null = null;
@@ -160,6 +162,28 @@ export class HeatmapLayer implements IPass {
     this._uploadTexture();
   }
 
+  /**
+   * T5 真 HDR：目标格式下发（EffectManager 可选协议，Scene.render 逐帧调用
+   * 当前渲染目标格式）。变更时置空管线/缓冲由 prepare() 惰性守卫整体重建
+   * （prepare 为单体式——纹理重画/网格重建成路径的一部分，须一并销毁旧
+   * 缓冲防泄漏；_uploadTexture 自毁旧纹理）；同格式幂等早退。未接线的调用
+   * 路径保持 preferredFormat 旧行为。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._pipeline = null;
+    this._bindGroup = null;
+    this._cameraUBO?.destroy();
+    this._paramsUBO?.destroy();
+    this._vertexBuffer?.destroy();
+    this._indexBuffer?.destroy();
+    this._cameraUBO = null;
+    this._paramsUBO = null;
+    this._vertexBuffer = null;
+    this._indexBuffer = null;
+  }
+
   /** @inheritdoc IPass - 幂等初始化（管线 / 网格 / 纹理 / bindGroup）。 */
   prepare(): void {
     if (this._pipeline) return;
@@ -195,7 +219,7 @@ export class HeatmapLayer implements IPass {
         entryPoint: 'fs_main',
         targets: [
           {
-            format: this._context.preferredFormat,
+            format: this._targetFormat ?? this._context.preferredFormat,
             // additive 发光叠加（与 DynamicWall 同款 src-alpha / one）。
             blend: {
               color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },

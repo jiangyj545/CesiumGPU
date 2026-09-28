@@ -82,6 +82,8 @@ export class UnderwaterFog implements IPass {
   private _bindGroup: GPUBindGroup | null = null;
   private _failed = false;
   private _destroyed = false;
+  /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
 
   /** 相机 UBO 暂存（256 B，布局单一来源 src/renderer/CameraUniforms.ts）。 */
   private _camData = new Float32Array(CAMERA_UBO_SIZE / 4);
@@ -126,6 +128,25 @@ export class UnderwaterFog implements IPass {
     this._camera = camera;
   }
 
+  /**
+   * T5 真 HDR：目标格式下发（EffectManager 可选协议，Scene.render 逐帧调用
+   * 当前渲染目标格式）。变更时销毁旧 UBO 并置空管线/BGL，由 prepare() 惰性
+   * 守卫整体重建；同格式幂等早退。未接线的调用路径保持 preferredFormat
+   * 旧行为。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (this._failed || this._destroyed
+      || format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._cameraUBO?.destroy();
+    this._paramsUBO?.destroy();
+    this._pipeline = null;
+    this._bindGroup = null;
+    this._bindGroupLayout = null;
+    this._cameraUBO = null;
+    this._paramsUBO = null;
+  }
+
   /** 幂等初始化（管线 / BGL / UBO / bindGroup）。失败置 _failed 闸禁用整效果。 */
   prepare(): void {
     if (this._failed || this._destroyed || this._pipeline) return;
@@ -159,7 +180,7 @@ export class UnderwaterFog implements IPass {
         module: shader,
         entryPoint: 'fs_main',
         targets: [{
-          format: this._context.preferredFormat,
+          format: this._targetFormat ?? this._context.preferredFormat,
           // premultiplied-alpha 叠加：FS rgb 已乘覆盖权重，薄雾区高光呈加性。
           blend: {
             color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },

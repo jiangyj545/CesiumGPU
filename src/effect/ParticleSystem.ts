@@ -149,6 +149,10 @@ export class ParticleSystem implements IPass {
 
   private _computePipeline: GPUComputePipeline;
   private _computeBindGroup: GPUBindGroup;
+  /** 渲染管线共享 BGL（setTargetFormat 重建管线时 bind group 原样复用）。 */
+  private _renderBGL: GPUBindGroupLayout;
+  /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
   private _renderPipeline: GPURenderPipeline;
   private _renderBindGroup: GPUBindGroup;
 
@@ -238,49 +242,16 @@ export class ParticleSystem implements IPass {
     });
 
     // ── Render pipeline (instanced billboards, additive blend, depth test) ─
-    const renderModule = context.createShaderModule(
-      PARTICLE_RENDER_SHADER, 'ParticleSystem.RenderModule',
-    );
-    const renderBGL = device.createBindGroupLayout({
+    this._renderBGL = device.createBindGroupLayout({
       label: 'ParticleSystem.RenderBGL',
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
-    this._renderPipeline = device.createRenderPipeline({
-      label: 'ParticleSystem.RenderPipeline',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
-      vertex: {
-        module: renderModule,
-        entryPoint: 'vs_main',
-        buffers: [{
-          arrayStride: 8, // vec2<f32> corner
-          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
-        }],
-      },
-      fragment: {
-        module: renderModule,
-        entryPoint: 'fs_main',
-        targets: [{
-          format: context.preferredFormat,
-          blend: {
-            color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
-            alpha: { srcFactor: 'one',       dstFactor: 'one', operation: 'add' },
-          },
-        }],
-      },
-      primitive: { topology: 'triangle-strip' },
-      // 深度测试读取 G-Buffer depth32float：粒子被地球/地形遮挡的部分被丢弃。
-      // 只读不写——粒子是加法发光叠加，不得污染场景深度。
-      depthStencil: {
-        format: 'depth32float',
-        depthWriteEnabled: false,
-        depthCompare: 'less',
-      },
-    });
+    this._renderPipeline = this._buildRenderPipeline();
     this._renderBindGroup = device.createBindGroup({
-      layout: renderBGL,
+      layout: this._renderBGL,
       entries: [
         { binding: 0, resource: { buffer: this._drawParamsBuffer } },
         { binding: 1, resource: { buffer: this._particleBuffer } },
@@ -305,6 +276,18 @@ export class ParticleSystem implements IPass {
    */
   setOrigin(pos: ParticleOrigin): void {
     this._origin = normalizeOrigin(pos);
+  }
+
+  /**
+   * T5 真 HDR：目标格式下发（EffectManager 可选协议，Scene.render 逐帧调用
+   * 当前渲染目标格式）。变更时重建渲染管线（compute 管线/各 buffer/BGL 与
+   * 目标格式无关原样复用，renderBindGroup 引用的 BGL 不变同样复用）；同格式
+   * 幂等早退。未接线的调用路径保持 preferredFormat 旧行为。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (this._destroyed || format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._renderPipeline = this._buildRenderPipeline();
   }
 
   /** 幂等初始化。资源在构造函数中创建（Context 已就绪），此处无需再做事。 */
@@ -407,6 +390,49 @@ export class ParticleSystem implements IPass {
     this._simParamsBuffer.destroy();
     this._drawParamsBuffer.destroy();
     this._quadBuffer.destroy();
+  }
+
+  /**
+   * 建/重建渲染管线（构造与 setTargetFormat 共用；descriptor 与拆出前逐字段
+   * 一致，目标格式取 {@link _targetFormat}，null 时回退 preferredFormat）。
+   * instanced billboard 加法混合 + G-Buffer 深度测试（只读）不变。
+   */
+  private _buildRenderPipeline(): GPURenderPipeline {
+    const device = this._context.device;
+    const renderModule = this._context.createShaderModule(
+      PARTICLE_RENDER_SHADER, 'ParticleSystem.RenderModule',
+    );
+    return device.createRenderPipeline({
+      label: 'ParticleSystem.RenderPipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this._renderBGL] }),
+      vertex: {
+        module: renderModule,
+        entryPoint: 'vs_main',
+        buffers: [{
+          arrayStride: 8, // vec2<f32> corner
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
+        }],
+      },
+      fragment: {
+        module: renderModule,
+        entryPoint: 'fs_main',
+        targets: [{
+          format: this._targetFormat ?? this._context.preferredFormat,
+          blend: {
+            color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+            alpha: { srcFactor: 'one',       dstFactor: 'one', operation: 'add' },
+          },
+        }],
+      },
+      primitive: { topology: 'triangle-strip' },
+      // 深度测试读取 G-Buffer depth32float：粒子被地球/地形遮挡的部分被丢弃。
+      // 只读不写——粒子是加法发光叠加，不得污染场景深度。
+      depthStencil: {
+        format: 'depth32float',
+        depthWriteEnabled: false,
+        depthCompare: 'less',
+      },
+    });
   }
 
   /**
