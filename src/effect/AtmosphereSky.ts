@@ -152,7 +152,14 @@ export class AtmosphereSky implements IPass {
   private _multiScatUnit: ComputeUnit | null = null;
   private _skyViewUnit: ComputeUnit | null = null;
   private _renderPipeline: GPURenderPipeline | null = null;
+  /** T5 真 HDR：Scene 经 TargetFormatAware 协议下发的场景目标格式。
+   *  null = 未下发（跟随 preferredFormat 旧行为）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
   private _renderBindGroup: GPUBindGroup | null = null;
+  /** 外部消费方（海面反射）复用的缓存视图：getter 重复调用须返回同一身份，
+   *  否则消费方按「绑定身份变化」逐帧重建 bind group。 */
+  private _skyViewExternalView: GPUTextureView | null = null;
+  private _transExternalView: GPUTextureView | null = null;
   private _failed = false;
   private _destroyed = false;
 
@@ -207,10 +214,33 @@ export class AtmosphereSky implements IPass {
     this._depthSource = source;
   }
 
-  /** skyView LUT 纹理视图（外部反射采样用；destroy 后为 null）。 */
+  /** skyView LUT 纹理视图（外部反射采样用；destroy 后为 null）。重复调用返回同一视图身份。 */
   get skyViewTexture(): GPUTextureView | null {
     if (this._destroyed || !this._skyViewLUT) return null;
-    return this._skyViewLUT.createView({ label: 'AtmosphereSky.SkyViewExternal' });
+    this._skyViewExternalView ??= this._skyViewLUT.createView({ label: 'AtmosphereSky.SkyViewExternal' });
+    return this._skyViewExternalView;
+  }
+
+  /** transmittance LUT 纹理视图（外部透射采样，如海面太阳染色；destroy 后 null）。 */
+  get transmittanceTexture(): GPUTextureView | null {
+    if (this._destroyed || !this._transLUT) return null;
+    this._transExternalView ??= this._transLUT.createView({ label: 'AtmosphereSky.TransmittanceExternal' });
+    return this._transExternalView;
+  }
+
+  /**
+   * AtmosphereParams UBO（64B，prepare 后有效；destroy 后 null）——海面反射
+   * 直接绑同一 buffer：同帧内本 pass execute 先写入最新参数，消费方读到一致数据。
+   */
+  get atmosphereParamsBuffer(): GPUBuffer | null {
+    if (this._destroyed) return null;
+    return this._atmoUBO;
+  }
+
+  /** SkyParams UBO（64B：moonDir/starIntensity/sunDir/time 等；destroy 后 null）。 */
+  get skyParamsBuffer(): GPUBuffer | null {
+    if (this._destroyed) return null;
+    return this._skyUBO;
   }
 
   /**
@@ -231,6 +261,15 @@ export class AtmosphereSky implements IPass {
   }
 
   /** @inheritdoc IPass - 幂等初始化（LUT 纹理 / 管线 / bindGroup）。 */
+  /** @inheritdoc TargetFormatAware - 场景目标格式切换（T5 真 HDR）：置空渲染
+   * 管线，_prepare() 的 if(!pipeline) 守卫段（BGL/pipeline/bindGroup）整段重建。 */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (this._failed || this._destroyed
+      || format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._renderPipeline = null;
+  }
+
   prepare(): void {
     if (this._failed) return;
     try {
@@ -365,6 +404,8 @@ export class AtmosphereSky implements IPass {
     this._skyViewUnit = null;
     this._renderPipeline = null;
     this._renderBindGroup = null;
+    this._skyViewExternalView = null;
+    this._transExternalView = null;
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -555,7 +596,7 @@ export class AtmosphereSky implements IPass {
         label: 'AtmosphereSky.Render',
         layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
         vertex: { module, entryPoint: 'vs_main' },
-        fragment: { module, entryPoint: 'fs_main', targets: [{ format: this._context.preferredFormat }] },
+        fragment: { module, entryPoint: 'fs_main', targets: [{ format: this._targetFormat ?? this._context.preferredFormat }] },
         primitive: { topology: 'triangle-list' },
         // GBufferPass 深度格式（depth32float）；VS 输出 NDC z=1 恰与背景深度相等
         depthStencil: { format: 'depth32float', depthWriteEnabled: false, depthCompare: 'equal' },

@@ -4,6 +4,7 @@ import { SeabedHeightField } from '../../src/effect/SeabedHeightField';
 import {
   OCEAN_FFT_RENDER_SHADER,
   OCEAN_RENDER_PARAMS_UBO_BYTES,
+  OCEAN_BREAK_PARAMS_UBO_BYTES,
 } from '../../src/shaders/OceanFFTShader';
 import type { Camera } from '../../src/scene/Camera';
 import type { Context } from '../../src/renderer/Context';
@@ -27,9 +28,12 @@ const RP_UV_OFF_X = 28;
 const RP_UV_OFF_Z = 29;
 const RP_UV_SCL_X = 30;
 const RP_UV_SCL_Z = 31;
+/** L5 featureFlags（underwater.w）：bit0 天空反射 / bit1 SSS / bit2 破碎波 / bit3 染色。 */
+const RP_FEATURE_FLAGS = 23;
 
 /** GPUShaderStage.FRAGMENT（mock 环境常量值，与 beforeAll 注入一致）。 */
 const STAGE_FRAGMENT = 2;
+const STAGE_VERTEX = 1;
 
 interface UboWrite {
   label: string;
@@ -191,7 +195,8 @@ describe('OceanFFTWater 岸线泡沫注入（L4-A）', () => {
     if (!bgl) throw new Error('渲染 BGL 未创建');
     expect(bgl.entries[13].binding).toBe(13);
     expect(bgl.entries[13].texture?.sampleType).toBe('unfilterable-float');
-    expect(bgl.entries[13].visibility).toBe(STAGE_FRAGMENT);
+    // T4 起顶点阶段也 textureLoad（破碎波波形变形）→ 双阶段
+    expect(bgl.entries[13].visibility).toBe(STAGE_VERTEX | STAGE_FRAGMENT);
   });
 
   it('bindSeabed(field) 置位 flag 且 binding 13 换场视图；bindSeabed(null) 清位回占位', () => {
@@ -224,6 +229,42 @@ describe('OceanFFTWater 岸线泡沫注入（L4-A）', () => {
     ocean.setShoreStrength(2.5);
     ocean.execute(encoder, {} as GPUTextureView, 0.032);
     expect(rpAt(h, -1)[RP_SHORE_STRENGTH]).toBe(2.5);
+  });
+
+  it('setBreakWave 置 RP[23].bit2 且 binding 19 UBO gain.x=1；null 复位归零（T4）', () => {
+    const h = makeHarness();
+    const ocean = makeOcean(h.ctx);
+    ocean.updateCamera(makeCamera());
+    ocean.bindSeabed(makeSeabed(h.ctx, 121.0, 31.0));
+
+    // 未启用：bit2=0，breakParams UBO 全零
+    ocean.execute(encoder, {} as GPUTextureView, 0.016);
+    expect(rpAt(h, -1)[RP_FEATURE_FLAGS] & 4).toBe(0);
+    let bk = h.uboWrites.find((w) => w.label === 'OceanFFTBreakParamsUBO');
+    expect(bk).toBeDefined();
+    expect(bk!.f32[0]).toBe(0);
+
+    ocean.setBreakWave({ ampScale: 1.3, lean: 0.6, bandNearM: 3, bandFarM: 8 });
+    ocean.execute(encoder, {} as GPUTextureView, 0.032);
+    expect(rpAt(h, -1)[RP_FEATURE_FLAGS] & 4).toBe(4);
+    const bks = h.uboWrites.filter((w) => w.label === 'OceanFFTBreakParamsUBO');
+    bk = bks[bks.length - 1];
+    expect(bk.f32[0]).toBe(1);        // gain.x = enable
+    expect(bk.f32[1]).toBeCloseTo(1.3, 6);
+    expect(bk.f32[2]).toBeCloseTo(0.6, 6);
+    expect(bk.f32[4]).toBe(3);        // bandNear
+    expect(bk.f32[5]).toBe(8);        // bandFar
+
+    ocean.setBreakWave(null);
+    ocean.execute(encoder, {} as GPUTextureView, 0.048);
+    expect(rpAt(h, -1)[RP_FEATURE_FLAGS] & 4).toBe(0);
+  });
+
+  it('setBreakWave bandFar <= bandNear 抛错（防反序 smoothstep 边界重叠 NaN）', () => {
+    const h = makeHarness();
+    const ocean = makeOcean(h.ctx);
+    expect(() => ocean.setBreakWave({ bandNearM: 8, bandFarM: 3 })).toThrow(/bandFarM/);
+    expect(() => ocean.setBreakWave({ bandNearM: 3, bandFarM: 3 })).toThrow(/bandFarM/);
   });
 
   it('seabedUv 映射：同 center → offset(0.5,0.5)；海床偏东 200m → x=0.1、偏北 100m → y=0.3', () => {
@@ -286,5 +327,34 @@ describe('OCEAN_FFT_RENDER_SHADER 岸线泡沫源串', () => {
     expect(s).toContain('varedgeFade=1.0;');
     expect(s).toContain('letcovTotal=foam*jacW+shoreCov+wakeFoam;');
     expect(s).toContain('letcoverage=clamp(covTotal,0.0,1.0);');
+  });
+
+  it('T4 破碎波：binding 19 / BreakParams / VS 变形 / FS 花边与内卷水幕源串', () => {
+    expect(s).toContain('@binding(19)var<uniform>breakParams:BreakParams');
+    expect(s).toContain('gain:vec4<f32>');
+    expect(s).toContain('band:vec4<f32>');
+    expect(OCEAN_BREAK_PARAMS_UBO_BYTES).toBe(64);
+    // VS：海床 textureLoad → 水深 → 破碎权重；振幅调制 + 波峰前倾
+    expect(s).toContain('@location(4)breakW:f32');
+    expect(s).toContain('breakW=smoothstep(breakParams.band.y,breakParams.band.x,disp.y-sbH)');
+    expect(s).toContain('disp.y*=mix(1.0,breakParams.gain.y,breakW)');
+    expect(s).toContain('disp.xz-=g0.xy*max(disp.y,0.0)*breakParams.gain.z*breakW');
+    // FS：foam lace 独立 smoothstep + 内卷水幕（nLit·viewDir<0 背面门）
+    expect(s).toContain('letlaceW=smoothstep(breakParams.band.w,breakParams.band.w*0.35,shoreDepth)');
+    expect(s).toContain('letbackFace=select(0.0,1.0,dot(nLit,viewDir)<0.0)');
+    expect(s).toContain('foamMask=clamp(foamMask+foamW*0.5,0.0,1.0)');
+  });
+
+  it('T4 binding 19 BGL 双阶段 + minBindingSize 64B', () => {
+    const h = makeHarness();
+    const ocean = makeOcean(h.ctx);
+    ocean.updateCamera(makeCamera());
+    ocean.execute(encoder, {} as GPUTextureView, 0.016); // BGL 在 prepare 惰性创建
+    const bgl = h.layouts.find((l) => l.label === 'OceanFFTRenderBGL');
+    if (!bgl) throw new Error('渲染 BGL 未创建');
+    expect(bgl.entries[19].binding).toBe(19);
+    expect(bgl.entries[19].buffer?.type).toBe('uniform');
+    expect(bgl.entries[19].buffer?.minBindingSize).toBe(OCEAN_BREAK_PARAMS_UBO_BYTES);
+    expect(bgl.entries[19].visibility).toBe(STAGE_VERTEX | STAGE_FRAGMENT);
   });
 });

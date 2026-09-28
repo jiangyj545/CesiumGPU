@@ -142,6 +142,10 @@ export class BowSpray implements IPass {
   private _simParamsBuffer: GPUBuffer;
   private _drawParamsBuffer: GPUBuffer;
   private _quadBuffer: GPUBuffer;
+  /** 渲染管线共享 BGL（setTargetFormat 重建管线时 bind group 原样复用）。 */
+  private _renderBGL: GPUBindGroupLayout;
+  /** T5 真 HDR：当前管线目标格式（构造期 = preferredFormat，Scene 下发后跟随）。 */
+  private _targetFormat: GPUTextureFormat;
 
   private _computePipeline: GPUComputePipeline;
   private _computeBindGroup: GPUBindGroup;
@@ -234,50 +238,17 @@ export class BowSpray implements IPass {
     });
 
     // ── Render pipeline（premultiplied alpha + G-Buffer 深度测试）───────────
-    const renderModule = context.createShaderModule(
-      BOW_SPRAY_RENDER_SHADER, 'BowSpray.RenderModule',
-    );
-    const renderBGL = device.createBindGroupLayout({
+    this._targetFormat = context.preferredFormat;
+    this._renderBGL = device.createBindGroupLayout({
       label: 'BowSpray.RenderBGL',
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
-    this._renderPipeline = device.createRenderPipeline({
-      label: 'BowSpray.RenderPipeline',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
-      vertex: {
-        module: renderModule,
-        entryPoint: 'vs_main',
-        buffers: [{
-          arrayStride: 8, // vec2<f32> corner
-          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
-        }],
-      },
-      fragment: {
-        module: renderModule,
-        entryPoint: 'fs_main',
-        targets: [{
-          format: context.preferredFormat,
-          // premultiplied alpha：FS 输出 rgb 已乘 a → src = 'one'
-          blend: {
-            color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-          },
-        }],
-      },
-      primitive: { topology: 'triangle-strip' },
-      // 深度测试读取 G-Buffer depth32float：喷雾被船体/地形正确遮挡；
-      // 只读不写——透明粒子不得污染场景深度（ParticleSystem 同款）。
-      depthStencil: {
-        format: 'depth32float',
-        depthWriteEnabled: false,
-        depthCompare: 'less',
-      },
-    });
+    this._renderPipeline = this._buildRenderPipeline();
     this._renderBindGroup = device.createBindGroup({
-      layout: renderBGL,
+      layout: this._renderBGL,
       entries: [
         { binding: 0, resource: { buffer: this._drawParamsBuffer } },
         { binding: 1, resource: { buffer: this._particleBuffer } },
@@ -319,6 +290,18 @@ export class BowSpray implements IPass {
   /** 清除内部船状态：此后零发射（直到下一次 setBoat）。 */
   clearBoat(): void {
     this._boat = null;
+  }
+
+  /**
+   * T5 真 HDR：目标格式下发（EffectManager 可选协议，Scene.render 逐帧调用
+   * 当前渲染目标格式）。变更时重建渲染管线（compute 管线/各 buffer 与目标
+   * 格式无关原样复用；renderBindGroup 引用的 BGL 不变，同样复用）；同格式
+   * 幂等早退。未接线的调用路径保持 preferredFormat 旧行为。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (this._destroyed || format === this._targetFormat) return;
+    this._targetFormat = format;
+    this._renderPipeline = this._buildRenderPipeline();
   }
 
   /** 幂等初始化。资源在构造函数中创建（Context 已就绪），此处无需再做事。 */
@@ -472,6 +455,53 @@ export class BowSpray implements IPass {
     this._simParamsBuffer.destroy();
     this._drawParamsBuffer.destroy();
     this._quadBuffer.destroy();
+  }
+
+  // ── 内部 ───────────────────────────────────────────────────────────────────
+
+  /**
+   * 建/重建渲染管线（构造与 setTargetFormat 共用；descriptor 与拆出前逐字段
+   * 一致，目标格式取 {@link _targetFormat}）。premultiplied alpha + G-Buffer
+   * 深度测试（只读）不变。
+   */
+  private _buildRenderPipeline(): GPURenderPipeline {
+    const device = this._context.device;
+    const renderModule = device.createShaderModule({
+      code: BOW_SPRAY_RENDER_SHADER,
+      label: 'BowSpray.RenderModule',
+    });
+    return device.createRenderPipeline({
+      label: 'BowSpray.RenderPipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this._renderBGL] }),
+      vertex: {
+        module: renderModule,
+        entryPoint: 'vs_main',
+        buffers: [{
+          arrayStride: 8, // vec2<f32> corner
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
+        }],
+      },
+      fragment: {
+        module: renderModule,
+        entryPoint: 'fs_main',
+        targets: [{
+          format: this._targetFormat,
+          // premultiplied alpha：FS 输出 rgb 已乘 a → src = 'one'
+          blend: {
+            color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          },
+        }],
+      },
+      primitive: { topology: 'triangle-strip' },
+      // 深度测试读取 G-Buffer depth32float：喷雾被船体/地形正确遮挡；
+      // 只读不写——透明粒子不得污染场景深度（ParticleSystem 同款）。
+      depthStencil: {
+        format: 'depth32float',
+        depthWriteEnabled: false,
+        depthCompare: 'less',
+      },
+    });
   }
 }
 

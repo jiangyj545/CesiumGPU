@@ -47,7 +47,9 @@ export const BLOOM_LEVELS_MAX = 6;
 export function defaultPostProcessConfig(): PostProcessConfig {
   return {
     enabled: false,
-    bloom: { enabled: true, threshold: 0.8, knee: 0.5, intensity: 1.0, levels: 5 },
+    // T5 真 HDR：场景色 rgba16float 线性域后 LDR 内容 luma ≤ 1，阈值默认
+    // 提到 1.0 —— 只提取 HDR 超亮部分（HDR 高光/焦散/喷雾），LDR 内容不再误发光。
+    bloom: { enabled: true, threshold: 1.0, knee: 0.5, intensity: 1.0, levels: 5 },
     lensFlare: { enabled: true, intensity: 0.8, ghosts: 5, dirtTexture: null },
     toneMapping: 'aces',
   };

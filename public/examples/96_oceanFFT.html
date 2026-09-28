@@ -51,6 +51,10 @@
       <label class="checkline"><input id="shoreFoamToggle" type="checkbox" checked /> 岸线泡沫</label>
       <label class="checkline"><input id="wetSandToggle" type="checkbox" checked /> 湿沙线</label>
       <label class="checkline"><input id="sprayToggle" type="checkbox" checked /> 船首喷雾</label>
+      <label class="checkline"><input id="skyReflectToggle" type="checkbox" checked /> 大气反射</label>
+      <label class="checkline"><input id="sssToggle" type="checkbox" checked /> 波峰透光</label>
+      <label class="checkline"><input id="sunTintToggle" type="checkbox" checked /> 太阳染色</label>
+      <label class="checkline"><input id="breakSprayToggle" type="checkbox" checked /> 破碎喷雾</label>
     </div>
     <button id="diveBtn" style="margin-top:10px;width:100%;padding:6px 0;cursor:pointer;
       background:#12395c;color:#8ee6ff;border:1px solid rgba(120,180,255,.4);border-radius:6px;
@@ -144,6 +148,29 @@
       floor.bindSeabed(seabedField);  // 海床：起伏 + 湿沙线
       floor.shoreStrength = 0.8;
 
+      // ── 5c. L5 物大气接线（tidewater 观感追赶）：海面逐像素反射 / 太阳染色 /
+      //    波峰 SSS 直接绑 AtmosphereSky 的 LUT/UBO。getter 每帧惰性求值——
+      //    sky prepare 后资源才存在，未就绪帧自动回退旧平色路径（零回归）。
+      const bindAtmo = () => ({
+        skyView: sky.skyViewTexture,
+        transmittance: sky.transmittanceTexture,
+        atmosphereParams: sky.atmosphereParamsBuffer,
+        skyParams: sky.skyParamsBuffer,
+      });
+      ocean.bindAtmosphere(bindAtmo);
+      ocean.setSubsurfaceStrength(1.0);
+
+      // ── 5d. T4 深度感知破碎波：沙洲岸线带（VS 波形变形 + FS 泡沫花边/内卷
+      //    水幕）；BreakSpray 吸附源复用同一张 SeabedHeightField 视图 + 位移
+      //    纹理（ocean.breakSpraySeabed getter，每帧惰性求值）。
+      ocean.setBreakWave({
+        ampScale: 1.3, lean: 0.55, laceGain: 0.85,
+        bandNearM: 3, bandFarM: 8, curlShade: 0.55, laceThresholdM: 1.6,
+      });
+      const sbEnu = enuBasis(sbLon, sbLat);   // 函数声明提升，section 8 定义
+      const breakCenter = [0, 0, 0];
+      engine.ecefFromLonLatHeight(sbLon, sbLat, 0, breakCenter);
+
       // ── 6. effects 挂载顺序即执行顺序：wake(数据) → sky(背景) → ocean
       //      → caustics(纹理生成) → floor(半透明叠画在水面上)
       //      → spray(船首喷雾粒子，GBuffer 深度测试) → uwFog(全屏罩)
@@ -153,11 +180,26 @@
         particleDensity: 0.6,
       });
       const spray = new engine.BowSpray(context, { maxParticles: 2048, scene: viewer.scene });
+      // L5/T4 岸线破碎波喷雾：发射带 = 沙洲岸线（吸附源取 ocean 的海床/位移视图）
+      const breakSpray = new engine.BreakSpray(context, {
+        maxParticles: 2048,
+        scene: viewer.scene,
+        seabed: () => ocean.breakSpraySeabed,
+      });
+      breakSpray.setBand({
+        centerEcef: { x: breakCenter[0], y: breakCenter[1], z: breakCenter[2] },
+        alongDir: { x: sbEnu.east[0], y: sbEnu.east[1], z: sbEnu.east[2] },
+        widthM: 420,
+        nearDepth: 3,
+        farDepth: 8,
+        intensity: 1,
+      });
       viewer.scene.effects.add(wakeField);
       viewer.scene.effects.add(sky);
       viewer.scene.effects.add(ocean);
       viewer.scene.effects.add(caustics);
       viewer.scene.effects.add(floor);
+      viewer.scene.effects.add(breakSpray); // T4 破碎喷雾：ocean/floor 之后（吸附当帧视图）
       viewer.scene.effects.add(spray); // L4 船首喷雾：floor 之后、uwFog 之前
       viewer.scene.effects.add(uwFog); // L3 水下观感：罩在所有场景效果之上
 
@@ -230,11 +272,13 @@
           CEN_LAT + pz / METERS_PER_DEG,
         ];
       }
-      const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-      const add3 = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-      const scl3 = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
-      const crs3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-      const nrm3 = (a) => { const m = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / m, a[1] / m, a[2] / m]; };
+      // function 声明提升：section 5d（enuBasis 调用）先于本节执行——const
+      // 箭头函数会触发 TDZ（Cannot access 'nrm3' before initialization）。
+      function sub3(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+      function add3(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+      function scl3(a, s) { return [a[0] * s, a[1] * s, a[2] * s]; }
+      function crs3(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+      function nrm3(a) { const m = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / m, a[1] / m, a[2] / m]; }
 
       // ENU 基（每米归一化 ECEF 增量，数值差分含极轴压扁——与引擎同源约定）
       function enuBasis(lon, lat) {
@@ -407,6 +451,19 @@
         spray.show = e.target.checked;
         if (!e.target.checked) spray.clearBoat(); // 防残留粒子
       });
+      // L5 开关：大气反射 / 波峰透光（SSS）/ 太阳染色 / 破碎喷雾
+      document.getElementById('skyReflectToggle').addEventListener('change', (e) => {
+        ocean.bindAtmosphere(e.target.checked ? bindAtmo : null);
+      });
+      document.getElementById('sssToggle').addEventListener('change', (e) => {
+        ocean.setSubsurfaceStrength(e.target.checked ? 1.0 : 0);
+      });
+      document.getElementById('sunTintToggle').addEventListener('change', (e) => {
+        ocean.setSunTint(e.target.checked);
+      });
+      document.getElementById('breakSprayToggle').addEventListener('change', (e) => {
+        breakSpray.show = e.target.checked;
+      });
 
       // ── 11. QA 钩子（CDP 终验用：等效于面板操作）──────────────────────
       const ck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
@@ -429,6 +486,11 @@
         setShoreFoam(b) { ocean.setShoreStrength(b ? 1.0 : 0); ck('shoreFoamToggle', b); },
         setWetSand(b) { floor.shoreStrength = b ? 0.8 : 0; ck('wetSandToggle', b); },
         setSpray(b) { spray.show = b; if (!b) spray.clearBoat(); ck('sprayToggle', b); },
+        // ── L5 探针扩展：大气反射 / 波峰透光 / 太阳染色 / 破碎喷雾 ─────
+        setSkyReflect(b) { ocean.bindAtmosphere(b ? bindAtmo : null); ck('skyReflectToggle', b); },
+        setSss(b) { ocean.setSubsurfaceStrength(b ? 1.0 : 0); ck('sssToggle', b); },
+        setSunTint(b) { ocean.setSunTint(b); ck('sunTintToggle', b); },
+        setBreakSpray(b) { breakSpray.show = b; ck('breakSprayToggle', b); },
         setTimeScale(v) {
           ocean.setTimeScale(v);
           const el = document.getElementById('timeScale');

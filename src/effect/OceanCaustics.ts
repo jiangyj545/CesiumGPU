@@ -67,6 +67,10 @@ const BROAD_CASCADE = 2;
  * 与相机无关（正交投射平面米 → NDC），故不实现 updateCamera；导数纹理经
  * FFTDataSource 解耦获取，每帧随 OceanFFTWater 的波场同步更新。
  *
+ * T5 真 HDR 注：本 pass 渲染目标是自持的离屏 rgba16float 焦散纹理（execute
+ * 忽略 Scene 下发的 target），场景目标格式与其管线无关，故不接 EffectManager
+ * 的 setTargetFormat 协议（CausticsFloor/BowSpray 已接）。
+ *
  * @example
  * ```typescript
  * const caustics = scene.effects.add(new OceanCaustics(scene.context, {

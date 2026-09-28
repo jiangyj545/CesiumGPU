@@ -177,6 +177,10 @@ export type { SeabedHeightOptions } from './effect/SeabedHeightField';
 export { BowSpray, computeEmitDemand, sprayGate } from './effect/BowSpray';
 export type { BowSprayBoatState, BowSprayOptions } from './effect/BowSpray';
 
+// L5/T4 岸线破碎波喷雾（架构照抄 BowSpray：发射源为破碎带 setBand + 海床吸附）
+export { BreakSpray, computeEmitDemand as breakSprayEmitDemand } from './effect/BreakSpray';
+export type { BreakSprayBand, BreakSprayOptions } from './effect/BreakSpray';
+
 // L3 水下观感全屏叠加（蓝绿深度雾 + 浮游颗粒 + 焦散缓动）
 export { UnderwaterFog } from './effect/UnderwaterFog';
 export type { UnderwaterFogOptions } from './effect/UnderwaterFog';

@@ -6,6 +6,17 @@ import type { IPass } from '../scene/passes/IPass';
 export type Effect = IPass & { show: boolean };
 
 /**
+ * T5 真 HDR 可选协议：实现 `setTargetFormat` 的特效在渲染目标格式变更时
+ * 重建渲染管线（Scene.render 逐帧下发当前目标格式——postProcess.enabled
+ * 时为 rgba16float 离屏 RT，否则为交换链 preferredFormat）。未实现的特效
+ * （OceanFFTWater / AtmosphereSky 暂未接线）保持 preferredFormat 旧行为
+ * 零回归；仿 `IPass.updateCamera?` 的可选方法协议，不进 IPass 接口。
+ */
+export interface TargetFormatAware {
+  setTargetFormat(format: GPUTextureFormat): void;
+}
+
+/**
  * EffectManager - 特效统一挂载点（T3.1）。
  *
  * 在 `Scene.render()` 中于 Transparent composite 之后逐个 `execute`：
@@ -34,10 +45,24 @@ export class EffectManager {
     return this._effects;
   }
 
-  /** 在 Transparent composite 之后执行所有可见特效。 */
-  execute(encoder: GPUCommandEncoder, target: GPUTextureView, time: number): void {
+  /**
+   * 在 Transparent composite 之后执行所有可见特效。
+   *
+   * @param targetFormat 当前渲染目标的颜色格式（T5 真 HDR，可选）。下发时
+   *   逐个调用实现了 {@link TargetFormatAware} 协议的特效（变更即重建管线、
+   *   同格式幂等早退由特效自守）；不传（向后兼容）不下发。
+   */
+  execute(
+    encoder: GPUCommandEncoder,
+    target: GPUTextureView,
+    time: number,
+    targetFormat?: GPUTextureFormat,
+  ): void {
     for (const effect of this._effects) {
       if (!effect.show) continue;
+      if (targetFormat !== undefined) {
+        (effect as Effect & Partial<TargetFormatAware>).setTargetFormat?.(targetFormat);
+      }
       effect.execute(encoder, target, time);
     }
   }

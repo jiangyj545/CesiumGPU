@@ -132,7 +132,6 @@ export class OverlayPass implements IPass {
    */
   prepare(): void {
     const device = this._context.device;
-    const module = device.createShaderModule({ code: OVERLAY_SHADER, label: 'OverlayShader' });
 
     this._cameraBGL = device.createBindGroupLayout({
       label: 'Overlay.BGL0',
@@ -155,56 +154,7 @@ export class OverlayPass implements IPass {
       ],
     });
 
-    const layout = device.createPipelineLayout({ bindGroupLayouts: [this._cameraBGL, this._textureBGL] });
-
-    const vertexBuffers: GPUVertexBufferLayout[] = [{
-      arrayStride: BYTES_PER_VERTEX,
-      attributes: [
-        { shaderLocation: 0, offset: 0,  format: 'float32x2' }, // pixel position
-        { shaderLocation: 1, offset: 8,  format: 'float32x2' }, // uv
-        { shaderLocation: 2, offset: 16, format: 'float32x4' }, // tint colour
-        { shaderLocation: 3, offset: 32, format: 'float32'   }, // anchor depth (z/w)
-      ],
-    }];
-
-    const blend: GPUBlendState = {
-      color: {
-        srcFactor: 'src-alpha',
-        dstFactor: 'one-minus-src-alpha',
-        operation: 'add',
-      },
-      alpha: {
-        srcFactor: 'one',
-        dstFactor: 'one-minus-src-alpha',
-        operation: 'add',
-      },
-    };
-
-    const common = {
-      layout,
-      vertex:    { module, entryPoint: 'vs_main', buffers: vertexBuffers },
-      primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode: 'none' as GPUCullMode },
-    };
-
-    this._pipelinePoint = device.createRenderPipeline({
-      ...common,
-      label: 'OverlayPointPipeline',
-      fragment: {
-        module,
-        entryPoint: 'fs_point',
-        targets: [{ format: this._format, blend }],
-      },
-    });
-
-    this._pipelineLabel = device.createRenderPipeline({
-      ...common,
-      label: 'OverlayLabelPipeline',
-      fragment: {
-        module,
-        entryPoint: 'fs_label',
-        targets: [{ format: this._format, blend }],
-      },
-    });
+    this._buildPipelines();
 
     this._cameraUBO = device.createBuffer({
       label: 'Overlay.CameraUBO',
@@ -392,6 +342,19 @@ export class OverlayPass implements IPass {
     this._height = height;
   }
 
+  /**
+   * T5 真 HDR：目标格式下发（Scene.render 逐帧调用，构造参 =
+   * Scene._sceneColorFormat 单一来源）。格式变更时重建两条 billboard 管线
+   * （bind group 缓存与目标格式无关，沿用）；prepare() 未跑过时只记录格式
+   * （prepare 按 _format 建管线）。同格式幂等早退。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (format === this._format) return;
+    this._format = format;
+    if (!this._cameraBGL || !this._textureBGL) return;
+    this._buildPipelines();
+  }
+
   destroy(): void {
     for (const entry of this._labelCache.values()) entry.texture.destroy();
     this._labelCache.clear();
@@ -406,6 +369,67 @@ export class OverlayPass implements IPass {
   }
 
   // ── Private ─────────────────────────────────────────────────────────────────
+
+  /**
+   * 建/重建两条 billboard 管线（prepare 与 setTargetFormat 共用；目标格式
+   * 取 {@link _format}）。要求 _cameraBGL/_textureBGL 已就绪（prepare 先建）。
+   */
+  private _buildPipelines(): void {
+    const device = this._context.device;
+    if (!this._cameraBGL || !this._textureBGL) return;
+
+    const module = device.createShaderModule({ code: OVERLAY_SHADER, label: 'OverlayShader' });
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [this._cameraBGL, this._textureBGL] });
+
+    const vertexBuffers: GPUVertexBufferLayout[] = [{
+      arrayStride: BYTES_PER_VERTEX,
+      attributes: [
+        { shaderLocation: 0, offset: 0,  format: 'float32x2' }, // pixel position
+        { shaderLocation: 1, offset: 8,  format: 'float32x2' }, // uv
+        { shaderLocation: 2, offset: 16, format: 'float32x4' }, // tint colour
+        { shaderLocation: 3, offset: 32, format: 'float32'   }, // anchor depth (z/w)
+      ],
+    }];
+
+    const blend: GPUBlendState = {
+      color: {
+        srcFactor: 'src-alpha',
+        dstFactor: 'one-minus-src-alpha',
+        operation: 'add',
+      },
+      alpha: {
+        srcFactor: 'one',
+        dstFactor: 'one-minus-src-alpha',
+        operation: 'add',
+      },
+    };
+
+    const common = {
+      layout,
+      vertex:    { module, entryPoint: 'vs_main', buffers: vertexBuffers },
+      primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode: 'none' as GPUCullMode },
+    };
+
+    this._pipelinePoint = device.createRenderPipeline({
+      ...common,
+      label: 'OverlayPointPipeline',
+      fragment: {
+        module,
+        entryPoint: 'fs_point',
+        targets: [{ format: this._format, blend }],
+      },
+    });
+
+    this._pipelineLabel = device.createRenderPipeline({
+      ...common,
+      label: 'OverlayLabelPipeline',
+      fragment: {
+        module,
+        entryPoint: 'fs_label',
+        targets: [{ format: this._format, blend }],
+      },
+    });
+  }
 
   /**
    * Append one axis-aligned quad centred at pixel (px, py) to the CPU scratch

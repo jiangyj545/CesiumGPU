@@ -98,17 +98,26 @@ export class Scene {
   // GPU resources are created lazily in initialize(), after context.initialize().
   private _postProcess: PostProcessManager | null = null;
   /**
+   * T5 真 HDR：场景颜色 RT 格式单一来源。postProcess.enabled 时整条渲染链
+   * （Lighting / Overlay / Transparent composite + 特效）都写 rgba16float
+   * （FP16 可混合格式，WBOIT 累积加法混合合法；HDR 范围交由后处理
+   * ToneMapping 压回交换链 LDR）。关闭后处理时各 pass 仍写交换链
+   * （preferredFormat）——目标格式经各 pass 的 setTargetFormat /
+   * setHdrOutput 逐帧同步，旧 LDR 路径零回归。
+   */
+  private readonly _sceneColorFormat: GPUTextureFormat = 'rgba16float';
+  /**
    * 场景离屏颜色 RT（postProcess.enabled 时作为 pass 循环的输出目标）。
-   * 格式跟随交换链（preferredFormat）：Overlay/Transparent/特效管线的
-   * 目标格式锁定为 preferredFormat，写入 rgba16float 会触发 WebGPU 校验
-   * 错误 —— 故 HDR 范围受 8bit 限制（已知限制，见 P2 报告）。
+   * 格式 = {@link _sceneColorFormat}（rgba16float，真 HDR）；创建与
+   * resize 重建（RenderTexture.ensure 内部）均走该单一来源。
    */
   private _sceneColorRT: RenderTexture | null = null;
   /**
    * B1 折射用场景颜色历史：postProcess.enabled 时每帧把 _sceneColorRT
    * copyTexture 进来（effects.execute 之前入队 → 特效采样到的是无特效的
-   * 底层场景色）。格式跟随交换链（与 _sceneColorRT 一致——copyTextureToTexture
-   * 要求源/目标同格式）。postProcess 未开启时保持 null（折射安全降级）。
+   * 底层场景色）。格式 = _sceneColorFormat（与 _sceneColorRT 一致
+   * ——copyTextureToTexture 要求源/目标同格式）。postProcess 未开启时
+   * 保持 null（折射安全降级）。
    * usage = RENDER_ATTACHMENT|TEXTURE_BINDING|COPY_DST（RenderTexture 固定
    * 前两项，extraUsage 传 COPY_DST）。
    */
@@ -217,32 +226,38 @@ export class Scene {
       this._gbufferPass.prepare();
 
       // Lighting pass (creates GPU buffers in constructor — device is now available)
+      // T5 真 HDR：构造参 = _sceneColorFormat 单一来源（HDR 路径目标）；
+      // LDR 路径（交换链 preferredFormat）由 LightingPass.prepare 按
+      // setHdrOutput 状态自行选择。
       this._lightingPass = new LightingPass(
         this._context,
         this._gbufferPass,
-        this._context.preferredFormat
+        this._sceneColorFormat
       );
       this._lightingPass.prepare();
 
       // Transparent pass (accumulation + composite encapsulated in execute)
+      // 第 6 参 = _sceneColorFormat（composite 目标）；accum/reveal 是内部
+      // 纹理（rgba16float / r8unorm）不受影响。LDR 切换经 setTargetFormat。
       this._transparentPass = new TransparentPass(
         this._context,
         this._gbufferPass,
         this.primitives,
         this._width,
         this._height,
-        this._context.preferredFormat,
+        this._sceneColorFormat,
         () => this.debugFrustumCulling
       );
       this._transparentPass.prepare();
 
       // Entity layer: screen-space billboards + polygon/polyline bridging.
       // Created last so host pipelines are ready for any pre-added entities.
+      // 第 4 参 = _sceneColorFormat；LDR 切换经 setTargetFormat。
       this._overlayPass = new OverlayPass(
         this._context,
         this.entities,
         this._gbufferPass,
-        this._context.preferredFormat
+        this._sceneColorFormat
       );
       this._overlayPass.prepare();
       this._entityVisualizer = new EntityVisualizer(this._context, this.entities, this);
@@ -364,17 +379,22 @@ export class Scene {
 
     // ── P2 后处理 target 分叉（唯一回归敏感点）─────────────────────────────
     // enabled=false：target === swapChainView，后续所有调用与旧路径完全一致；
-    // enabled=true ：场景写离屏 _sceneColorRT，frameHooks 后由后处理链输出。
+    // enabled=true ：场景写离屏 _sceneColorRT（rgba16float 真 HDR），frameHooks
+    // 后由后处理链输出。
     let target = swapChainView;
+    // T5 真 HDR：特效目标格式与 pass 循环同源（enabled → rgba16float 离屏
+    // RT；否则交换链 preferredFormat —— LDR 旧路径零回归）。
+    let effectTargetFormat: GPUTextureFormat = ctx.preferredFormat;
     if (this.postProcess.enabled) {
       if (!this._sceneColorRT) {
         // extraUsage COPY_SRC：折射需要把本 RT 拷入 history（原构造无 COPY_SRC，
         // copyTextureToTexture 会触发 usage 校验错误）
         this._sceneColorRT = new RenderTexture(
-          ctx.device, ctx.preferredFormat, 'Scene.SceneColorRT', GPUTextureUsage.COPY_SRC);
+          ctx.device, this._sceneColorFormat, 'Scene.SceneColorRT', GPUTextureUsage.COPY_SRC);
       }
       this._sceneColorRT.ensure(this._width, this._height);
       target = this._sceneColorRT.view!;
+      effectTargetFormat = this._sceneColorFormat;
       // LightingShader 双路径同步：HDR 直通 vs 旧 Reinhard+gamma
       this._lightingPass.setHdrOutput(true);
 
@@ -384,7 +404,7 @@ export class Scene {
       // _sceneColorHistory 恒 null，特效侧折射自动降级为不混色。
       if (!this._sceneColorHistory) {
         this._sceneColorHistory = new RenderTexture(
-          ctx.device, ctx.preferredFormat, 'Scene.SceneColorHistory', GPUTextureUsage.COPY_DST);
+          ctx.device, this._sceneColorFormat, 'Scene.SceneColorHistory', GPUTextureUsage.COPY_DST);
       }
       this._sceneColorHistory.ensure(this._width, this._height);
       const histSrc = this._sceneColorRT.texture;
@@ -400,6 +420,12 @@ export class Scene {
       this._lightingPass.setHdrOutput(false);
     }
 
+    // ── T5 真 HDR：Overlay/Transparent 无 HDR 开关感知，逐帧同步目标格式 ──
+    // 切换帧各重建一次管线（同格式幂等早退）；Transparent 的 accum/reveal
+    // 目标是内部纹理，不随场景目标变，仅 composite 管线跟随。
+    this._transparentPass?.setTargetFormat(effectTargetFormat);
+    this._overlayPass?.setTargetFormat(effectTargetFormat);
+
     for (const pass of this._renderPasses) {
       pass.updateCamera?.(this.camera);
       pass.execute(encoder, target, time);
@@ -408,8 +434,10 @@ export class Scene {
     // ── Effects (additive / emissive overlays, drawn last) ────────────────
     // 与 _renderPasses 对齐：execute 前注入相机，供依赖相机矩阵的特效
     // （如 OceanFFTWater）写 camera UBO；不依赖的特效不受影响（可选协议）。
+    // T5 真 HDR：第 4 参下发当前目标格式（实现 setTargetFormat 协议的特效
+    // 据此重建管线；未实现的保持 preferredFormat 旧行为）。
     for (const effect of this.effects.list) effect.updateCamera?.(this.camera);
-    this.effects.execute(encoder, target, time);
+    this.effects.execute(encoder, target, time, effectTargetFormat);
 
     // ── Frame hooks (extra compute / render passes on the same encoder) ───
     for (const hook of this.frameHooks) hook(encoder, target);

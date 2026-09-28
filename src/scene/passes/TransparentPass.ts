@@ -95,6 +95,20 @@ export class TransparentPass implements IPass {
   }
 
   /**
+   * T5 真 HDR：目标格式下发（Scene.render 逐帧调用，构造参 =
+   * Scene._sceneColorFormat 单一来源）。格式变更时仅重建 composite 管线
+   * （其目标 = 场景颜色输出）；accum/reveal 是内部纹理（rgba16float /
+   * r8unorm），accumulation 管线不随场景目标变。同格式幂等早退。
+   * rgba16float 为 FP16 可混合格式，WBOIT composite 的 src-alpha 混合合法。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (format === this._outputFormat) return;
+    this._outputFormat = format;
+    this._compositePipeline = null;
+    this._createCompositePipeline();
+  }
+
+  /**
    * Returns the accumulation render pipeline for use by transparent Primitive objects.
    */
   get accumulationPipeline(): GPURenderPipeline | null {

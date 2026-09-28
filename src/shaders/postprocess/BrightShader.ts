@@ -6,6 +6,10 @@ import { FULLSCREEN_VS } from './Fullscreen';
  * 阈值曲线（soft-knee 近似）：
  *   knee = 0 → 硬阈值 max(luma - threshold, 0)
  *   knee > 0 → 过渡带宽 knee*3 的平方衰减（Unity 式 soft-knee 同族近似）
+ *
+ * T5 真 HDR：threshold 无硬编码（uniform 下发），PostProcessConfig 默认
+ * 1.0 —— 场景色 rgba16float 线性域下 LDR 内容 luma ≤ 1 不再误提取，
+ * 仅 HDR 超亮部分（高光/焦散/喷雾）进入 bloom。
  */
 export const BRIGHT_SHADER = FULLSCREEN_VS + /* wgsl */`
 struct BrightParams {

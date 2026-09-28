@@ -15,6 +15,7 @@ import {
   OCEAN_FFT_RENDER_SHADER,
   OCEAN_PARAMS_UBO_BYTES,
   OCEAN_RENDER_PARAMS_UBO_BYTES,
+  OCEAN_BREAK_PARAMS_UBO_BYTES,
 } from '../shaders/OceanFFTShader';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 import { SHADOW_RECEIVER_UBO_SIZE } from '../shadow/ShadowMap';
@@ -46,6 +47,9 @@ const METERS_PER_DEG = 111320;
 /** 256 点 IFFT 的 dispatch 尺寸辅助（tidewater update() 同款）。 */
 const N_OVER_16 = N / 16;
 const N_OVER_32 = N / 32;
+
+/** AtmosphereParams/SkyParams UBO 字节（64B each，布局单一来源 AtmosphereSkyShader.ts）。 */
+const ATMO_UBO_BYTES = 64;
 
 /** 单个波浪系统参数（tidewater WaveSystem）。 */
 interface WaveSystem {
@@ -92,6 +96,60 @@ export interface OceanFFTWaterOptions {
 interface ComputeUnit {
   pipeline: GPUComputePipeline;
   bindGroup: GPUBindGroup;
+}
+
+/**
+ * L5 物理大气绑定源（AtmosphereSky 四资源；字段任一为 null → fallback +
+ * featureFlags bit0=0 短路回旧平色路径）。经 {@link OceanFFTWater.bindAtmosphere}
+ * 以 getter 形式每帧惰性求值——AtmosphereSky prepare 后资源才存在，且
+ * skyViewTexture 等视图 getter 需身份稳定（bind group 缓存键）。
+ */
+export interface OceanAtmosphereBinding {
+  /** skyView LUT 视图（`AtmosphereSky.skyViewTexture`）。 */
+  skyView: GPUTextureView | null;
+  /** transmittance LUT 视图（`AtmosphereSky.transmittanceTexture`）。 */
+  transmittance: GPUTextureView | null;
+  /** AtmosphereParams UBO 64B（`AtmosphereSky.atmosphereParamsBuffer`）。 */
+  atmosphereParams: GPUBuffer | null;
+  /** SkyParams UBO 64B（`AtmosphereSky.skyParamsBuffer`）。 */
+  skyParams: GPUBuffer | null;
+}
+
+/** T4 深度感知破碎波参数（{@link OceanFFTWater.setBreakWave}）。 */
+export interface OceanBreakWaveConfig {
+  /** 破碎带内振幅乘数（disp.y 缩放）。Default: `1.25` */
+  ampScale?: number;
+  /** 波峰前倾强度（沿梯度水平位移）。Default: `0.55` */
+  lean?: number;
+  /** 泡沫花边增益。Default: `0.85` */
+  laceGain?: number;
+  /** 破碎带近沿水深（米，全量破碎）。Default: `3` */
+  bandNearM?: number;
+  /** 破碎带远沿水深（米，须 > bandNearM）。Default: `8` */
+  bandFarM?: number;
+  /** 内卷水幕染色强度。Default: `0.55` */
+  curlShade?: number;
+  /** 花边 smoothstep 阈值（米，更贴岸的细沫带）。Default: `1.6` */
+  laceThresholdM?: number;
+}
+
+/**
+ * T4 破碎喷雾吸附源（{@link OceanFFTWater.breakSpraySeabed} → BreakSpray）：
+ * compute 端 textureLoad seabed + disp 级联0 做粒子高度吸附与水深门。
+ */
+export interface OceanSeabedSprayBinding {
+  /** 海床高度场纹理视图（r32float，R = 海拔米）。 */
+  view: GPUTextureView;
+  /** 位移纹理 2d-array 视图（.y = 波高 Dy 米；compute 吸附消费级联0）。 */
+  dispView: GPUTextureView;
+  /** 海面中心（归一化 ECEF）。 */
+  centerEcef: { x: number; y: number; z: number };
+  /** 海面 ENU 基（每米归一化 ECEF 增量）。 */
+  eastDir: { x: number; y: number; z: number };
+  northDir: { x: number; y: number; z: number };
+  /** seabed uv 仿射：uv = planeXZ * uvScale + uvOffset（与渲染 FS 同源）。 */
+  uvOffset: { x: number; y: number };
+  uvScale: { x: number; y: number };
 }
 
 /** OceanParams uniform 的 f32 元素索引（与 OceanFFTShader 的 struct 对齐）。 */
@@ -176,6 +234,8 @@ export class OceanFFTWater implements IPass {
   private _underwaterView = false;
   /** 导数纹理全 mip 2d-array 视图（FFTDataSource 公开 + 渲染绑定共用）。 */
   private _derivTextureView: GPUTextureView | null = null;
+  /** 位移纹理全 mip 2d-array 视图（T4 BreakSpray compute 吸附用，缓存身份）。 */
+  private _dispArrayView: GPUTextureView | null = null;
   /** 折射/船迹用 linear clamp 采样器（repeat 主采样器不适合非平铺纹理）。 */
   private _clampSampler: GPUSampler | null = null;
   /** 未绑定 foam/wake/history 时的 1×1 零纹理（BGL 恒全绑定的回退资源）。 */
@@ -206,6 +266,9 @@ export class OceanFFTWater implements IPass {
 
   // ── 渲染侧 GPU 资源 ──
   private _renderPipeline: GPURenderPipeline | null = null;
+  /** T5 真 HDR：Scene 经 TargetFormatAware 协议下发的场景目标格式。
+   *  null = 未下发（跟随 preferredFormat 旧行为，postProcess 关闭的 90 页零回归）。 */
+  private _targetFormat: GPUTextureFormat | null = null;
   private _renderBindGroup: GPUBindGroup | null = null;
   private _renderBindGroupLayout: GPUBindGroupLayout | null = null;
   /** bind group 缓存键：foam/wake/history 视图身份变化时才重建（wake ping-pong）。 */
@@ -216,6 +279,26 @@ export class OceanFFTWater implements IPass {
   private _bgShadow: GPUBuffer | null = null;
   /** L4-A 缓存键：seabed 高度场视图身份（bindSeabed 切换 / dispose 后换占位）。 */
   private _bgSeabed: GPUTextureView | null = null;
+  /** L5：物理大气源 getter（`() => sky 四资源快照`）。null = 旧平色路径。 */
+  private _atmoSource: (() => OceanAtmosphereBinding | null) | null = null;
+  /** L5 特性开关：天空反射（bit0，须已 bindAtmosphere）/ 太阳染色（bit3）。 */
+  private _skyReflectOn = true;
+  private _sunTintOn = true;
+  /** L5 SSS 总强度（RP[22]，0 = 关 / bit1）。 */
+  private _sssStrength = 0;
+  /** T4 破碎波配置（null = 关闭，gain.x=0 零回归）。 */
+  private _breakCfg: OceanBreakWaveConfig | null = null;
+  /** T4 破碎波 UBO 载荷（64B，每帧整体写入）。 */
+  private readonly _breakParamsF32 = new Float32Array(OCEAN_BREAK_PARAMS_UBO_BYTES / 4);
+  /** L5 大气 fallback：全零 UBO（binding 17/18 共用；LUT 复用 _fallbackView 1×1 黑）。 */
+  private _atmoFallbackUBO: GPUBuffer | null = null;
+  /** T4 破碎波 UBO。 */
+  private _breakParamsUBO: GPUBuffer | null = null;
+  /** L5 bind group 缓存键（大气 LUT ×2 + UBO ×2，身份变更才重建）。 */
+  private _bgAtmoSv: GPUTextureView | null = null;
+  private _bgAtmoTr: GPUTextureView | null = null;
+  private _bgAtmoUboA: GPUBuffer | null = null;
+  private _bgAtmoUboS: GPUBuffer | null = null;
   /** L3：阴影未激活时的占位资源（1×1 depth 2d-array + 全零 UBO + comparison）。 */
   private _shadowFallbackTex: GPUTexture | null = null;
   private _shadowFallbackView: GPUTextureView | null = null;
@@ -420,6 +503,80 @@ export class OceanFFTWater implements IPass {
     this._sceneHistorySource = source;
   }
 
+  // ── L5 集成 API（物理大气反射 / 太阳染色 / SSS / 破碎波）──────────────
+
+  /**
+   * 注入物理大气源（L5：`() => ({ skyView, transmittance, atmosphereParams,
+   * skyParams })`，四 getter 均取自同一 AtmosphereSky 实例）。每帧惰性求值，
+   * 任一字段未就绪（prepare 前 / destroy 后）自动换 fallback 资源且
+   * featureFlags bit0=0——走旧平色路径（零回归）。
+   */
+  bindAtmosphere(source: (() => OceanAtmosphereBinding | null) | null): void {
+    this._atmoSource = source;
+  }
+
+  /** 天空反射开关（featureFlags bit0；须先 bindAtmosphere 才生效）。 */
+  setSkyReflection(on: boolean): void {
+    this._skyReflectOn = on;
+  }
+
+  /** 太阳高光染色开关（featureFlags bit3；须先 bindAtmosphere 才生效）。 */
+  setSunTint(on: boolean): void {
+    this._sunTintOn = on;
+  }
+
+  /** 波峰 SSS 透光总强度（RP[22]；0 = 关 / featureFlags bit1）。 */
+  setSubsurfaceStrength(v: number): void {
+    if (!Number.isFinite(v) || v < 0) {
+      throw new Error(`OceanFFTWater.setSubsurfaceStrength: 非法 ${v}`);
+    }
+    this._sssStrength = v;
+  }
+
+  /**
+   * 深度感知破碎波（T4：VS 波形变形 + FS 花边/内卷水幕 + featureFlags bit2）。
+   * null = 关闭（breakParams 全零 → gain.x=0 短路，零回归）。
+   */
+  setBreakWave(cfg: OceanBreakWaveConfig | null): void {
+    if (cfg) this._validateBreak(cfg);
+    this._breakCfg = cfg;
+  }
+
+  /** 更新已启用破碎波的参数（不改开关态；null 字段取默认值）。 */
+  setBreakParams(cfg: OceanBreakWaveConfig): void {
+    this._validateBreak(cfg);
+    this._breakCfg = cfg;
+  }
+
+  /** bandFarM 必须 > bandNearM（反序 smoothstep 边界重叠会产生 NaN）。 */
+  private _validateBreak(cfg: OceanBreakWaveConfig): void {
+    const near = cfg.bandNearM ?? 3;
+    const far = cfg.bandFarM ?? 8;
+    if (!Number.isFinite(near) || !Number.isFinite(far) || far <= near) {
+      throw new Error(
+        `OceanFFTWater: bandFarM(${far}) 必须 > bandNearM(${near}) 且均为有限数`,
+      );
+    }
+  }
+
+  /**
+   * T4 破碎喷雾吸附源（BreakSpray options.seabed 用）：seabed 视图 + 海面
+   * ENU 基 + uv 仿射，compute 端 textureLoad 做高度吸附。场未绑定/已 dispose
+   * 时返回 null（BreakSpray 换占位资源，粒子不做水深门）。
+   */
+  get breakSpraySeabed(): OceanSeabedSprayBinding | null {
+    if (!this._seabed || !this._seabed.seabedTexture) return null;
+    return {
+      view: this._seabed.seabedTexture,
+      dispView: this._dispArrayView!,
+      centerEcef: { x: this._centerEcef[0], y: this._centerEcef[1], z: this._centerEcef[2] },
+      eastDir: { x: this._eastDir[0], y: this._eastDir[1], z: this._eastDir[2] },
+      northDir: { x: this._northDir[0], y: this._northDir[1], z: this._northDir[2] },
+      uvOffset: { x: this._seabedUvOffset[0], y: this._seabedUvOffset[1] },
+      uvScale: { x: this._seabedUvScale[0], y: this._seabedUvScale[1] },
+    };
+  }
+
   // ── L3 集成 API（海面阴影接收 / 水下双面视角）──────────────────────────
 
   /**
@@ -455,6 +612,17 @@ export class OceanFFTWater implements IPass {
   /** FFT 边长——{@link FFTDataSource}。 */
   get fftSize(): number {
     return N;
+  }
+
+  /** @inheritdoc TargetFormatAware - 场景目标格式切换（T5 真 HDR）：
+   * 置空渲染管线/BGL/bindGroup，prepare() 与 execute() 的惰性守卫段下一帧
+   * 全部按新格式重建（同格式幂等零开销；bindGroup 缓存键检查含 null 分支）。 */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (this._failed || format === (this._targetFormat ?? this._context.preferredFormat)) return;
+    this._targetFormat = format;
+    this._renderPipeline = null;
+    this._renderBindGroupLayout = null;
+    this._renderBindGroup = null;
   }
 
   /** @inheritdoc IPass - 幂等初始化（渲染管线 + compute 管线族）。 */
@@ -531,6 +699,21 @@ export class OceanFFTWater implements IPass {
     RP[14] = this._refraction ? 1 : 0;
     RP[15] = 0.045; // 折射扰动强度（NDC 域，∝法线水平分量）
     RP[20] = this._underwaterView ? 1 : 0; // L3 水下视角
+    // L5：RP[21] 时间秒（反射星光闪烁）/ RP[22] SSS 总强度 / RP[23] featureFlags
+    // 位掩码（bit0 天空反射 / bit1 SSS / bit2 破碎波 / bit3 太阳高光染色）。
+    // 大气源每帧惰性求值：sky.execute 先于 ocean.execute（effects 顺序），
+    // LUT/UBO 同帧已就绪；字段缺失 → fallback + bit0=0（零回归）。
+    const atmoSrc = this._atmoSource?.() ?? null;
+    const atmoReady = !!(atmoSrc && atmoSrc.skyView && atmoSrc.transmittance
+      && atmoSrc.atmosphereParams && atmoSrc.skyParams);
+    RP[21] = this._timeAccum;
+    RP[22] = this._sssStrength;
+    let ff = 0;
+    if (atmoReady && this._skyReflectOn) ff |= 1;
+    if (this._sssStrength > 0) ff |= 2;
+    if (this._breakCfg) ff |= 4;
+    if (atmoReady && this._sunTintOn) ff |= 8;
+    RP[23] = ff;
     // L4-A 岸线泡沫：RP[24] flag（下一空闲位，flags vec4 已满：x/y/z 开关 + w 强度）
     // + RP[25] 强度 + RP[28-31] seabedUv 仿射（海面局部米 → seabed 纹理 [0,1]）。
     const sbActive = !!(this._seabed && this._seabed.seabedTexture);
@@ -553,6 +736,22 @@ export class OceanFFTWater implements IPass {
     }
     this._context.writeBuffer(this._renderParamsUBO!, 0, OceanFFTWater._asBytes(RP));
 
+    // ── T4 破碎波 UBO：每帧整体写入（未启用全零 → gain.x=0 短路零回归）────
+    const BK = this._breakParamsF32;
+    if (this._breakCfg) {
+      BK[0] = 1;
+      BK[1] = this._breakCfg.ampScale ?? 1.25;
+      BK[2] = this._breakCfg.lean ?? 0.55;
+      BK[3] = this._breakCfg.laceGain ?? 0.85;
+      BK[4] = this._breakCfg.bandNearM ?? 3;
+      BK[5] = this._breakCfg.bandFarM ?? 8;
+      BK[6] = this._breakCfg.curlShade ?? 0.55;
+      BK[7] = this._breakCfg.laceThresholdM ?? 1.6;
+    } else {
+      BK.fill(0);
+    }
+    this._context.writeBuffer(this._breakParamsUBO!, 0, OceanFFTWater._asBytes(BK));
+
     // ── bind group 缓存：视图身份变化才重建（wake ping-pong / history 就绪）──
     const foamView = this._foamPattern?.view ?? this._fallbackView!;
     const wakeView = (this._wake && RP[13] > 0.5) ? this._wake.fieldView! : this._fallbackView!;
@@ -565,8 +764,15 @@ export class OceanFFTWater implements IPass {
     const shUbo = shadowSrc?.ubo ?? this._shadowFallbackUBO!;
     const shView = shadowSrc?.textureView ?? this._shadowFallbackView!;
     const shSmp = shadowSrc?.comparisonSampler ?? this._shadowCmpSampler!;
+    // L5：大气资源（未就绪字段 → fallback；身份参与 bind group 缓存键）
+    const atmoSv = atmoReady ? atmoSrc!.skyView! : this._fallbackView!;
+    const atmoTr = atmoReady ? atmoSrc!.transmittance! : this._fallbackView!;
+    const atmoUbA = atmoReady ? atmoSrc!.atmosphereParams! : this._atmoFallbackUBO!;
+    const atmoUbS = atmoReady ? atmoSrc!.skyParams! : this._atmoFallbackUBO!;
     if (!this._renderBindGroup || foamView !== this._bgFoam || wakeView !== this._bgWake
-      || histView !== this._bgHist || shUbo !== this._bgShadow || seabedView !== this._bgSeabed) {
+      || histView !== this._bgHist || shUbo !== this._bgShadow || seabedView !== this._bgSeabed
+      || atmoSv !== this._bgAtmoSv || atmoTr !== this._bgAtmoTr
+      || atmoUbA !== this._bgAtmoUboA || atmoUbS !== this._bgAtmoUboS) {
       this._renderBindGroup = this._context.device.createBindGroup({
         layout: this._renderBindGroupLayout,
         entries: [
@@ -584,6 +790,13 @@ export class OceanFFTWater implements IPass {
           { binding: 11, resource: shView },
           { binding: 12, resource: shSmp },
           { binding: 13, resource: seabedView },
+          // L5/T4：大气 LUT×2 + clamp + UBO×2 + 破碎波 UBO（fallback 见 _prepareRender）
+          { binding: 14, resource: atmoSv },
+          { binding: 15, resource: this._clampSampler! },
+          { binding: 16, resource: atmoTr },
+          { binding: 17, resource: { buffer: atmoUbA } },
+          { binding: 18, resource: { buffer: atmoUbS } },
+          { binding: 19, resource: { buffer: this._breakParamsUBO! } },
         ],
       });
       this._bgFoam = foamView;
@@ -591,6 +804,10 @@ export class OceanFFTWater implements IPass {
       this._bgHist = histView;
       this._bgShadow = shUbo;
       this._bgSeabed = seabedView;
+      this._bgAtmoSv = atmoSv;
+      this._bgAtmoTr = atmoTr;
+      this._bgAtmoUboA = atmoUbA;
+      this._bgAtmoUboS = atmoUbS;
     }
 
     const camData = new Float32Array(CAMERA_UBO_SIZE / 4);
@@ -634,13 +851,22 @@ export class OceanFFTWater implements IPass {
     this._seabedFallbackTex?.destroy();
     this._seabedFallbackTex = null;
     this._seabedFallbackView = null;
+    this._atmoFallbackUBO?.destroy();
+    this._atmoFallbackUBO = null;
+    this._breakParamsUBO?.destroy();
+    this._breakParamsUBO = null;
     this._derivTextureView = null;
+    this._dispArrayView = null;
     this._renderBindGroupLayout = null;
     this._bgFoam = null;
     this._bgWake = null;
     this._bgHist = null;
     this._bgShadow = null;
     this._bgSeabed = null;
+    this._bgAtmoSv = null;
+    this._bgAtmoTr = null;
+    this._bgAtmoUboA = null;
+    this._bgAtmoUboS = null;
     this._shadowFallbackTex?.destroy();
     this._shadowFallbackUBO?.destroy();
     this._shadowFallbackTex = null;
@@ -880,7 +1106,22 @@ export class OceanFFTWater implements IPass {
       });
       this._shadowCmpSampler ??= this._context.createSampler({ compare: 'less' });
 
+      // L5 大气 fallback UBO（64B 全零，binding 17/18 共用；LUT 复用上方 1×1 黑
+      // rgba16float——不写即全零 → featureFlags 相应位短路，零回归）
+      this._atmoFallbackUBO ??= device.createBuffer({
+        label: 'OceanFFTAtmoFallbackUBO',
+        size: ATMO_UBO_BYTES,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      // T4 破碎波 UBO（64B）
+      this._breakParamsUBO ??= device.createBuffer({
+        label: 'OceanFFTBreakParamsUBO',
+        size: OCEAN_BREAK_PARAMS_UBO_BYTES,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
       this._derivTextureView ??= this._derivTex!.createView({ dimension: '2d-array' });
+      this._dispArrayView ??= this._dispTex!.createView({ dimension: '2d-array' });
 
       const module = this._context.createShaderModule(OCEAN_FFT_RENDER_SHADER, 'OceanFFTRenderShader');
       const bgl = device.createBindGroupLayout({
@@ -891,7 +1132,8 @@ export class OceanFFTWater implements IPass {
           { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: CAMERA_UBO_SIZE } },
           { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: OCEAN_PARAMS_UBO_BYTES } },
           { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
-          { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+          // T4：derivTex 级联0 梯度也供 VS 波峰前倾使用 → visibility 含 VERTEX
+          { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
           { binding: 4, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
           // renderParams：VS 读 flags/wakeUv（船迹位移），FS 读全部 → 两阶段都给
           { binding: 5, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: OCEAN_RENDER_PARAMS_UBO_BYTES } },
@@ -904,8 +1146,18 @@ export class OceanFFTWater implements IPass {
           { binding: 10, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: SHADOW_RECEIVER_UBO_SIZE } },
           { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', viewDimension: '2d-array', multisampled: false } },
           { binding: 12, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
-          // L4-A 岸线泡沫：seabed 高度场 r32float（不可过滤 → FS textureLoad 取最近 texel）
-          { binding: 13, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+          // L4-A 岸线泡沫：seabed 高度场 r32float（不可过滤 → textureLoad 取最近
+          // texel）；T4 起顶点阶段也 textureLoad（破碎波波形变形）→ 双阶段
+          { binding: 13, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+          // L5 物大气反射/染色：skyView + transmittance LUT（FRAGMENT）+ 64B UBO×2。
+          // 未接 AtmosphereSky 时绑 fallback（1×1 黑 LUT + 全零 UBO）→ 特性位短路。
+          { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+          { binding: 15, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+          { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+          { binding: 17, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: ATMO_UBO_BYTES } },
+          { binding: 18, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: ATMO_UBO_BYTES } },
+          // T4 破碎波参数（VS 波形变形 + FS 花边/内卷水幕 → 双阶段）
+          { binding: 19, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: OCEAN_BREAK_PARAMS_UBO_BYTES } },
         ],
       });
 
@@ -930,7 +1182,8 @@ export class OceanFFTWater implements IPass {
           entryPoint: 'fs_main',
           targets: [
             {
-              format: this._context.preferredFormat,
+              // T5 真 HDR：跟随 setTargetFormat 下发的场景目标格式（未下发 = 旧行为）
+              format: this._targetFormat ?? this._context.preferredFormat,
               blend: {
                 color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
                 alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },

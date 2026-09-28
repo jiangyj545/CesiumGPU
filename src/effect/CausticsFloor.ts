@@ -96,6 +96,8 @@ export class CausticsFloor implements IPass {
   private _seabedFallbackViewCache: GPUTextureView | null = null;
   /** 初始化失败闸：一次 console.error 后禁用，防每帧刷屏（OceanFFTWater 同款）。 */
   private _failed = false;
+  /** T5 真 HDR：当前管线目标格式（构造期 = preferredFormat，Scene 逐帧下发后跟随）。 */
+  private _targetFormat: GPUTextureFormat;
 
   constructor(context: Context, options: CausticsFloorOptions) {
     const [lon, lat] = options.center;
@@ -104,6 +106,7 @@ export class CausticsFloor implements IPass {
     }
 
     this._context = context;
+    this._targetFormat = context.preferredFormat;
     this._centerLon = lon;
     this._centerLat = lat;
     this._sizeM = options.sizeM ?? 400;
@@ -173,6 +176,19 @@ export class CausticsFloor implements IPass {
     this._source = source;
   }
 
+  /**
+   * T5 真 HDR：目标格式下发（EffectManager 可选协议，Scene.render 逐帧调用
+   * 当前渲染目标格式）。与当前格式相同则幂等早退；不同则置空管线由
+   * prepare() 惰性重建（幂等——顶点/索引缓冲与格式无关原位复用，bind
+   * group 不含目标格式不重建）。未接线的调用路径保持 preferredFormat
+   * 旧行为。
+   */
+  setTargetFormat(format: GPUTextureFormat): void {
+    if (this._failed || format === this._targetFormat) return;
+    this._targetFormat = format;
+    this._pipeline = null;
+  }
+
   /** @inheritdoc IPass - 由 Scene 在 execute 前注入相机（IPass 可选协议）。 */
   updateCamera(camera: Camera): void {
     this._camera = camera;
@@ -240,7 +256,9 @@ export class CausticsFloor implements IPass {
             entryPoint: 'fs_main',
             targets: [
               {
-                format: this._context.preferredFormat,
+                // T5 真 HDR：跟随 setTargetFormat 下发的场景目标格式
+                //（rgba16float FP16 可混合，src-alpha 混合合法）
+                format: this._targetFormat,
                 blend: {
                   color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
                   alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },

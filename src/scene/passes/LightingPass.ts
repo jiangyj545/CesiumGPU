@@ -35,6 +35,10 @@ export class LightingPass implements IPass {
   private _lightingUniformBuffer: GPUBuffer;
 
   private _gbufferPass: GBufferPass;
+  /**
+   * HDR 路径输出格式（T5 真 HDR：构造参 = Scene._sceneColorFormat 单一来源，
+   * rgba16float 离屏 RT）。LDR 路径（交换链）格式见 prepare() 的目标选择。
+   */
   private _outputFormat: GPUTextureFormat;
 
   /**
@@ -160,7 +164,12 @@ export class LightingPass implements IPass {
       fragment: {
         module:  shader,
         entryPoint: 'fs_main',
-        targets: [{ format: this._outputFormat }],
+        targets: [{
+          // T5 真 HDR：HDR 路径写 rgba16float 离屏 RT（构造参 = Scene 单一
+          // 来源），LDR 路径写交换链 preferredFormat —— 与 Scene.render 的
+          // setHdrOutput 每帧同步严格对应（开关切换即重建本管线）。
+          format: this._hdr ? this._outputFormat : this._context.preferredFormat,
+        }],
       },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
     });

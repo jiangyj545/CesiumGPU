@@ -60,7 +60,10 @@ function fx(x: number): string {
 
 // ── 公共段：AtmosphereParams struct + 介质/参数化/射线求交（tidewater coreCode）──
 
-const ATMO_STRUCT_WGSL = /* wgsl */`
+// AtmosphereParams struct 文本（导出：海面反射拼接方须先声明同布局 struct +
+// 绑定，再拼 ATMO_SKY_REFLECTION_WGSL——该块内含引用 atmosphereParams 的
+// 函数，WGSL 声明先于使用，struct 不能由块自带）。
+export const ATMO_PARAMS_STRUCT_WGSL = /* wgsl */`
 struct AtmosphereParams {
   rayleighScale  : f32,    // @0
   mieScale       : f32,    // @4
@@ -70,6 +73,23 @@ struct AtmosphereParams {
   viewHeight     : f32,    // @28 (km, r = ATMO_RG + h)
   sunIlluminance : vec3f,  // @32
   sunDir         : vec3f,  // @48 (本地系: y = 太阳仰角)
+}
+`;
+
+const ATMO_STRUCT_WGSL = ATMO_PARAMS_STRUCT_WGSL;
+
+// SkyParams struct 文本（导出：同上，海面反射拼接方使用；布局见文件头注释）。
+export const SKY_PARAMS_STRUCT_WGSL = /* wgsl */`
+struct SkyParams {
+  moonDir          : vec3f,  // @0  ECEF 世界系月亮方向
+  starIntensity    : f32,    // @12
+  sunDir           : vec3f,  // @16 ECEF 世界系太阳方向
+  moonOn           : f32,    // @28
+  sunDiskIntensity : f32,    // @32
+  time             : f32,    // @36
+  nightK           : f32,    // @40
+  tonemapK         : f32,    // @44
+  moonUpK          : f32,    // @48
 }
 `;
 
@@ -136,6 +156,7 @@ fn atmosphereSampleTransmittance(r: f32, mu: f32) -> vec3f {
   return textureSampleLevel(atmTransmittanceLUT, atmLinearClamp, atmosphereTransmittanceUV(r, mu), 0.0).rgb;
 }
 `;
+export { ATMO_TRANS_SAMPLE_WGSL };
 
 const ATMO_MS_SAMPLE_WGSL = /* wgsl */`
 fn atmosphereSampleMultiScat(r: f32, cosSun: f32) -> vec3f {
@@ -492,17 +513,7 @@ struct CameraUniforms {
   nearFar         : vec2<f32>,     // @224 (8B) x = near, y = far
 }
 ${ATMO_STRUCT_WGSL}
-struct SkyParams {
-  moonDir          : vec3f,  // @0  ECEF 世界系月亮方向
-  starIntensity    : f32,    // @12
-  sunDir           : vec3f,  // @16 ECEF 世界系太阳方向
-  moonOn           : f32,    // @28
-  sunDiskIntensity : f32,    // @32
-  time             : f32,    // @36
-  nightK           : f32,    // @40
-  tonemapK         : f32,    // @44
-  moonUpK          : f32,    // @48
-}
+${SKY_PARAMS_STRUCT_WGSL}
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
 @group(0) @binding(1) var<uniform> atmosphereParams : AtmosphereParams;
@@ -575,15 +586,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 `;
 
 // ── B1 反射集成文本（skyRadianceWGSL）：水面反射用天空辐射，无日/月盘 ────────
-// 依赖调用方声明的三个绑定符号（名字必须一致）：
-//   @group(X) @binding(A) var<uniform> atmosphereParams : AtmosphereParams; // 64B 布局同上
+// 依赖调用方声明的符号（名字必须一致，且须先于本块声明——WGSL 声明先于使用）：
+//   struct AtmosphereParams（ATMO_PARAMS_STRUCT_WGSL，64B）
+//   struct SkyParams（SKY_PARAMS_STRUCT_WGSL，64B）
+//   @group(X) @binding(A) var<uniform> atmosphereParams : AtmosphereParams;
 //   @group(X) @binding(B) var atmSkyViewLUT : texture_2d<f32>;
 //   @group(X) @binding(C) var atmLinearClamp : sampler;
+//   @group(X) @binding(D) var<uniform> skyParams : SkyParams;
 // AtmosphereSky.skyViewTexture 即 atmSkyViewLUT 应绑定的纹理视图。
 
 export const ATMO_SKY_REFLECTION_WGSL = /* wgsl */`
-// 反射端需自行声明绑定（atmosphereParams: AtmosphereParams 64B 布局与下 struct 一致）。
-${ATMO_STRUCT_WGSL}
 ${ATMO_CORE_WGSL}
 ${ATMO_SKY_LUMINANCE_WGSL}
 ${SKY_STARS_WGSL}

@@ -21,6 +21,12 @@
 
 /** FFT 边长 N（tidewater FFT_SIZE）。 */
 export const OCEAN_FFT_SIZE = 256;
+import {
+  ATMO_PARAMS_STRUCT_WGSL,
+  SKY_PARAMS_STRUCT_WGSL,
+  ATMO_TRANS_SAMPLE_WGSL,
+  ATMO_SKY_REFLECTION_WGSL,
+} from './AtmosphereSkyShader';
 const N = OCEAN_FFT_SIZE;
 /** log2(N)：IFFT 级数。 */
 const LOG2N = 8;
@@ -526,7 +532,7 @@ struct OceanRenderParams {
   skyColor    : vec4<f32>,  // 天空/雾色
   flags       : vec4<f32>,  // x 泡沫图案开 / y 船迹开 / z 折射开 / w 折射强度
   wakeUv      : vec4<f32>,  // 船迹 uv = planeXZ*zw + xy（窗口米 → [0,1)）
-  underwater  : vec4<f32>,  // L3 x 水下视角开（从下看水面，其余保留）
+  underwater  : vec4<f32>,  // x L3 水下视角开 / y L5 时间秒 / z L5 SSS 总强度 / w L5 featureFlags
   shoreParams : vec4<f32>,  // L4-A x 岸线泡沫开 / y shoreStrength（zw 保留）
   seabedUv    : vec4<f32>,  // L4-A seabed uv = planeXZ*zw + xy（海面局部米 → [0,1]）
 }
@@ -559,9 +565,29 @@ struct ShadowUniforms {
 @group(0) @binding(12) var           shadowCmp : sampler_comparison;
 
 // L4-A 岸线泡沫：海床高度场（r32float，R = 海拔米，海平面 = 0）。不可过滤
-// 格式 → FS 用 textureLoad 取最近 texel；未绑定海床时 CPU 侧挂 1×1 全 -1000
-// （极深 = 无泡沫）占位且 shoreParams.x = 0 不采样。
+// 格式 → textureLoad 取最近 texel；未绑定海床时 CPU 侧挂 1×1 全 -1000
+// （极深 = 无泡沫）占位且 shoreParams.x = 0 不采样。T4 起顶点阶段也读
+// （破碎波波形变形）→ BGL visibility 须含 VERTEX。
 @group(0) @binding(13) var seabedTex : texture_2d<f32>;
+
+// ── L5 视觉升级（tidewater 观感追赶：逐像素大气反射/太阳染色/SSS/破碎波）──
+// atmosphereParams/skyParams 布局单一来源 AtmosphereSkyShader.ts（各 64B）。
+// 未接 AtmosphereSky 时 CPU 侧挂 fallback（1×1 黑 LUT ×2 + 全零 UBO ×2），
+// featureFlags（underwater.w）对应位未置即短路回旧路径（零回归）。
+//   bit0 天空反射 / bit1 SSS / bit2 破碎波 / bit3 太阳高光染色
+${ATMO_PARAMS_STRUCT_WGSL}
+${SKY_PARAMS_STRUCT_WGSL}
+struct BreakParams {
+  gain : vec4<f32>,  // x=enable / y=振幅缩放 / z=波峰前倾 / w=泡沫花边增益
+  band : vec4<f32>,  // x=bandNear(m) / y=bandFar(m) / z=内卷水幕染色 / w=花边阈值(m)
+}
+
+@group(0) @binding(14) var atmSkyViewLUT : texture_2d<f32>;
+@group(0) @binding(15) var atmLinearClamp : sampler;
+@group(0) @binding(16) var atmTransmittanceLUT : texture_2d<f32>;
+@group(0) @binding(17) var<uniform> atmosphereParams : AtmosphereParams;
+@group(0) @binding(18) var<uniform> skyParams : SkyParams;
+@group(0) @binding(19) var<uniform> breakParams : BreakParams;
 
 // 按视距（归一化单位）选级联；超出覆盖范围返回 -1（无阴影）。
 fn cssmSelectCascade(viewDist: f32) -> i32 {
@@ -635,6 +661,11 @@ fn vnoise( p : vec2<f32> ) -> f32 {
   );
 }
 
+// L5 大气采样函数（AtmosphereSkyShader 同源拼接：透射 LUT / skyView 反射）。
+// 仅在片元阶段调用（textureSampleLevel 合法；顶点阶段不可用）。
+${ATMO_TRANS_SAMPLE_WGSL}
+${ATMO_SKY_REFLECTION_WGSL}
+
 struct VSIn {
   @location(0) ecef : vec3<f32>,    // 归一化 ECEF 水面基准点（水位折入模长）
   @location(1) planeXZ : vec2<f32>, // 局部平面坐标（米：x 东 / z 北）
@@ -646,6 +677,7 @@ struct VSOut {
   @location(1) planeXZ : vec2<f32>,
   @location(2) screenUV : vec2<f32>,  // 折射采样场景颜色历史用（NDC → [0,1]）
   @location(3) waveH : f32,           // L4-A 波面高（米，前 3 级联 disp.y + 船迹），岸线水深用
+  @location(4) breakW : f32,          // T4 破碎权重（smoothstep(bandFar, bandNear, 水深)）
 }
 
 @vertex
@@ -663,6 +695,22 @@ fn vs_main( input : VSIn ) -> VSOut {
     let wh = textureSampleLevel( wakeTex, clampSmp, wuv, 0.0 ).r;
     disp.y += wh;
   }
+  // T4 深度感知破碎波：海床高（VS 只能 textureLoad——r32float 不可过滤且顶点
+  // 阶段禁 textureSample）→ 瞬时水深 → 破碎权重；再做振幅调制与波峰前倾挤压。
+  var breakW = 0.0;
+  if ( breakParams.gain.x > 0.5 && renderParams.shoreParams.x > 0.5 ) {
+    let buv = input.planeXZ * renderParams.seabedUv.zw + renderParams.seabedUv.xy;
+    var sbH = -1000.0; // 场外 = 极深 → 破碎权重 0
+    if ( all( buv >= vec2<f32>( 0.0 ) ) && all( buv <= vec2<f32>( 1.0 ) ) ) {
+      let bdim = textureDimensions( seabedTex, 0 );
+      let btc = clamp( vec2<i32>( buv * vec2<f32>( bdim ) ), vec2<i32>( 0 ), vec2<i32>( bdim ) - vec2<i32>( 1 ) );
+      sbH = textureLoad( seabedTex, btc, 0 ).r;
+    }
+    breakW = smoothstep( breakParams.band.y, breakParams.band.x, disp.y - sbH );
+    let g0 = textureSampleLevel( derivTex, smp, input.planeXZ / ocean.sizes[ 0 ].x, 0, 0.0 );
+    disp.y *= mix( 1.0, breakParams.gain.y, breakW );                    // 振幅调制
+    disp.xz -= g0.xy * max( disp.y, 0.0 ) * breakParams.gain.z * breakW; // 波峰前倾
+  }
   // eastDir/northDir/upDir 是「每米归一化 ECEF 增量」（CPU 侧已除米数），
   // 位移纹理单位为米 → 直接线性组合；λ 已在 column kernel 写纹理时乘过
   let dispVec = ocean.eastDir * disp.x + ocean.upDir * disp.y + ocean.northDir * disp.z;
@@ -679,6 +727,7 @@ fn vs_main( input : VSIn ) -> VSOut {
   out.planeXZ = input.planeXZ;
   out.screenUV = ( clip.xy / max( clip.w, 1e-6 ) ) * 0.5 + 0.5;
   out.waveH = disp.y;
+  out.breakW = breakW;
   return out;
 }
 
@@ -778,6 +827,15 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     edgeFade = smoothstep( 0.0, 0.05, depth );
   }
 
+  // T4 泡沫花边（foam lace）：与主破碎带不同参数的独立 smoothstep——比
+  // surf 更贴岸的细碎白沫带；breakParams 未启用时 laceCov = 0（零回归）。
+  var laceCov = 0.0;
+  if ( breakParams.gain.x > 0.5 && breakParams.gain.w > 0.0 ) {
+    let laceW = smoothstep( breakParams.band.w, breakParams.band.w * 0.35, shoreDepth );
+    laceCov = laceW * breakParams.gain.w * ( 0.6 + 0.4 * fN );
+  }
+  shoreCov = shoreCov + laceCov;
+
   let covTotal = foam * jacW + shoreCov + wakeFoam;
   let coverage = clamp( covTotal, 0.0, 1.0 );
 
@@ -803,9 +861,46 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   baseCol = mix( baseCol, lime, smoothstep( 8.0, 1.0, shoreDepth ) * 0.68 );
   let uwWater = vec3<f32>( 0.10, 0.46, 0.42 );
   let waterTint = select( baseCol, uwWater, uw );
+
+  // ── L5 物大气视觉：逐像素天空反射（T1）/ 太阳高光染色（T2）/ SSS（T3）──
+  // 反射基用相机天顶（skyView LUT 在相机本地系预计算，基必须同源——用海面
+  // upDir 会引入方位偏差）；featureFlags 对应位未置即短路回旧平色路径。
+  let atmUp = normalize( camPos );
+  let ffb = i32( renderParams.underwater.w + 0.5 );
+  let flagSky      = select( 0.0, 1.0, ( ffb & 1 ) != 0 );
+  let flagSss      = select( 0.0, 1.0, ( ffb & 2 ) != 0 );
+  let flagSpecTint = select( 0.0, 1.0, ( ffb & 8 ) != 0 );
+
+  // T2 太阳透射染色：太阳方向过大气后的透射色染高光/SSS；未启用恒 1（零回归）
+  var sunTint = vec3<f32>( 1.0 );
+  if ( flagSpecTint > 0.5 || flagSss > 0.5 ) {
+    sunTint = atmosphereSampleTransmittance( atmosphereParams.viewHeight, clamp( dot( sunDir, atmUp ), -1.0, 1.0 ) );
+  }
+
+  // T1 逐像素天空反射：反射向量（ECEF）直接与相机天顶基点积转本地系
+  var skyRad = renderParams.skyColor.rgb;
+  if ( flagSky > 0.5 ) {
+    let refl = reflect( - viewDir, nLit );
+    skyRad = atmSkyReflectionRadiance(
+      refl, atmUp, normalize( skyParams.sunDir ), normalize( skyParams.moonDir ),
+      renderParams.underwater.y );
+  }
+
   var col = waterTint * ( 0.82 + 0.18 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
-    + renderParams.skyColor.rgb * fresnel * 0.9 * shadowF
-    + vec3<f32>( spec ) * shadowF;
+    + skyRad * fresnel * 0.9 * shadowF
+    + vec3<f32>( spec ) * mix( vec3<f32>( 1.0 ), sunTint, flagSpecTint ) * shadowF;
+
+  // T3 波峰 SSS 透光：波面高×逆光×掠射的青绿透射，随太阳透射色偏移；
+  // 波峰自遮蔽微降。RP[22]（underwater.z）总强度 0 = 关。
+  if ( flagSss > 0.5 && renderParams.underwater.z > 0.0 ) {
+    let upY  = clamp( dot( sunDir, atmUp ), 0.0, 1.0 );
+    let H    = clamp( input.waveH * 0.28, 0.0, 1.0 );                  // ≈3.5m 封顶
+    let back = clamp( dot( viewDir, - sunDir ) * 0.5 + 0.5, 0.0, 1.0 ); // 逆光因子
+    let sssW = H * ( 0.35 + 0.65 * pow( 1.0 - ndv, 2.0 ) )
+             * ( 0.25 + 0.75 * back * back ) * upY * renderParams.underwater.z * shadowF;
+    col += vec3<f32>( 0.06, 0.42, 0.34 ) * sssW * sunTint;
+    col = mix( col, col * ( 1.0 - 0.25 * H ), 0.5 );
+  }
 
   // 折射：法线水平分量扰动采样场景颜色历史（水体下方背景），
   // 混合权重 ∝ (1-菲涅尔)；history 缺省绑 1×1 零纹理 → 采样为黑但不走此分支；
@@ -817,6 +912,21 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     let underCol = under * vec3<f32>( 0.60, 0.85, 0.90 ); // 水色吸收
     let refrW = clamp( ( 1.0 - fresnel ) * 0.75, 0.0, 0.60 );
     col = mix( col, underCol + vec3<f32>( spec ), refrW );
+  }
+
+  // T4 内卷水幕（A 案务实近似）：视线穿波峰背面（nLit·viewDir < 0）且破碎
+  // 权重高时，按 curl 混入半透明水幕色并增补 foamMask。真 peeling（二次
+  // draw + 深度翻转）二期；curl 取级联0 梯度与视线水平分量（局部平面投影）。
+  if ( breakParams.gain.x > 0.5 && input.breakW > 0.0 ) {
+    let g0 = textureSampleLevel( derivTex, smp, input.planeXZ / ocean.sizes[ 0 ].x, 0, 0.0 );
+    let viewXZ = vec2<f32>( dot( viewDir, ocean.eastDir ), dot( viewDir, ocean.northDir ) );
+    let curl = dot( g0.xy, viewXZ );
+    let backFace = select( 0.0, 1.0, dot( nLit, viewDir ) < 0.0 );
+    let foamW = clamp( abs( curl ), 0.0, 1.0 ) * input.breakW;
+    let curtain = clamp( - curl, 0.0, 1.0 ) * backFace * input.breakW * breakParams.band.z;
+    let curtainCol = mix( vec3<f32>( 0.16, 0.42, 0.45 ), vec3<f32>( 0.85, 0.93, 0.96 ), foamW );
+    col = mix( col, curtainCol, clamp( curtain, 0.0, 0.8 ) );
+    foamMask = clamp( foamMask + foamW * 0.5, 0.0, 1.0 );
   }
 
   var foamWhite = vec3<f32>( 0.90, 0.94, 0.97 ) * ( 0.75 + 0.25 * fN + fineGlow );
@@ -836,3 +946,5 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 export const OCEAN_PARAMS_UBO_BYTES = 288;
 /** OceanRenderParams uniform buffer 字节数（128B：sunDir/deep/sky/flags/wakeUv/underwater/shoreParams/seabedUv）。 */
 export const OCEAN_RENDER_PARAMS_UBO_BYTES = 128;
+/** BreakParams uniform buffer 字节数（64B：gain/band 两 vec4 + 32B 预留位）。 */
+export const OCEAN_BREAK_PARAMS_UBO_BYTES = 64;
