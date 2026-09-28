@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>F71 指挥大屏 v1：低空多机态势 - CesiumGPU</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0b0f14; --panel: rgba(13,19,28,.88); --line: #1f2a37;
+      --text: #dbe4ee; --dim: #7a8a9c; --accent: #4cc2ff;
+      --danger: #ff5c6a; --warn: #ffb84c; --ok: #3ddc84;
+    }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    body { background: var(--bg); color: var(--text);
+      font: 13px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+    #cesiumContainer { position: fixed; inset: 0; }
+    /* ── 大屏覆盖层：各栏浮动于 3D 画布之上 ── */
+    .hud { position: fixed; z-index: 9000; background: var(--panel);
+      border: 1px solid var(--line); border-radius: 10px; backdrop-filter: blur(4px); }
+    .hud h2 { font-size: 13px; font-weight: 600; color: var(--accent);
+      letter-spacing: 1px; margin-bottom: 8px; }
+    /* 左栏：场景选择 */
+    #sceneBar { top: 12px; left: 12px; width: 250px; padding: 12px;
+      max-height: calc(100vh - 170px); display: flex; flex-direction: column; }
+    #sceneBar .seedRow { display: flex; align-items: center; gap: 6px;
+      margin-bottom: 10px; color: var(--dim); font-size: 12px; }
+    #sceneBar input { width: 82px; background: #0d1420; border: 1px solid var(--line);
+      color: var(--text); border-radius: 5px; padding: 3px 7px; font: 12px Consolas, monospace; }
+    .scn { padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px;
+      margin-bottom: 6px; cursor: pointer; overflow: hidden; }
+    .scn:hover { border-color: var(--accent); }
+    .scn.on { border-color: var(--accent); background: rgba(76,194,255,.10); }
+    .scn .nm { font-size: 13px; display: flex; align-items: center; gap: 6px; }
+    .scn .meta { font-size: 11px; color: var(--dim); margin-top: 1px; }
+    .scn .n { font-size: 10px; padding: 0 6px; border-radius: 8px;
+      background: #1b3a55; color: var(--accent); flex: none; }
+    /* 右栏：遥测面板 */
+    #telemetry { top: 12px; right: 12px; width: 292px; padding: 12px;
+      max-height: calc(100vh - 170px); overflow: auto; }
+    .vcard { border: 1px solid var(--line); border-radius: 8px;
+      padding: 8px 10px; margin-bottom: 8px; background: rgba(9,14,21,.6); }
+    .vcard .hd { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+    .vcard .id { font: 11px Consolas, monospace; padding: 0 7px; border-radius: 8px;
+      background: #46202a; color: #ff8d97; flex: none; }
+    .vcard.id0 .id { background: #12414f; color: var(--accent); }
+    .vcard .st { margin-left: auto; font-size: 11px; color: var(--dim); }
+    .vcard .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px;
+      font: 11.5px/1.55 Consolas, monospace; color: #b9c7d6; }
+    .vcard .grid2 b { color: var(--text); font-weight: 500; }
+    .socRow { display: flex; align-items: center; gap: 7px; margin-top: 5px;
+      font: 11px Consolas, monospace; color: var(--dim); }
+    .socBar { flex: 1; height: 8px; border-radius: 4px; background: #0d1420;
+      border: 1px solid var(--line); overflow: hidden; }
+    .socBar i { display: block; height: 100%; background: var(--ok); width: 0%; }
+    .socBar i.mid { background: var(--warn); }
+    .socBar i.low { background: var(--danger); }
+    /* 底部告警条 */
+    #alertBar { left: 12px; right: 12px; bottom: 12px; height: 118px; padding: 10px 12px; }
+    #alertList { overflow: auto; height: 82px; font: 11.5px/1.75 Consolas, monospace; }
+    .ev { white-space: nowrap; color: var(--dim); }
+    .ev b { font-weight: 600; }
+    .ev-red { color: #ffb3ba; background: rgba(255,92,106,.10); border-radius: 4px; }
+    .ev-red b { color: var(--danger); }
+    .ev-orange { color: #ffd9a8; background: rgba(255,184,76,.08); border-radius: 4px; }
+    .ev-orange b { color: var(--warn); }
+    /* 状态自检角 */
+    #statusCorner { top: 12px; left: 50%; transform: translateX(-50%);
+      padding: 6px 14px; font: 11.5px/1.7 Consolas, monospace; color: #b9c7d6;
+      display: flex; gap: 16px; align-items: center; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger);
+      box-shadow: 0 0 7px var(--danger); flex: none; }
+    .dot.on { background: var(--ok); box-shadow: 0 0 7px var(--ok); }
+    .dot.done { background: var(--accent); box-shadow: 0 0 7px var(--accent); }
+    /* 相机模式按钮 */
+    #camBtns { bottom: 142px; right: 12px; padding: 8px; display: flex; gap: 6px; }
+    #camBtns button { padding: 4px 12px; font-size: 12px; cursor: pointer;
+      background: rgba(40,80,140,.55); color: var(--text);
+      border: 1px solid rgba(120,180,255,.35); border-radius: 6px; }
+    #camBtns button.on { background: rgba(30,140,90,.85); border-color: var(--ok); }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <div class="hud" id="statusCorner">
+    <span class="dot" id="sseDot"></span><span id="sseText">SSE 连接中…</span>
+    <span id="statSeed"></span><span id="statSimT"></span><span id="statFps"></span>
+  </div>
+
+  <div class="hud" id="sceneBar">
+    <h2>场景选择</h2>
+    <div class="seedRow">seed <input id="seedInput" type="number" value="42" min="0" max="999999">
+      <span id="scnHint"></span></div>
+    <div id="scnList" style="overflow:auto"></div>
+  </div>
+
+  <div class="hud" id="telemetry">
+    <h2>遥测 <span id="tlCount" style="color:var(--dim);font-weight:400"></span></h2>
+    <div id="tcards"></div>
+  </div>
+
+  <div class="hud" id="camBtns">
+    <button id="btnFollow" class="on">跟随长机: 开</button>
+    <button id="btnFree">自由视角</button>
+  </div>
+
+  <div class="hud" id="alertBar">
+    <h2>事件流</h2>
+    <div id="alertList"><div class="ev">— 暂无事件 —</div></div>
+  </div>
+
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    // ── URL 参数：与 90 页同款约定（scenario 传文件名，spec 经 vite /@fs 透传）──
+    const urlQ = new URLSearchParams(location.search);
+    const SIM_URL = urlQ.get('simUrl') || 'http://localhost:8895';
+    const INIT_FILE = urlQ.get('scenario') || 'guanggu-swarm-echelon.json';
+    const INIT_SEED = urlQ.get('seed') || '42';
+    const SPEC_DIR = 'D:\\work\\仿真\\scenario\\examples\\';   // 引导页同款：经 vite /@fs 读平台仓场景 JSON
+
+    // 左栏场景清单：官方 swarm 族 8 个（与 /scenes 引导页一致）
+    const SCENARIOS = [
+      { file: 'guanggu-swarm-echelon.json', name: '楔形双层 · 二机', n: 2 },
+      { file: 'guanggu-swarm-echelon-west.json', name: '西航线 · 二机', n: 2 },
+      { file: 'guanggu-swarm-line4.json', name: '横队 · 四机', n: 4 },
+      { file: 'guanggu-swarm-morph4.json', name: '楔形→横队 · 四机', n: 4 },
+      { file: 'guanggu-swarm-morph4-zroute.json', name: 'Z 形航线 · 四机', n: 4 },
+      { file: 'guanggu-swarm-wedge8.json', name: '楔形密集 · 八机', n: 8 },
+      { file: 'guanggu-swarm-morph8.json', name: '楔形→纵队 · 八机', n: 8 },
+      { file: 'guanggu-swarm-2.json', name: '同高对头 · 二机', n: 2 },
+    ];
+
+    // ── 城市网格常量（90 页同款：50×40，间距 11m ≈ 500m×430m）──
+    const COLS = 50, ROWS = 40, GAP = 11;
+
+    // ── 场景 spec：先取 ORIGIN 再启动引擎（城市锚点依赖 origin）──
+    const specCache = {};
+    async function fetchSpec(file) {
+      if (specCache[file] !== undefined) return specCache[file];
+      try {
+        const r = await fetch('/@fs/' + (SPEC_DIR + file).replaceAll('\\', '/'));
+        specCache[file] = r.ok ? JSON.parse(await r.text()) : null;
+      } catch (e) {
+        console.warn('[92] 场景 spec 读取失败（vite /@fs）:', e.message);
+        specCache[file] = null;
+      }
+      return specCache[file];
+    }
+
+    // ── ENU(米)→经纬度：WGS84 精确系数（90 页 W10 修复同款）──
+    let ORIGIN = { lon: 114.393, lat: 30.50, alt: 0 };   // spec 就绪前的占位（城市 build 前必被覆盖）
+    let CITY_OFF = [0, 0];
+    const E2_W = 1 - (6356752.314245 ** 2) / (6378137 ** 2);
+    let sinLat0 = Math.sin(ORIGIN.lat * Math.PI / 180);
+    let M_PER_DEG_LAT = 6378137 * (1 - E2_W) / (1 - E2_W * sinLat0 * sinLat0) ** 1.5 * (Math.PI / 180);
+    let M_PER_DEG_LON = 6378137 / Math.sqrt(1 - E2_W * sinLat0 * sinLat0)
+      * Math.cos(ORIGIN.lat * Math.PI / 180) * (Math.PI / 180);
+    const enuToLonLat = (e, n) => ({
+      lon: ORIGIN.lon + e / M_PER_DEG_LON,
+      lat: ORIGIN.lat + n / M_PER_DEG_LAT,
+    });
+    /** SSE 帧位姿 ENU → 绝对经纬高 */
+    const enuToLonLatAlt = (e, n, u) => ({ ...enuToLonLat(e, n), alt: ORIGIN.alt + u });
+
+    function setOriginFromSpec(spec) {
+      ORIGIN = {
+        lon: spec.origin.lon, lat: spec.origin.lat, alt: spec.origin.alt_m ?? 0,
+      };
+      // 城市网格锚点偏移（90 页 W9 修复同款）：网格中心对准 origin——
+      // 缺省时城市整体偏东南 ~270m，斜视/天底视锥看不到白模。
+      CITY_OFF = [-(COLS - 1) * GAP / 2, -(ROWS - 1) * GAP / 2];
+      sinLat0 = Math.sin(ORIGIN.lat * Math.PI / 180);
+      M_PER_DEG_LAT = 6378137 * (1 - E2_W) / (1 - E2_W * sinLat0 * sinLat0) ** 1.5 * (Math.PI / 180);
+      M_PER_DEG_LON = 6378137 / Math.sqrt(1 - E2_W * sinLat0 * sinLat0)
+        * Math.cos(ORIGIN.lat * Math.PI / 180) * (Math.PI / 180);
+    }
+
+    /** 四元数 [w,x,y,z] 旋转向量（90 页同款） */
+    function quatRotateVec(q, v) {
+      const [w, x, y, z] = q;
+      const tx = 2 * (y * v[2] - z * v[1]);
+      const ty = 2 * (z * v[0] - x * v[2]);
+      const tz = 2 * (x * v[1] - y * v[0]);
+      return [
+        v[0] + w * tx + (y * tz - z * ty),
+        v[1] + w * ty + (z * tx - x * tz),
+        v[2] + w * tz + (x * ty - y * tx),
+      ];
+    }
+
+    // ── 大屏全局状态 + 诊断出口（verify-dashboard.cjs 断言源）──
+    let viewer = null;
+    let es = null;                       // 当前 EventSource
+    let curFile = null, curSeed = INIT_SEED;
+    const vehiclesLatest = {};           // vid → 最新 SSE 帧
+    const trajPts = {};                  // vid → [{c: Cartesian3}] 已飞轨迹采样
+    const seenEvKeys = new Set();        // 事件去重（near_miss 两机对称挂帧）
+    const evCounts = {};
+    let sseMsgCount = 0, sseState = 'idle';
+    let camMode = 'follow';              // 'follow' | 'free'
+    const MAX_TRAJ_PTS = 1500, TRAJ_MIN_STEP_M = 2;
+    const R_EARTH = engine.Cartesian3.EARTH_RADIUS;   // 归一化 ECEF 世界系半径（米制→单位球）
+
+    let lastSampleEnu = {};
+    /** 轨迹采样：机间位移 >2m 记点（50Hz 全收过密，60s 3000 点）。
+     *  【作用域约束】connectSse 的 frame handler 在模块顶层引用本函数——
+     *  必须与 trajPts/lastSampleEnu 同居顶层，放 demo() 内会每帧
+     *  ReferenceError（首跑实锤：3650 帧全抛、事件/轨迹全断）。 */
+    function sampleTraj(vid, f) {
+      if (!Array.isArray(f.pos_ecef)) return;
+      const enu = f.pos_enu;
+      const last = lastSampleEnu[vid];
+      if (last) {
+        const d = Math.hypot(enu[0] - last[0], enu[1] - last[1], enu[2] - last[2]);
+        if (d < TRAJ_MIN_STEP_M) return;
+      }
+      lastSampleEnu[vid] = [...enu];
+      let arr = trajPts[vid];
+      if (!arr) arr = trajPts[vid] = [];
+      arr.push({ c: new engine.Cartesian3(
+        f.pos_ecef[0] / R_EARTH, f.pos_ecef[1] / R_EARTH, f.pos_ecef[2] / R_EARTH) });
+      if (arr.length > MAX_TRAJ_PTS) arr.shift();
+    }
+    window.__DASH = {
+      demoOk: false, specOk: false,
+      get sseState() { return sseState; },
+      get sseMsgCount() { return sseMsgCount; },
+      get seed() { return curSeed; },
+      get simT() { const f0 = vehiclesLatest[0]; return f0 ? f0.sim_t_s : 0; },
+      get nVehicles() { return Object.keys(vehiclesLatest).length; },
+      get trajLens() { return Object.keys(trajPts).map((k) => trajPts[k].length); },
+      evCounts, get waypointReached() { return evCounts.waypoint_reached || 0; },
+      get done() { return sseState === 'done'; },
+      get camMode() { return camMode; },
+      get vehicles() {
+        const o = {};
+        for (const [k, f] of Object.entries(vehiclesLatest)) {
+          const p = enuToLonLatAlt(f.pos_enu[0], f.pos_enu[1], f.pos_enu[2]);
+          const b = (typeof f.battery === 'object' && f.battery !== null) ? f.battery : null;
+          o[k] = {
+            alt: p.alt,
+            speed: Math.hypot(f.vel_e[0], f.vel_e[1], f.vel_e[2]),
+            lon: p.lon, lat: p.lat,
+            soc: b ? b.soc : null,
+            remainingS: b && Number.isFinite(b.remaining_s_est) ? b.remaining_s_est : null,
+          };
+        }
+        return o;
+      },
+    };
+
+    // ═══════════════ SSE 接入 ═══════════════
+    function closeSse() {
+      if (es) { es.close(); es = null; }
+    }
+    function connectSse(file, seed) {
+      closeSse();
+      // 切场景复位运行态（城市不动：官方 swarm 族 8 场景 origin 实测全一致）
+      for (const k of Object.keys(vehiclesLatest)) delete vehiclesLatest[k];
+      for (const k of Object.keys(trajPts)) delete trajPts[k];
+      for (const k of Object.keys(lastSampleEnu)) delete lastSampleEnu[k];
+      seenEvKeys.clear();
+      for (const k of Object.keys(evCounts)) delete evCounts[k];
+      curFile = file; curSeed = seed;
+      sseState = 'connecting';
+      pushAlert({ type: 'sys' }, `切换场景 ${file}（seed=${seed}），连接 ${SIM_URL}/stream …`);
+      rebuildTrajEntities();
+      rebuildVCards();
+      // 场景绝对路径 percent-encode（中文路径必须 encode）；SIM_URL 绝对地址，
+      // 相对 /stream 会打到 vite——90 页同款约束；跨源依赖 sim-kernel CORS 头。
+      es = new EventSource(
+        `${SIM_URL}/stream?scenario=${encodeURIComponent(SPEC_DIR + file)}` +
+        `&seed=${encodeURIComponent(seed)}`);
+      es.addEventListener('frame', (ev) => {
+        const f = JSON.parse(ev.data);
+        sseMsgCount += 1;
+        if (sseState !== 'done') sseState = 'online';
+        const vid = f.vehicle_id ?? 0;
+        vehiclesLatest[vid] = f;
+        sampleTraj(vid, f);
+        handleEvents(vid, f);
+      });
+      es.addEventListener('done', () => {
+        sseState = 'done';
+        const f0 = vehiclesLatest[0];
+        pushAlert({ type: 'done' }, `场景完成（t=${f0 ? f0.sim_t_s.toFixed(1) : '?'}s），SSE 关闭`);
+        closeSse();
+      });
+      es.onerror = () => {
+        // 主动 close 后不会再触发；其余交 EventSource 自动重连
+        if (es && sseState !== 'done') sseState = 'error';
+      };
+    }
+
+    function handleEvents(vid, f) {
+      for (const e of (Array.isArray(f.events) ? f.events : [])) {
+        const type = e.type || 'unknown';
+        evCounts[type] = (evCounts[type] || 0) + 1;
+        // near_miss/collision 两机对称挂——按 (type,t,payload) 去重，收一侧即完整
+        const key = `${type}|${(f.sim_t_s ?? 0).toFixed(2)}|${e.payload ? JSON.stringify(e.payload) : ''}`;
+        if (seenEvKeys.has(key)) continue;
+        seenEvKeys.add(key);
+        if (seenEvKeys.size > 800) seenEvKeys.clear();
+        pushAlert(e, `v${vid} ${type}${fmtPayload(e.payload)}`, tTag(f));
+      }
+    }
+    const tTag = (f) => `t=${(f.sim_t_s ?? 0).toFixed(1)}s`;
+    function fmtPayload(p) {
+      if (!p || typeof p !== 'object') return '';
+      const parts = Object.entries(p)
+        .filter(([, v]) => typeof v === 'number' || typeof v === 'string')
+        .map(([k, v]) => `${k}=${typeof v === 'number' ? Number(v.toFixed(2)) : v}`);
+      return parts.length ? `（${parts.join(' ')}）` : '';
+    }
+
+    // ═══════════════ 告警条 ═══════════════
+    const alertList = document.getElementById('alertList');
+    function pushAlert(e, text, t) {
+      const type = e.type || 'sys';
+      // near_miss/collision 红色、battery_low/critical/empty 橙色、其余灰
+      const cls = /near_miss|collision/.test(type) ? 'ev-red'
+        : /battery_low|battery_critical|battery_empty/.test(type) ? 'ev-orange' : 'ev';
+      const el = document.createElement('div');
+      el.className = `ev ${cls}`;
+      el.textContent = `[${t || nowClock()}] ${text}`;
+      if (alertList.firstChild && alertList.firstChild.textContent === '— 暂无事件 —') {
+        alertList.textContent = '';
+      }
+      alertList.prepend(el);
+      while (alertList.children.length > 60) alertList.removeChild(alertList.lastChild);
+    }
+    const nowClock = () => new Date().toTimeString().slice(0, 8);
+
+    // ═══════════════ 遥测面板（每机一卡）═══════════════
+    const tcards = document.getElementById('tcards');
+    let cardRefs = {};   // vid → DOM 引用
+    function rebuildVCards() {
+      tcards.textContent = '';
+      cardRefs = {};
+      const spec = specCache[curFile];
+      const n = (spec && spec.swarm && spec.swarm.count) || 1;
+      document.getElementById('tlCount').textContent = `（${n} 机）`;
+      for (let vid = 0; vid < n; vid++) {
+        const el = document.createElement('div');
+        el.className = 'vcard' + (vid === 0 ? ' id0' : '');
+        el.innerHTML = `
+          <div class="hd"><span class="id">${vid === 0 ? '长机 v0' : '伴飞 v' + vid}</span>
+            <span class="st">等待帧…</span></div>
+          <div class="grid2">
+            <span>ALT <b class="v-alt">—</b></span><span>SPD <b class="v-spd">—</b></span>
+            <span>LON <b class="v-lon">—</b></span><span>LAT <b class="v-lat">—</b></span>
+          </div>
+          <div class="socRow">SoC <div class="socBar"><i></i></div><span class="v-soc">N/A</span></div>
+          <div class="socRow">续航 <span class="v-rem" style="color:#b9c7d6">—</span></div>`;
+        tcards.appendChild(el);
+        cardRefs[vid] = {
+          el,
+          st: el.querySelector('.st'),
+          alt: el.querySelector('.v-alt'), spd: el.querySelector('.v-spd'),
+          lon: el.querySelector('.v-lon'), lat: el.querySelector('.v-lat'),
+          soc: el.querySelector('.v-soc'), socBar: el.querySelector('.socBar i'),
+          rem: el.querySelector('.v-rem'),
+        };
+      }
+    }
+    function refreshVCards() {
+      for (const [vid, r] of Object.entries(cardRefs)) {
+        const f = vehiclesLatest[vid];
+        if (!f) { r.st.textContent = '等待帧…'; continue; }
+        const p = enuToLonLatAlt(f.pos_enu[0], f.pos_enu[1], f.pos_enu[2]);
+        r.st.textContent = `t=${f.sim_t_s.toFixed(1)}s`;
+        r.alt.textContent = `${p.alt.toFixed(1)}m`;
+        r.spd.textContent = `${Math.hypot(f.vel_e[0], f.vel_e[1], f.vel_e[2]).toFixed(1)}m/s`;
+        r.lon.textContent = p.lon.toFixed(5);
+        r.lat.textContent = p.lat.toFixed(5);
+        // F69 电池契约：数字（无 battery 配置恒 1.0）→ N/A；对象 → SoC 条+剩余续航
+        const b = (typeof f.battery === 'object' && f.battery !== null) ? f.battery : null;
+        if (b && Number.isFinite(b.soc)) {
+          const pct = Math.round(Math.min(1, Math.max(0, b.soc)) * 100);
+          r.soc.textContent = `${pct}%${Number.isFinite(b.voltage_v) ? ' ' + b.voltage_v.toFixed(1) + 'V' : ''}`;
+          r.socBar.style.width = pct + '%';
+          r.socBar.className = pct <= 20 ? 'low' : pct <= 45 ? 'mid' : '';
+          r.rem.textContent = Number.isFinite(b.remaining_s_est)
+            ? `${Math.max(0, Math.round(b.remaining_s_est))}s` : '—';
+        } else {
+          r.soc.textContent = 'N/A';
+          r.socBar.style.width = '0%';
+          r.rem.textContent = '—';
+        }
+      }
+    }
+
+    // ═══════════════ 左栏场景 UI ═══════════════
+    const scnList = document.getElementById('scnList');
+    for (const s of SCENARIOS) {
+      const el = document.createElement('div');
+      el.className = 'scn' + (s.file === INIT_FILE ? ' on' : '');
+      el.dataset.file = s.file;
+      el.innerHTML = `<div class="nm">${s.name}<span class="n">${s.n}机</span></div>
+        <div class="meta">${s.file}</div>`;
+      el.addEventListener('click', () => switchScenario(s.file));
+      scnList.appendChild(el);
+    }
+    function markActive(file) {
+      for (const el of scnList.children) el.classList.toggle('on', el.dataset.file === file);
+    }
+    function switchScenario(file) {
+      const seed = document.getElementById('seedInput').value || '42';
+      markActive(file);
+      document.getElementById('scnHint').textContent = '加载 spec…';
+      fetchSpec(file).then((spec) => {
+        if (!spec) {
+          document.getElementById('scnHint').textContent = 'spec 读取失败（vite /@fs）';
+          pushAlert({ type: 'sys' }, `场景 spec 读取失败：${file}`);
+          return;
+        }
+        document.getElementById('scnHint').textContent = '';
+        window.__DASH.specOk = true;
+        // 官方 swarm 族 origin 一致；未来若不一致则明示（v1 不重建城市白模）
+        if (spec.origin.lon !== ORIGIN.lon || spec.origin.lat !== ORIGIN.lat) {
+          pushAlert({ type: 'sys' }, '警告：新场景 origin 与城市锚点不一致，白模可能偏离航线');
+        }
+        connectSse(file, seed);
+      });
+    }
+    document.getElementById('seedInput').value = INIT_SEED;
+
+    // ═══════════════ 3D：城市白模 / 机标 / 轨迹线 / 相机 ═══════════════
+    let trajEntities = [];
+    // 轨迹线重建：51 页同款 remove+add（entity positions 直接赋值不触发
+    // definitionChanged 重建——51 页实证注释）；点数有变化才重建控制开销。
+    function rebuildTrajEntities() {
+      if (!viewer) return;
+      for (let id = 0; id <= 7; id++) {
+        const te = trajEntities[id];
+        if (!te) continue;
+        const pts = trajPts[id] || [];
+        if (pts.length >= 2) {
+          if (te.nDrawn === pts.length) continue;
+          if (te.entity) viewer.scene.entities.remove(te.entity);
+          te.entity = viewer.scene.entities.add({
+            name: 'traj' + id,
+            polyline: {
+              positions: pts.map((p) => p.c),
+              width: id === 0 ? 3 : 2,
+              color: id === 0 ? new engine.Color(0.2, 0.85, 1.0, 0.75)
+                              : new engine.Color(1.0, 0.5, 0.2, 0.55),
+            },
+          });
+          te.nDrawn = pts.length;
+        } else if (te.entity) {
+          viewer.scene.entities.remove(te.entity);
+          te.entity = null;
+          te.nDrawn = 0;
+        }
+      }
+    }
+
+    async function demo(viewer_, engineApi) {
+      viewer = viewer_;
+      const { CityBlockBuilder } = engineApi;
+
+      // 1) 程序化小城市（90 页同款 50×40 网格；CITY_OFF 已按 spec origin 对准航线）
+      const builder = new CityBlockBuilder();
+      let seedState = 42;
+      const rand = () => {
+        seedState = (seedState * 1664525 + 1013904223) >>> 0;
+        return seedState / 0xffffffff;
+      };
+      for (let i = 0; i < COLS; i++) {
+        for (let j = 0; j < ROWS; j++) {
+          const e = i * GAP, n = j * GAP;
+          const { lon, lat } = enuToLonLat(e + CITY_OFF[0], n + CITY_OFF[1]);
+          const halfLon = (2.5 + rand() * 2) / M_PER_DEG_LON;
+          const halfLat = (2.5 + rand() * 2) / M_PER_DEG_LAT;
+          builder.addBuilding([
+            { lon: lon - halfLon, lat: lat - halfLat },
+            { lon: lon + halfLon, lat: lat - halfLat },
+            { lon: lon + halfLon, lat: lat + halfLat },
+            { lon: lon - halfLon, lat: lat + halfLat },
+          ], 15 + rand() * 65);
+        }
+      }
+      const prims = builder.build(viewer.context);
+      for (const p of prims) viewer.scene.addPrimitive(p);
+
+      // 2) 多机标记：90 页 wingman 同款预建盒（渲染循环中途动态 addPrimitive 会
+      //    静默卡死——必须渲染前入场；instanceIds 路径绕 PickPass 非实例分支缺陷）
+      const boxGeom = (() => {
+        const faces = [
+          { n: [0, 0, 1], v: [[-.5,-.5,.5],[.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5]] },
+          { n: [0, 0, -1], v: [[.5,-.5,-.5],[-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5]] },
+          { n: [1, 0, 0], v: [[.5,-.5,.5],[.5,-.5,-.5],[.5,.5,-.5],[.5,-.5,.5]] },
+          { n: [-1, 0, 0], v: [[-.5,-.5,-.5],[-.5,-.5,.5],[-.5,.5,.5],[-.5,.5,-.5]] },
+          { n: [0, 1, 0], v: [[-.5,.5,.5],[.5,.5,.5],[.5,.5,-.5],[-.5,.5,-.5]] },
+          { n: [0, -1, 0], v: [[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],[-.5,-.5,.5]] },
+        ];
+        const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+        const verts = [], idx = [];
+        faces.forEach((fc, fi) => {
+          fc.v.forEach((p, i) => verts.push(...p, ...fc.n, uv[i][0], uv[i][1]));
+          const b = fi * 4;
+          idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+        });
+        return { vertices: new Float32Array(verts), indices: new Uint32Array(idx) };
+      })();
+      const BOX_M = 4;   // 大屏可视尺寸（跟随视距 ~100m 下 2.5m 太小）
+      const vehPrims = new Map();
+      for (let id = 0; id <= 7; id++) {
+        // 长机青色、伴机红色（与遥测卡 id0/idN+ 语义一致）
+        const prim = new engineApi.Primitive(viewer.context, {
+          vertices: boxGeom.vertices, indices: boxGeom.indices,
+          color: id === 0 ? new engineApi.Color(0.2, 0.85, 1.0, 1.0)
+                          : new engineApi.Color(0.95, 0.18, 0.18, 1.0),
+          unlit: true,
+          instanceIds: new Uint32Array(24).fill(0x400000 | (id + 1)),
+        });
+        prim.show = false;
+        viewer.scene.addPrimitive(prim);
+        vehPrims.set(id, prim);
+      }
+
+      // 3) 轨迹线：每机一条 entity polyline 占位；真实顶点由顶层
+      //    rebuildTrajEntities 周期重建（51 页同款 remove+add）；采样在顶层
+      //    sampleTraj（connectSse frame handler 顶层引用——放 demo 内每帧
+      //    ReferenceError，首跑实锤）
+      lastSampleEnu = {};
+      for (let id = 0; id <= 7; id++) {
+        const entity = viewer.scene.entities.add({
+          name: 'traj' + id,
+          polyline: {
+            positions: [
+              engineApi.Cartesian3.fromDegrees(ORIGIN.lon, ORIGIN.lat, ORIGIN.alt),
+              engineApi.Cartesian3.fromDegrees(ORIGIN.lon, ORIGIN.lat, ORIGIN.alt + 1),
+            ],
+            width: id === 0 ? 3 : 2,
+            color: id === 0 ? new engineApi.Color(0.2, 0.85, 1.0, 0.75)
+                            : new engineApi.Color(1.0, 0.5, 0.2, 0.55),
+          },
+        });
+        entity.show = false;
+        trajEntities.push({ entity });
+      }
+
+      // 4) 机标位姿更新（200ms 低频，同 90 页 wingman 模式）
+      setInterval(() => {
+        for (const [id, prim] of vehPrims) {
+          const f = vehiclesLatest[id];
+          if (!f || !Array.isArray(f.pos_ecef)) { prim.show = false; continue; }
+          const t = engineApi.Matrix4.fromTranslation(new engineApi.Cartesian3(
+            f.pos_ecef[0] / R_EARTH, f.pos_ecef[1] / R_EARTH, f.pos_ecef[2] / R_EARTH));
+          const s = engineApi.Matrix4.fromUniformScale(BOX_M / R_EARTH);
+          prim.modelMatrix = engineApi.Matrix4.multiply(t, s, new engineApi.Matrix4());
+          prim.show = true;
+        }
+      }, 200);
+
+      // 5) 相机：跟随长机斜视追踪（可切自由）。位置 = 长机后方 90m / 上方 55m，
+      //    pitch ≈ -32°；heading 对齐机头水平方位（quat·[1,0,0] ENU → atan2(e,n)）。
+      //    setView 必须走米制 fromDegrees 分支（90 页 febba8d 坑：{lon,lat} 分支
+      //    贴 Globe 压扁世界，视锥偏离城市 ~11km）。
+      setInterval(() => {
+        if (camMode !== 'follow' || !vehiclesLatest[0]) return;
+        const f = vehiclesLatest[0];
+        if (!Array.isArray(f.pos_enu) || !Array.isArray(f.quat)) return;
+        const [e, n, u] = f.pos_enu;
+        const fwd = quatRotateVec(f.quat, [1, 0, 0]);
+        const mag = Math.hypot(fwd[0], fwd[1]) || 1;
+        const hdE = fwd[0] / mag, hdN = fwd[1] / mag;   // 机头水平单位向量
+        const BACK_M = 90, UP_M = 55;
+        const cam = enuToLonLatAlt(e - hdE * BACK_M, n - hdN * BACK_M, u + UP_M);
+        viewer.camera.setView({
+          destination: engineApi.Cartesian3.fromDegrees(cam.lon, cam.lat, cam.alt),
+          orientation: {
+            heading: Math.atan2(hdE, hdN),
+            pitch: -Math.atan2(UP_M, BACK_M),   // 视线压向长机
+            roll: 0,
+          },
+        });
+      }, 200);
+      const btnFollow = document.getElementById('btnFollow');
+      const btnFree = document.getElementById('btnFree');
+      function setCamMode(m) {
+        camMode = m;
+        btnFollow.classList.toggle('on', m === 'follow');
+        btnFree.classList.toggle('on', m === 'free');
+      }
+      btnFollow.addEventListener('click', () => setCamMode('follow'));
+      btnFree.addEventListener('click', () => setCamMode('free'));
+
+      // 6) 状态自检角（SSE 状态/帧率 rAF 计/seed/sim_t）+ 遥测刷新
+      const sseDot = document.getElementById('sseDot');
+      const sseText = document.getElementById('sseText');
+      const statSeed = document.getElementById('statSeed');
+      const statSimT = document.getElementById('statSimT');
+      const statFps = document.getElementById('statFps');
+      let fpsN = 0, fpsT0 = performance.now();
+      (function fpsLoop() { fpsN += 1; requestAnimationFrame(fpsLoop); })();
+      setInterval(() => {
+        const now = performance.now();
+        const fps = fpsN / ((now - fpsT0) / 1000);
+        fpsN = 0; fpsT0 = now;
+        sseDot.className = 'dot'
+          + (sseState === 'online' ? ' on' : sseState === 'done' ? ' done' : '');
+        sseText.textContent =
+          sseState === 'online' ? `SSE 在线（帧 ${sseMsgCount}）`
+          : sseState === 'connecting' ? 'SSE 连接中…'
+          : sseState === 'done' ? '仿真完成'
+          : sseState === 'error' ? 'SSE 断线重连中…' : 'SSE 未连接';
+        statSeed.textContent = `seed ${curSeed}`;
+        const f0 = vehiclesLatest[0];
+        statSimT.textContent = f0 ? `t=${f0.sim_t_s.toFixed(1)}s` : '';
+        statFps.textContent = `${fps.toFixed(0)} fps`;
+      }, 250);
+      setInterval(refreshVCards, 250);
+      rebuildVCards();
+
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      return { primCount: prims.length, buildings: builder.buildingCount };
+    }
+
+    // ── 启动：先取缺省场景 spec（城市锚点依赖 origin）再 startup ──
+    (async () => {
+      const spec = await fetchSpec(INIT_FILE);
+      if (spec) {
+        setOriginFromSpec(spec);
+        window.__DASH.specOk = true;
+      } else {
+        console.warn('[92] 缺省场景 spec 读取失败（检查 vite /@fs 与平台仓路径）');
+      }
+      let v;
+      try {
+        ({ viewer: v } = await DemoUtils.startup({
+          engine,
+          view: [ORIGIN.lon, ORIGIN.lat + 0.0015, 1500],
+          imagery: 'gaode-sat',
+          title: 'F71 · 低空指挥大屏',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        window.__DASH.initError = String((err && err.message) || err);
+        return;   // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(v, engine);
+        window.__DEMO_OK = true;
+        window.__DASH.demoOk = true;
+        // 就绪即接通 SSE（URL scenario+seed；左栏点击走 switchScenario 重连）
+        connectSse(INIT_FILE, INIT_SEED);
+      } catch (err) {
+        window.__DEMO_OK = false;
+        window.__DASH.initError = String((err && err.message) || err);
+        DemoUtils.showError('大屏逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>
