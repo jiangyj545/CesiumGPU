@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>多机防撞仿真 · 场景引导页</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0b0f14; --panel: #131a23; --line: #1f2a37;
+    --text: #dbe4ee; --dim: #7a8a9c; --accent: #4cc2ff;
+    --danger: #ff5c6a; --ok: #3ddc84;
+  }
+  body {
+    background: radial-gradient(1200px 500px at 50% -100px, #14202e 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    min-height: 100vh; padding: 36px 24px 60px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  header h1 { font-size: 26px; font-weight: 600; letter-spacing: 1px; }
+  header h1 em { color: var(--accent); font-style: normal; }
+  header p { color: var(--dim); margin-top: 8px; font-size: 14px; line-height: 1.7; }
+  .bar {
+    display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 18px; margin: 22px 0; font-size: 14px;
+  }
+  .bar label { color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  .bar input {
+    background: #0d1420; border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 6px 10px; font-size: 14px; width: 170px;
+    font-family: Consolas, monospace;
+  }
+  .bar input:focus { outline: none; border-color: var(--accent); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 8px var(--danger); flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  #srvText { color: var(--dim); }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px; margin-top: 8px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 20px; cursor: pointer; position: relative; overflow: hidden;
+    transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .card:hover {
+    transform: translateY(-3px); border-color: var(--accent);
+    box-shadow: 0 8px 28px rgba(76, 194, 255, .12);
+  }
+  .card .row1 { display: flex; align-items: center; gap: 10px; }
+  .badge {
+    font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 20px;
+    background: #1b3a55; color: var(--accent); flex: none;
+  }
+  .badge.risk { background: #46202a; color: var(--danger); }
+  .card h3 { font-size: 17px; font-weight: 600; flex: 1; }
+  .card .desc { color: var(--dim); font-size: 13.5px; line-height: 1.65; min-height: 44px; }
+  .card .meta { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    font-size: 12px; color: var(--dim); border: 1px solid var(--line);
+    padding: 2px 8px; border-radius: 6px; background: #0d1420;
+  }
+  .chip.hot { color: var(--danger); border-color: #46202a; }
+  .go {
+    margin-top: 4px; color: var(--accent); font-size: 13.5px; font-weight: 600;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .card:hover .go .arr { transform: translateX(4px); }
+  .arr { transition: transform .15s ease; display: inline-block; }
+  footer { margin-top: 30px; color: var(--dim); font-size: 12.5px; line-height: 1.8; }
+  footer code { background: #0d1420; border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>多机防撞仿真 <em>·</em> 场景引导页</h1>
+    <p>点击任意场景卡片,在新标签页打开 <b>90_sensorCam</b> 实时仿真 —— 相机为<b>长机机载天底视角</b>,画面中的
+       <b style="color:var(--danger)">红色盒子</b>即伴飞机(防撞检测目标)。同一 seed 刷新页面可<b>逐帧精确重放</b>。</p>
+  </header>
+
+  <div class="bar">
+    <span class="dot" id="srvDot"></span><span id="srvText">检测仿真服务中…</span>
+    <label>seed <input id="seed" type="number" value="42" min="0" max="999999"></label>
+    <label>simUrl <input id="simUrl" type="text" value="http://localhost:8895"></label>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <footer>
+    依赖:仿真内核 <code>npx tsx src/cli.ts serve --port 8895</code>(平台仓 sim-kernel) + 引擎 vite <code>13000</code>。<br>
+    入口:<code>/examples/89_cityBuildings.html?mode=full</code> 全量城市白模 ·
+    <code>/examples/90_sensorCam.html</code> 机载传感器页 ·
+    <code>/examples/91_episodeReplay.html</code> episode 回放。
+  </footer>
+</div>
+
+<script>
+  // 场景定义:时长/机数/险情为 seed=42 离线实测(seed 不同险情计数会变)
+  const SCENARIOS = [
+    { file: 'guanggu-swarm-echelon.json', name: '楔形双层 · 二机', n: 2,
+      desc: '入门首选:长机与伴飞机保持 5m 层差编队巡航,伴飞红盒全程高可见(入框率 93%)。',
+      chips: ['≈37s', '分层 dz≈5m', '高入框率'] },
+    { file: 'guanggu-swarm-morph4.json', name: '楔形 → 横队 · 四机', n: 4,
+      desc: '第 20s 编队在空中由 V 字楔形重构为横队,画面中红盒位置明显重排 —— 编队切换实时可见。',
+      chips: ['≈37s', 't=20s 队形切换', '4 机'] },
+    { file: 'guanggu-swarm-line4.json', name: '横队 · 四机', n: 4,
+      desc: '四机一字横队分层巡航,对称翼同层梯队;稳定的常规编队样本。',
+      chips: ['≈37s', '横队', '4 机'] },
+    { file: 'guanggu-swarm-morph8.json', name: '楔形 → 纵队 · 八机', n: 8, risk: true,
+      desc: '险情之王:8 机在 36s 内由 V 字收敛为双列纵队,机距压缩触发大量贴近事件(seed42 实测 76 帧 near-miss)。',
+      chips: ['≈37s', 't=15s 收敛', 'near-miss ×76', '8 机'] },
+    { file: 'guanggu-swarm-wedge8.json', name: '楔形密集 · 八机', n: 8, risk: true,
+      desc: '8 机 V 字密集编队全程保持,2 次自然贴近险情(最小机距 2.87m)—— 近距正样本源。',
+      chips: ['≈37s', 'near-miss ×2', '密集编队', '8 机'] },
+    { file: 'guanggu-swarm-morph4-zroute.json', name: 'Z 形航线 · 四机', n: 4,
+      desc: '新几何航线:北-东-北 Z 形双转弯 + 队形切换;让检测模型新场景检出率翻倍的数据源之一。',
+      chips: ['≈56s', 'Z 形双转弯', '新航线', '队形切换'] },
+    { file: 'guanggu-swarm-echelon-west.json', name: '西航线 · 二机', n: 2,
+      desc: '新几何航线:航点西移 250m 飞越城西街区,全新视角与建筑分布(新场景泛化数据源)。',
+      chips: ['≈55s', '城西街区', '新航线'] },
+    { file: 'guanggu-swarm-2.json', name: '同高对头 · 二机', n: 2, risk: true,
+      desc: '长航线(约 3 分钟):两机同高度相向逼近制造冲突,贴近时刻即投影重合 —— near-miss 事件源。',
+      chips: ['≈174s', '同高冲突', '5 航点'] },
+  ];
+
+  const BASE = 'D:\\work\\仿真\\scenario\\examples\\';
+  const $ = id => document.getElementById(id);
+
+  function buildUrl(s) {
+    const seed = $('seed').value || '42';
+    const simUrl = $('simUrl').value || 'http://localhost:8895';
+    const p = new URLSearchParams({
+      pose: 'sse', simUrl,
+      scenario: BASE + s.file, seed, hz: '5',
+    });
+    return '/examples/90_sensorCam.html?' + p.toString();
+  }
+
+  const grid = $('grid');
+  for (const s of SCENARIOS) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="row1">
+        <span class="badge${s.risk ? ' risk' : ''}">${s.n} 机</span>
+        <h3>${s.name}</h3>
+      </div>
+      <div class="desc">${s.desc}</div>
+      <div class="meta">${s.chips.map(c => `<span class="chip${/near-miss|冲突/.test(c) ? ' hot' : ''}">${c}</span>`).join('')}</div>
+      <div class="go">▶ 查看实时仿真 <span class="arr">→</span></div>`;
+    card.addEventListener('click', () => window.open(buildUrl(s), '_blank'));
+    grid.appendChild(card);
+  }
+
+  // 仿真服务在线检测(/health)
+  (async () => {
+    const dot = $('srvDot'), text = $('srvText');
+    const check = async () => {
+      try {
+        const r = await fetch($('simUrl').value.replace(/\/+$/, '') + '/health', { cache: 'no-store' });
+        const on = r.ok;
+        dot.classList.toggle('on', on);
+        text.textContent = on ? '仿真内核在线(' + $('simUrl').value + ')' : '仿真内核异常(/health 非 200)';
+      } catch {
+        dot.classList.remove('on');
+        text.textContent = '仿真内核离线 —— 请先在平台仓执行 npx tsx src/cli.ts serve --port 8895';
+      }
+    };
+    $('simUrl').addEventListener('change', check);
+    await check(); setInterval(check, 10000);
+  })();
+</script>
+</body>
+</html>
