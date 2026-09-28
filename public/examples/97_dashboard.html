@@ -164,6 +164,16 @@
     });
     /** SSE 帧位姿 ENU → 绝对经纬高 */
     const enuToLonLatAlt = (e, n, u) => ({ ...enuToLonLat(e, n), alt: ORIGIN.alt + u });
+    // WGS84 椭球表面半径（归一化，引擎 Camera.surfaceRadius 同款）——相机高度必须对椭球算，
+    // 单位球近似在 30.5° 纬度差 ~4km（2026-09-28 贴地保护首版实锤）
+    const surfR = (p) => {
+      const rho = 6356752.314245 / 6378137;
+      const inv = 1 / Math.hypot(p.x, p.y, p.z);
+      const ux = p.x * inv, uy = p.y * inv / rho, uz = p.z * inv / rho;
+      const n = Math.sqrt(ux * ux + uy * uy + uz * uz);
+      const cx2 = (ux / n) ** 2;
+      return Math.sqrt(cx2 + rho * rho * (1 - cx2));
+    };
 
     function setOriginFromSpec(spec) {
       ORIGIN = {
@@ -235,6 +245,11 @@
       evCounts, get waypointReached() { return evCounts.waypoint_reached || 0; },
       get done() { return sseState === 'done'; },
       get camMode() { return camMode; },
+      // 相机诊断（贴地保护 FLOOR_H 联动）：hM=椭球离地高度(米)
+      get cam() {
+        const p = viewer && viewer.camera && viewer.camera.position;
+        return p ? { hM: +((Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137).toFixed(1) } : null;
+      },
       get vehicles() {
         const o = {};
         for (const [k, f] of Object.entries(vehiclesLatest)) {
@@ -463,6 +478,18 @@
       viewer = viewer_;
       const { CityBlockBuilder } = engineApi;
 
+      // free 模式贴地保护（2026-09-28 实锤：滚轮连续拉近后相机贴地，白膜/机盒随背面剔除整片消失）。
+      // 引擎 Camera.zoom 的 minR 钳在椭球上方 ~128m 且沿径向抬回——贴地掠射观感依旧；页面级在
+      // document 捕获阶段拦截"高度 < FLOOR_H 时的继续拉近"（引擎 handler 已先注册在 canvas，同元素拦不住）。
+      const FLOOR_H = 300; // 米；必须高于引擎 zoom 的椭球上 ~128m 钳制才能先一步拦住（127.6m 平视即掠射消失）
+      document.addEventListener('wheel', (e) => {
+        if (camMode !== 'free' || e.deltaY >= 0) return; // 只拦 free 模式的拉近（deltaY<0）
+        const p = viewer && viewer.camera && viewer.camera.position;
+        if (!p) return;
+        const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
+        if (hM < FLOOR_H) { e.stopPropagation(); e.preventDefault(); }
+      }, true);
+
       // 1) 程序化小城市（90 页同款 50×40 网格；CITY_OFF 已按 spec origin 对准航线）
       const builder = new CityBlockBuilder();
       let seedState = 42;
@@ -587,6 +614,23 @@
         camMode = m;
         btnFollow.classList.toggle('on', m === 'follow');
         btnFree.classList.toggle('on', m === 'free');
+        if (m === 'free') {
+          // free 入场保护（2026-09-28 实锤）：follow 的 -32° 平视被带进 free，引擎 zoom 把高度
+          // 钳到椭球上方 ~128m 后平视即贴地掠射——白膜/机盒压进地平线、底图放大成放射纹理。
+          // 低于 300m 时抬到 300m 并压 -45° 俯视，保证白膜始终在画。
+          const c = viewer && viewer.camera, p = c && c.position;
+          if (p) {
+            const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
+            if (hM < 300) {
+              const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
+              const lat = Math.atan2(p.z, Math.sqrt(p.x * p.x + p.y * p.y)) * 180 / Math.PI;
+              c.setView({
+                destination: engineApi.Cartesian3.fromDegrees(lon, lat, 300),
+                orientation: { heading: 0, pitch: -45 * Math.PI / 180, roll: 0 },
+              });
+            }
+          }
+        }
       }
       btnFollow.addEventListener('click', () => setCamMode('follow'));
       btnFree.addEventListener('click', () => setCamMode('free'));
