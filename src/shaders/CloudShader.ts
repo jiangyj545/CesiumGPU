@@ -60,7 +60,9 @@ export const CLOUD_SHADOW_PARAMS_UBO_BYTES = 96;
 const CLOUD_NOISE_WGSL = /* wgsl */`
 // 2D hash / value noise / 5 octave FBM（旋转防轴向伪影）。
 fn cloudHash(p: vec2<f32>) -> f32 {
-  let q = fract(p * vec2<f32>(123.34, 456.21));
+  // var 而非 let：q 参与二次累加（let 不可变——真机 createShaderModule 解析期
+  // 同步抛 "cannot assign to 'let q'"，整帧级联作废黑屏，2026-09-28 实测）。
+  var q = fract(p * vec2<f32>(123.34, 456.21));
   q += dot(q, q + 45.32);
   return fract(q.x * q.y);
 }
