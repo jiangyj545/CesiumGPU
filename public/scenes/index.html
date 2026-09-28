@@ -149,7 +149,10 @@
     const simUrl = $('simUrl').value || 'http://localhost:8895';
     const p = new URLSearchParams({
       pose: 'sse', simUrl,
-      scenario: BASE + s.file, seed, hz: '5',
+      scenario: BASE + s.file, seed,
+      // hz=录制采样频率:farm 实证安全值 2(5Hz 全帧 capture 含 RGB 编码,
+      // 桌面端录制时明显掉帧;页面下拉可临时调高)
+      hz: '2',
     });
     const spec = await fetchSpec(s);
     if (spec) p.set('spec', spec);

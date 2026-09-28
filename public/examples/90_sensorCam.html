@@ -47,7 +47,8 @@
       <button id="btnDownload" disabled>下载 JSON</button>
       <label>hz <select id="hzSel">
         <option value="1">1</option>
-        <option value="5" selected>5</option>
+        <option value="2" selected>2</option>
+        <option value="5">5</option>
         <option value="10">10</option>
       </select></label>
     </div>
@@ -93,6 +94,17 @@
       ? JSON.parse(urlQ.get('spec'))
       : null;
     const GIMBAL_STAB = urlQ.get('gimbal') === 'stab';
+    // URL hz → 录制采样初始值(此前仅注释声称支持、从未实现——手工点"开始录制"
+    // 恒为下拉默认 5,桌面端 capture 全帧开销大导致卡顿;farm 走 start({hz}) 不受影响)
+    {
+      const urlHz = Number(urlQ.get('hz') || '');
+      if (urlHz > 0) {
+        const sel = document.getElementById('hzSel');
+        if (sel && [...sel.options].some((o) => o.value === String(urlHz))) {
+          sel.value = String(urlHz);
+        }
+      }
+    }
 
     // ── ENU 锚点：SSE 模式跟随 scenario origin，mock 模式保持页面常量 ──
     const ORIGIN = (POSE_SSE && SCENARIO_SPEC)
