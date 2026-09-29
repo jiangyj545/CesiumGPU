@@ -258,7 +258,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         // 卷云银边：视线朝太阳时纤维丝前向散射增亮。
         let cSilver = pow(clamp(dot(rd, cloud.sunDirection.xyz), 0.0, 1.0), 4.0) * (1.0 - cDens);
         cCol += vec3<f32>(cSilver * 0.6);
-        let cA = min(clamp(cDens * cirrus.params0.z, 0.0, 1.0), 0.5) * horizon;
+        // 卷云仰角门（2026-09-29 用户截图"橙白横带"）：卷云高 ~8km，贴水
+        // 平视时交点极远 → 压成地平线上方一条突兀橙白线；仰角 <~3.4° 渐隐。
+        let cirrFade = smoothstep(0.06, 0.20, el);
+        let cA = min(clamp(cDens * cirrus.params0.z, 0.0, 1.0), 0.5) * horizon * cirrFade;
         premul = cCol * cA + premul * (1.0 - cA);
         alpha = cA + alpha * (1.0 - cA);
       }

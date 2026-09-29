@@ -754,6 +754,10 @@ fn vs_main( input : VSIn ) -> VSOut {
 fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let camPos = camera.cameraPosition.xyz;
 
+  // 掠射各向异性 tap 间距（dpdx/dpdy 只能 uniform control flow——必须排在
+  // 下方 occlusion discard 之前求值；discard 后调用真机解析错，守卫同款）
+  let stepMPix = max( length( dpdx( input.planeXZ ) ), length( dpdy( input.planeXZ ) ) );
+
   // 地球遮挡（IPass 无深度附件，片元级射线-球求交，与 FloodWater 同款）
   let oc = input.worldPos - camPos;
   let qa = dot( oc, oc );
@@ -772,14 +776,29 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   var slopeX = 0.0;
   var slopeZ = 0.0;
   var divg = 0.0;
+  // 掠射各向异性近似（2026-09-29 用户截图彩色竖条根因）：quad 隐式 LOD 是
+  // 各向同性的——掠射方向（视线的平面投影）纹理被极度拉伸时沿拉伸向欠采样，
+  // 8-11px 周期彩条（B 通道 ±25 摆动）。4-tap 沿视线平面方向平均 = 手动
+  // aniso（tidewater 同款手法）；tap 间距按该级联 texel 步长缩放。
+  //（viewDir 在 fs 后段才声明——此处先从 camPos 自算视线方向）
+  let toCamA = camPos - input.worldPos;
+  let viewDirA = toCamA / max( length( toCamA ), 1e-9 );
+  var viewXZn = vec2<f32>( dot( viewDirA, ocean.eastDir ), dot( viewDirA, ocean.northDir ) );
+  viewXZn = viewXZn / max( length( viewXZn ), 1e-5 );
   for ( var c = 0; c < OCEAN_CASCADES; c++ ) {
     let uv = input.planeXZ / ocean.sizes[ c ].x;
-    // 隐式 LOD（FS 微分自动选 mip）：mip 链每帧已生成（MIP_LEVELS 9），此前
-    // 强制 mip0 在掠射机位下欠采样，屏幕上出 ~11px 周期 moiré 竖条纹
-    //（2026-09-29 贴水机位实测）。OCEAN_CASCADES 编译期常量 → uniform 循环，
-    // textureSample 合法。
-    foam += textureSample( dispTex, smp, uv, c ).w;
-    let g = textureSample( derivTex, smp, uv, c );
+    // tap 间距 = 屏幕导数（每像素世界米数，discard 前预计算）换算到该级联
+    // uv——对准混叠频率（texel×N 固定间距远大于条纹世界周期 0.5-5m，无效）。
+    let duv = viewXZn * ( stepMPix * 1.5 / ocean.sizes[ c ].x );
+    let g0 = textureSample( derivTex, smp, uv, c );
+    let ga = textureSample( derivTex, smp, uv + duv, c );
+    let gb = textureSample( derivTex, smp, uv + duv * 2.0, c );
+    let gc = textureSample( derivTex, smp, uv - duv, c );
+    let g = ( g0 + ga + gb + gc ) * 0.25;
+    let f0 = textureSample( dispTex, smp, uv, c ).w;
+    let fa = textureSample( dispTex, smp, uv + duv * 1.5, c ).w;
+    let fb = textureSample( dispTex, smp, uv - duv * 1.5, c ).w;
+    foam += ( f0 + fa + fb ) / 3.0;
     slopeX += g.x;
     slopeZ += g.y;
     divg += g.z + g.w; // λ(Dxx + Dzz)：水平压缩度 → 粗糙度调制
