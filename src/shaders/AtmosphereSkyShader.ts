@@ -502,9 +502,15 @@ fn skyMoonSky(dirL: vec3f, moonUp: f32, nightK: f32) -> vec3f {
 const SKY_TONEMAP_WGSL = /* wgsl */`
 // Reinhard + gamma：适配 LDR swap-chain 主路径（与 LightingPass 旧路径一致）；
 // tonemapK = 0 时线性直出（接入 HDR 后处理链时由 AtmosphereSky.toneMapped 控制）。
+// 饱和保持（2026-09-29 用户"洗衣水色"实测）：朴素 Reinhard 对中间调把
+// chroma 洗灰（天顶蓝 B 通道 123 vs 应有 200+）——tonemap 后按 luma
+// 重标 chroma ×1.25，gamma 前压回 [0,1]。
 fn atmTonemap(c: vec3f) -> vec3f {
   let m = max(c, vec3f(0.0));
-  return pow(m / (m + vec3f(1.0)), vec3f(1.0 / 2.2));
+  var t = m / (m + vec3f(1.0));
+  let luma = dot(t, vec3f(0.2126, 0.7152, 0.0722));
+  t = clamp(mix(vec3f(luma), t, 1.25), vec3f(0.0), vec3f(1.0));
+  return pow(t, vec3f(1.0 / 2.2));
 }
 `;
 

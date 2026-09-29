@@ -210,7 +210,7 @@
         return (v && b) ? { view: v, atmosphereParamsBuffer: b, sunDir: sky.sunDirection } : null;
       };
       viewer.scene.aerialSource = bindAerial;
-      viewer.scene.aerialPerspective = { strength: 0.6, distM: 25000 };
+      viewer.scene.aerialPerspective = { strength: 0.42, distM: 25000 };
 
       // ── 5d. T4 深度感知破碎波：沙洲岸线带（VS 波形变形 + FS 泡沫花边/内卷
       //    水幕）；BreakSpray 吸附源复用同一张 SeabedHeightField 视图 + 位移

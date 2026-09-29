@@ -972,7 +972,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     fogCol = mix( fogCol, fogCol * sunTint * 1.4, toSun * apStrength );
   }
   let fog = 1.0 - exp( - distM / FOG_DIST );
-  col = mix( col, fogCol, fog * 0.95 );
+  col = mix( col, fogCol, fog * 0.88 );
 
   // 水下仰视 Snell 窗：视线与竖直夹角 < 临界角 ~48.6°（ndv > ~0.66）区域
   // 透明天空（亮窗），窗外全反射暗带；alpha 同步降——此前海面 alpha 恒

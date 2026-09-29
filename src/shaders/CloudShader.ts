@@ -96,7 +96,10 @@ fn cloudFbm(pIn: vec2<f32>) -> f32 {
 /** 云密度场（planeM：云高切平面东西/北 米坐标；windKm：风漂移 公里；
  *  aa：屏幕导数驱动的频率降档（1 = 原频率；>1 掠射/远距抗混叠）。 */
 fn cloudDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>, aa: f32) -> f32 {
-  let q = planeM * ( 0.00042 / aa ) + windKm;
+  // 基频 0.0013（特征 ~770m，积云团尺度；原 0.00042 的 2.4km 格在平视
+  // 天空上只剩 1-2 个噪声格 = "整片灰霾无云形"，2026-09-29 图像分析
+  // 3/10 实测）。140/160m 光照差分在 770m 特征下产生有效明暗 → 体积感。
+  let q = planeM * ( 0.0013 / aa ) + windKm;
   let warp = vec2<f32>(
     cloudFbm(q * 0.5),
     cloudFbm(q * 0.5 + vec2<f32>(3.7, 9.1))
@@ -115,7 +118,8 @@ fn cloudDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>, aa: f32) ->
 fn cirrusDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>, stretchRad: f32, streak: f32, aa: f32) -> f32 {
   let cs = cos(stretchRad);
   let sn = sin(stretchRad);
-  let p = planeM * ( 0.00042 / aa ) + windKm;
+  // 基频 0.0008（横向特征 1.25km，×0.15 拉伸 → ~8km 长纤维丝，高空卷云尺度）
+  let p = planeM * ( 0.0008 / aa ) + windKm;
   let q = vec2<f32>(p.x * cs + p.y * sn, -p.x * sn + p.y * cs);
   // 纤维状：拉伸方向压缩 ×0.15，横向 ×1.35 提高频带密度。
   let squashed = vec2<f32>(q.x * 0.15, q.y * 1.35);
