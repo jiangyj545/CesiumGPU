@@ -239,7 +239,7 @@
       get sseState() { return sseState; },
       get sseMsgCount() { return sseMsgCount; },
       get seed() { return curSeed; },
-      get simT() { const f0 = vehiclesLatest[0]; return f0 ? f0.sim_t_s : 0; },
+      get simT() { const f0 = Object.values(vehiclesLatest)[0]; return f0 ? f0.sim_t_s : 0; },
       get nVehicles() { return Object.keys(vehiclesLatest).length; },
       get trajLens() { return Object.keys(trajPts).map((k) => trajPts[k].length); },
       evCounts, get waypointReached() { return evCounts.waypoint_reached || 0; },
@@ -300,7 +300,7 @@
       });
       es.addEventListener('done', () => {
         sseState = 'done';
-        const f0 = vehiclesLatest[0];
+        const f0 = Object.values(vehiclesLatest)[0];
         pushAlert({ type: 'done' }, `场景完成（t=${f0 ? f0.sim_t_s.toFixed(1) : '?'}s），SSE 关闭`);
         closeSse();
       });
@@ -483,7 +483,10 @@
       // document 捕获阶段拦截"高度 < FLOOR_H 时的继续拉近"（引擎 handler 已先注册在 canvas，同元素拦不住）。
       const FLOOR_H = 300; // 米；必须高于引擎 zoom 的椭球上 ~128m 钳制才能先一步拦住（127.6m 平视即掠射消失）
       document.addEventListener('wheel', (e) => {
-        if (camMode !== 'free' || e.deltaY >= 0) return; // 只拦 free 模式的拉近（deltaY<0）
+        // 不分模式拦截拉近（2026-09-29 铁证：默认跟拍模式下滚轮一路 14705→127.6m 引擎钳制底
+        // 无人拦——此前条件 camMode!=='free' 直接放行，用户"一缩放白膜就消失"即此路径）。
+        // 跟拍模式相机归跟拍定时器管（滚轮拉低只会与其写竞争闪烁）；free 模式由下方监控兜底。
+        if (e.deltaY >= 0) return; // 只拦拉近（deltaY<0）
         const p = viewer && viewer.camera && viewer.camera.position;
         if (!p) return;
         const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
@@ -607,8 +610,8 @@
       //    setView 必须走米制 fromDegrees 分支（90 页 febba8d 坑：{lon,lat} 分支
       //    贴 Globe 压扁世界，视锥偏离城市 ~11km）。
       setInterval(() => {
-        if (camMode !== 'follow' || !vehiclesLatest[0]) return;
-        const f = vehiclesLatest[0];
+        if (camMode !== 'follow' || !Object.values(vehiclesLatest)[0]) return;
+        const f = Object.values(vehiclesLatest)[0];
         if (!Array.isArray(f.pos_enu) || !Array.isArray(f.quat)) return;
         const [e, n, u] = f.pos_enu;
         const fwd = quatRotateVec(f.quat, [1, 0, 0]);
@@ -672,7 +675,7 @@
           : sseState === 'done' ? '仿真完成'
           : sseState === 'error' ? 'SSE 断线重连中…' : 'SSE 未连接';
         statSeed.textContent = `seed ${curSeed}`;
-        const f0 = vehiclesLatest[0];
+        const f0 = Object.values(vehiclesLatest)[0];
         statSimT.textContent = f0 ? `t=${f0.sim_t_s.toFixed(1)}s` : '';
         statFps.textContent = `${fps.toFixed(0)} fps`;
       }, 250);
