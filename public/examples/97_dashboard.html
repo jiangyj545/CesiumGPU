@@ -164,15 +164,16 @@
     });
     /** SSE 帧位姿 ENU → 绝对经纬高 */
     const enuToLonLatAlt = (e, n, u) => ({ ...enuToLonLat(e, n), alt: ORIGIN.alt + u });
-    // WGS84 椭球表面半径（归一化，引擎 Camera.surfaceRadius 同款）——相机高度必须对椭球算，
-    // 单位球近似在 30.5° 纬度差 ~4km（2026-09-28 贴地保护首版实锤）
+    // 真 WGS84 椭球表面矢长（归一化）——97 页相机走 setView 的 x/y/z 分支（fromDegrees 米制
+    // ×1/EARTH_SCALE），与城市/传感器链同属"未压扁 WGS84 系"（引擎 ca30189 双约定并存）。
+    // 引擎 Camera.surfaceRadius 是 Globe 压扁系公式，对未压扁坐标低估 ~13km（2026-09-29 实锤：
+    // fromDegrees(120m) 被算成 13325m）——页面侧必须用未压扁椭球公式。数值法：沿单位方向求
+    // 椭球 x²/a²+y²/a²+z²/b²=1 的 t 倍，a=1 归一化。
     const surfR = (p) => {
       const rho = 6356752.314245 / 6378137;
-      const inv = 1 / Math.hypot(p.x, p.y, p.z);
-      const ux = p.x * inv, uy = p.y * inv / rho, uz = p.z * inv / rho;
-      const n = Math.sqrt(ux * ux + uy * uy + uz * uz);
-      const cx2 = (ux / n) ** 2;
-      return Math.sqrt(cx2 + rho * rho * (1 - cx2));
+      const r = Math.hypot(p.x, p.y, p.z) || 1;
+      const ux = p.x / r, uy = p.y / r, uz = p.z / r;
+      return 1 / Math.sqrt(ux * ux + uy * uy + (uz * uz) / (rho * rho));
     };
 
     function setOriginFromSpec(spec) {
