@@ -530,6 +530,34 @@ export class Camera {
   }
 
   /**
+   * 左键拖动轨道灵敏度（弧度/像素）。贴指公式：一像素 = 视野高度的 1/H 份额
+   * 对应的地表弧长，dθ/px = 2·h·tan(fovY/2)/H —— 低空地图贴合指尖、高空自动加速。
+   *
+   * 2026-09-29 根因修复：旧公式 r·0.0003 用地心距离（归一化 ≈1 恒定）与离地高度
+   * 无关，恒 ≈1913 m/px —— 300m 低空拖 12 步白膜（500m 城市）完全出画剩农田，
+   * 97 页「一拖动就看不到白膜」即此。
+   *
+   * 高度取 Cartographic 大地高（与 _updateProjMatrix 的 near/far 同源，W4 路径）：
+   * 矢长差 |p|−surface 在两系都不准——米制 fromDegrees 系高估 ~3 倍（矢径 vs 法向），
+   * resolveDestination 压扁系直接 ≤0（首版实锤：300m/2000m 灵敏度同为贴地下限）。
+   * 下限 12.7 米防贴地时零速卡死。
+   */
+  static orbitSensitivity(
+    position: Cartesian3,
+    fovY: number,
+    viewportHeightPx: number,
+  ): number {
+    Cartesian3.multiplyByScalar(position, Camera.EARTH_SCALE, Camera._scratchEcefM);
+    // fromCartesian().height 已是归一化高度（内部米制 ÷ EARTH_SCALE）——勿再除
+    const h = Math.max(
+      Cartographic.fromCartesian(Camera._scratchEcefM, Camera._scratchCarto).height,
+      12.7 / Camera.EARTH_SCALE,
+    );
+    const H = Math.max(viewportHeightPx, 1);
+    return (2 * h * Math.tan(fovY * 0.5)) / H;
+  }
+
+  /**
    * Normalise a destination to internal ECEF units (Earth radius = 1).
    * Accepts metres-ECEF `Cartesian3` or a `{ lon, lat, height }` shortcut
    * (lon/lat in degrees, height in metres).

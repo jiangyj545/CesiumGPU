@@ -329,16 +329,20 @@ export class Viewer {
 
     // ── Mouse move: orbit / middle pivot tilt / right-drag zoom ────────────
     handler.setInputAction((pos) => {
-      // Orbit sensitivity scales with camera distance (Cesium behaviour)
-      const r = Cartesian3.magnitude(camera.position);
-
       if (this._isDragging) {
         const dx = pos.x - this._lastMouseX;
         const dy = pos.y - this._lastMouseY;
         this._lastMouseX = pos.x;
         this._lastMouseY = pos.y;
 
-        const sensitivity = r * 0.0003;
+        // Orbit sensitivity follows *altitude* (Cesium-like finger-tracking):
+        // 旧 r·0.0003 rad/px 恒 ≈1913 m/px 与高度无关——300m 低空拖 12 步白膜
+        // 出画（97 页「一拖动就看不到白膜」根因，2026-09-29）。
+        const sensitivity = Camera.orbitSensitivity(
+          camera.position,
+          camera.frustum.fov,
+          this._canvas.clientHeight,
+        );
         // dy sign matches Cesium: drag DOWN → camera orbits northward (positive deltaLat)
         camera.rotate(-dx * sensitivity, dy * sensitivity);
       }
