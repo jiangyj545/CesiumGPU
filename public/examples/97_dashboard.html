@@ -484,6 +484,14 @@
       // document 捕获阶段拦截"高度 < FLOOR_H 时的继续拉近"（引擎 handler 已先注册在 canvas，同元素拦不住）。
       const FLOOR_H = 300; // 米；必须高于引擎 zoom 的椭球上 ~128m 钳制才能先一步拦住（127.6m 平视即掠射消失）
       document.addEventListener('wheel', (e) => {
+        // 跟拍模式下滚轮拉近=用户想自己看——自动切自由（拦当前事件，入场保护置 300m 俯视；
+        // 2026-09-29 前跟拍模式滚轮被保护拦死=「视角锁死」体感的来源之一）
+        if (camMode === 'follow' && e.deltaY < 0) {
+          setCamMode('free');
+          pushAlert({ type: 'sys' }, '已切自由视角（滚轮），拖拽/中键旋转自由看，点「跟随长机」切回');
+          e.stopPropagation(); e.preventDefault();
+          return;
+        }
         // 不分模式拦截拉近（2026-09-29 铁证：默认跟拍模式下滚轮一路 14705→127.6m 引擎钳制底
         // 无人拦——此前条件 camMode!=='free' 直接放行，用户"一缩放白膜就消失"即此路径）。
         // 跟拍模式相机归跟拍定时器管（滚轮拉低只会与其写竞争闪烁）；free 模式由下方监控兜底。
@@ -492,6 +500,14 @@
         if (!p) return;
         const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
         if (hM < FLOOR_H) { e.stopPropagation(); e.preventDefault(); }
+      }, true);
+      // 拖拽意图自动脱离跟拍（2026-09-29：跟拍模式拖拽视角被 200ms setView 顶回=「不能切换视角」
+      // 实锤——canvas 上任何按键拖拽即切自由，跟拍按钮随时切回；点按钮/面板不触发）
+      document.addEventListener('mousedown', (e) => {
+        if (camMode !== 'follow') return;
+        if (!(e.target && e.target.tagName === 'CANVAS')) return;
+        setCamMode('free');
+        pushAlert({ type: 'sys' }, '已切自由视角（拖拽），左键平移/中键旋转/滚轮缩放，点「跟随长机」切回');
       }, true);
       // 贴地保护兜底（2026-09-29 实锤：右键拖拽下拉走 Viewer 的 camera.zoom，绕过上面 wheel 拦截，
       // 直接打到引擎 128m 钳制底+平视掠射→白膜消失/底图放射变形）。持续监控覆盖 wheel/右键/pinch
