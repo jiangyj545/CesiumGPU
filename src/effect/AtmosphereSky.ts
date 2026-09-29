@@ -92,6 +92,8 @@ export interface AtmosphereSkyOptions {
   groundAlbedo?: number;
   /** 星空强度，0 关星星。Default: `1` */
   starIntensity?: number;
+  /** 太阳盘+Mie 光晕强度（tidewater 观感 1.5-2；0 关日盘）。Default: `1` */
+  sunDiskIntensity?: number;
   /** 月亮方向（归一化 ECEF），null 关月亮。Default: `null` */
   moonDirection?: [number, number, number] | null;
 }
@@ -127,6 +129,8 @@ export class AtmosphereSky implements IPass {
   private readonly _ozoneScale: number;
   private readonly _groundAlbedo: number;
   private readonly _starIntensity: number;
+  /** 太阳盘+Mie 光晕强度（SkyParams @32；tidewater 观感 1.5-2）。 */
+  private readonly _sunDiskIntensity: number;
 
   /** 深度源：view 或 getter（gbuffer resize 会重建纹理，推荐 getter）。 */
   private _depthSource: GPUTextureView | (() => GPUTextureView | null) | null = null;
@@ -174,6 +178,7 @@ export class AtmosphereSky implements IPass {
     this._ozoneScale = opts.ozoneScale ?? 1;
     this._groundAlbedo = opts.groundAlbedo ?? 0.08;
     this._starIntensity = opts.starIntensity ?? 1;
+    this._sunDiskIntensity = opts.sunDiskIntensity ?? 1;
 
     // 静态参数预填（每帧只更新 viewHeight / sunDirLocal）
     const a = this._atmoData;
@@ -190,7 +195,7 @@ export class AtmosphereSky implements IPass {
     s[3] = this._starIntensity;
     s[4] = this._sunDir[0]; s[5] = this._sunDir[1]; s[6] = this._sunDir[2];
     s[7] = this._moonDir ? 1 : 0;
-    s[8] = 1; // sunDiskIntensity
+    s[8] = this._sunDiskIntensity;
     if (this._moonDir) { s[0] = this._moonDir[0]; s[1] = this._moonDir[1]; s[2] = this._moonDir[2]; }
     else { s[0] = 0; s[1] = 1; s[2] = 0; }
     s[11] = this.toneMapped ? 1 : 0;

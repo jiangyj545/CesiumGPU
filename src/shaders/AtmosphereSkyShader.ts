@@ -425,9 +425,13 @@ fn skySunDisk(dirW: vec3f, sunDirW: vec3f, upY: f32) -> vec3f {
   let mask = smoothstep(1.0, 0.9, r);
   let mu = sqrt(max(1.0 - r * r, 0.0));
   let limb = 1.0 - 0.6 * (1.0 - mu);
+  // Mie 前向散射光晕：盘外 ~7 个盘半径的柔光（随透射色染——黄昏金橙晕，
+  // 正午白晕）；无此项时低角度太阳只有孤立小盘无 halo（2026-09-29 图像
+  // 对照分析：径向亮度 rad4=240 → rad140=183，与基线渐变几乎不可分）。
+  let glow = exp(-max(r - 1.0, 0.0) * 0.42) * 0.055;
   let T = atmosphereSampleTransmittance(atmosphereParams.viewHeight, upY);
   // physically the disk radiance is E / solid angle (~1.6e5); clamp for fp16 targets
-  return T * mask * limb * 2500.0 * skyParams.sunDiskIntensity * smoothstep(-0.02, 0.0, upY);
+  return T * (mask * limb + glow) * 2500.0 * skyParams.sunDiskIntensity * smoothstep(-0.02, 0.0, upY);
 }
 `;
 

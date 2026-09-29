@@ -261,6 +261,47 @@ function scanDuplicateDefs(wgsl: string, label: string): string[] {
   return dups;
 }
 
+describe('WGSL dpdx/dpdy uniform 流守卫', () => {
+  it('src/shaders 全部 WGSL 段无 discard 后调用 dpdx/dpdy/fwidth（non-uniform 流解析错）', () => {
+    // 2026-09-29 云 AA 改动引入 "dpdy must only be called from uniform
+    // control flow"（真机横幅捕获）：导数内建只能在无条件流调用——本库
+    // 约定 discard 全部前置于导数计算。静态规则：同一顶层函数内 dpdx/dpdy/
+    // fwidth 的调用行之前存在 discard 语句即违规。
+    const DERIV = /\b(?:dpdx|dpdy|fwidth|dpdxCoarse|dpdyCoarse|fwidthCoarse)\s*\(/;
+    const violations: string[] = [];
+    const files = collectTs(SHADER_ROOT);
+    for (const f of files) {
+      const segs = extractWgslSegments(readFileSync(f, 'utf8'));
+      segs.forEach((seg, i) => {
+        const cleaned = stripWgslComments(seg);
+        for (const block of cleaned.split(/(?=^(?:@\w+\s*\n)?fn\s)/m)) {
+          const lines = block.split('\n');
+          const discarded = lines.findIndex((l) => /\bdiscard\s*;/.test(l));
+          if (discarded < 0) continue;
+          lines.forEach((l, j) => {
+            if (j > discarded && DERIV.test(l)) {
+              violations.push(`${f.split('src')[1]} [wgsl#${i}] 行 ${j + 1} 在 discard（行 ${discarded + 1}）后调用导数内建`);
+            }
+          });
+        }
+      });
+    }
+    expect(violations, `discard 后导数调用（移到 discard 前）：\n${violations.join('\n')}`).toHaveLength(0);
+  });
+
+  it('守卫自检：能捕获云 AA 历史坏模式', () => {
+    const bad = ['fn f() {', '  if (h < 0.5) { discard; }', '  let fw = dpdx(p);', '}'].join('\n');
+    const DERIV = /\b(?:dpdx|dpdy|fwidth)\s*\(/;
+    const lines = bad.split('\n');
+    const d = lines.findIndex((l) => /\bdiscard\s*;/.test(l));
+    expect(lines.some((l, j) => j > d && DERIV.test(l))).toBe(true);
+    const good = ['fn f() {', '  let fw = dpdx(p);', '  if (h < 0.5) { discard; }', '}'].join('\n');
+    const gl = good.split('\n');
+    const gd = gl.findIndex((l) => /\bdiscard\s*;/.test(l));
+    expect(gl.some((l, j) => j > gd && DERIV.test(l))).toBe(false);
+  });
+});
+
 describe('WGSL 拼接模块 const 引用 + 重复定义守卫', () => {
   it('LightingShader 16 变体（hdr×CSSM×云影×AP 正交）无未解析 const/fn、无重复定义', () => {
     const bad: string[] = [];

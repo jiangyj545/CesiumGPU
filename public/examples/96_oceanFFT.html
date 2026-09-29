@@ -103,6 +103,7 @@
       const sky = new engine.AtmosphereSky(context, {
         sunDirection: SUN,
         starIntensity: 0,          // 白昼场景关星星
+        sunDiskIntensity: 1.7,     // 太阳盘+Mie 光晕（tidewater 观感 1.5-2）
       });
       sky.setDepthView(() => viewer.scene.gbufferPass
         ? viewer.scene.gbufferPass.getDepthView()
@@ -231,10 +232,10 @@
       //      → spray(船首喷雾粒子，GBuffer 深度测试) → uwFog(全屏罩)
       const uwFog = new engine.UnderwaterFog(context, {
         intensity: 1.15,
-        waterColor: [0.05, 0.24, 0.27],
-        particleDensity: 0.6,
+        waterColor: [0.06, 0.34, 0.31],  // 青绿透光（tidewater 潜水观感）
+        particleDensity: 0.9,
       });
-      uwFog.setSunShaftIntensity(1.2); // Track G：水下太阳光柱（潜水观感）
+      uwFog.setSunShaftIntensity(1.6); // Track G：水下太阳光柱（潜水观感）
       const spray = new engine.BowSpray(context, { maxParticles: 2048, scene: viewer.scene });
       // L5/T4 岸线破碎波喷雾：发射带 = 沙洲岸线（吸附源取 ocean 的海床/位移视图）
       const breakSpray = new engine.BreakSpray(context, {

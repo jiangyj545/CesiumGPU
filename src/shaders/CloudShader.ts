@@ -93,9 +93,10 @@ fn cloudFbm(pIn: vec2<f32>) -> f32 {
   return sum / norm;
 }
 
-/** 云密度场（planeM：云高切平面东西/北 米坐标；windKm：风漂移 公里）。 */
-fn cloudDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>) -> f32 {
-  let q = planeM * 0.00042 + windKm;
+/** 云密度场（planeM：云高切平面东西/北 米坐标；windKm：风漂移 公里；
+ *  aa：屏幕导数驱动的频率降档（1 = 原频率；>1 掠射/远距抗混叠）。 */
+fn cloudDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>, aa: f32) -> f32 {
+  let q = planeM * ( 0.00042 / aa ) + windKm;
   let warp = vec2<f32>(
     cloudFbm(q * 0.5),
     cloudFbm(q * 0.5 + vec2<f32>(3.7, 9.1))
@@ -111,10 +112,10 @@ fn cloudDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>) -> f32 {
  * 丝摆动。与主云同坐标系（planeM 米 + windKm 漂移）；stretchRad 为切平面
  * 内拉伸方向（弧度），streak 为横向扰动强度。
  */
-fn cirrusDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>, stretchRad: f32, streak: f32) -> f32 {
+fn cirrusDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>, stretchRad: f32, streak: f32, aa: f32) -> f32 {
   let cs = cos(stretchRad);
   let sn = sin(stretchRad);
-  let p = planeM * 0.00042 + windKm;
+  let p = planeM * ( 0.00042 / aa ) + windKm;
   let q = vec2<f32>(p.x * cs + p.y * sn, -p.x * sn + p.y * cs);
   // 纤维状：拉伸方向压缩 ×0.15，横向 ×1.35 提高频带密度。
   let squashed = vec2<f32>(q.x * 0.15, q.y * 1.35);
@@ -208,6 +209,29 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   // 地平线渐隐：贴地平的掠射交点拉得极远，alpha 压零防摩尔纹（两层共用）。
   let el = dot(rd, up);
   let horizon = smoothstep(0.015, 0.015 + 0.105 * max(cloud.params0.z, 0.001), el);
+
+  // 掠射抗混叠（两层共用预备）：交点米坐标的屏幕导数模长 → 噪声频率降档
+  //（点阵颗粒根因是各向同性 FBM 在掠射拉伸下欠采样；AA 除子 1 = 原频率）。
+  // dpdx/dpdy 只能在 uniform control flow 调用（真机 "must only be called
+  // from uniform control flow"，2026-09-29）——求交/坐标/导数全部排在
+  // discard 之前的无条件流；hit<0 时坐标无效但后续分支不使用。
+  let hitC = cloudRaySphereNearest(ro, rd, cirrus.planeCenter.w);
+  let hit  = cloudRaySphereNearest(ro, rd, cloud.planeCenter.w);
+  let dC = ro + rd * select(0.0, hitC, hitC > 0.0) - cirrus.planeCenter.xyz;
+  let d  = ro + rd * select(0.0, hit,  hit  > 0.0) - cloud.planeCenter.xyz;
+  let planeMC = vec2<f32>(
+    dot(dC, cloud.eastDir.xyz),
+    dot(dC, cloud.northDir.xyz)
+  ) * CLOUD_EARTH_SCALE;
+  let planeM = vec2<f32>(
+    dot(d, cloud.eastDir.xyz),
+    dot(d, cloud.northDir.xyz)
+  ) * CLOUD_EARTH_SCALE;
+  let fwC = max( length( dpdx( planeMC ) ), length( dpdy( planeMC ) ) );
+  let fw  = max( length( dpdx( planeM  ) ), length( dpdy( planeM  ) ) );
+  let aaC = clamp( fwC / 900.0 + 1.0, 1.0, 24.0 );
+  let aa  = clamp( fw  / 900.0 + 1.0, 1.0, 24.0 );
+
   if (horizon <= 0.002) { discard; }
 
   // 预乘域远→近 over 累积：先卷云（高、远），再主云（低、近）。
@@ -215,17 +239,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   var alpha = 0.0;
 
   // ── 卷云第二层：更高云高球面求交 + 纤维状噪声，alpha 压 ≤ 0.5 ──
-  if (cirrus.params0.x > 0.5) {
-    let hitC = cloudRaySphereNearest(ro, rd, cirrus.planeCenter.w);
-    if (hitC > 0.0) {
-      let dC = ro + rd * hitC - cirrus.planeCenter.xyz;
-      let planeMC = vec2<f32>(
-        dot(dC, cloud.eastDir.xyz),
-        dot(dC, cloud.northDir.xyz)
-      ) * CLOUD_EARTH_SCALE;
+  if (cirrus.params0.x > 0.5 && hitC > 0.0) {
+    {
       let cDens = cirrusDensity(
         planeMC, cirrus.params0.y, cloud.params1.xy,
-        cirrus.params1.x, cirrus.params1.y
+        cirrus.params1.x, cirrus.params1.y, aaC
       );
       if (cDens > 0.004) {
         // 卷云冰晶薄层：正午近白，黄昏染金橙（卷云比主云更受低角度阳光）。
@@ -242,17 +260,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   }
 
   // ── 主云层 ──
-  let hit = cloudRaySphereNearest(ro, rd, cloud.planeCenter.w);
   if (hit > 0.0) {
-    // 云高交点 → 中心切平面米坐标（与云影烘焙同一坐标系）。
-    let d = ro + rd * hit - cloud.planeCenter.xyz;
-    let planeM = vec2<f32>(
-      dot(d, cloud.eastDir.xyz),
-      dot(d, cloud.northDir.xyz)
-    ) * CLOUD_EARTH_SCALE;
-
     let coverage = cloud.params0.x;
-    let dens = cloudDensity(planeM, coverage, cloud.params1.xy);
+    let dens = cloudDensity(planeM, coverage, cloud.params1.xy, aa);
     if (dens > 0.004) {
       // 朝太阳切平面方向（两层共用 ENU 基）。
       let sun2 = vec2<f32>(
@@ -267,9 +277,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let perp2 = vec2<f32>(-sunL2.y, sunL2.x);
       let sideA = (sunL2 + perp2 * 1.732) * 0.5;
       let sideB = (sunL2 - perp2 * 1.732) * 0.5;
-      let dSun = cloudDensity(planeM + sunL2 * 140.0, coverage, cloud.params1.xy);
-      let dSideA = cloudDensity(planeM + sideA * 160.0, coverage, cloud.params1.xy);
-      let dSideB = cloudDensity(planeM + sideB * 160.0, coverage, cloud.params1.xy);
+      let dSun = cloudDensity(planeM + sunL2 * 140.0, coverage, cloud.params1.xy, aa);
+      let dSideA = cloudDensity(planeM + sideA * 160.0, coverage, cloud.params1.xy, aa);
+      let dSideB = cloudDensity(planeM + sideB * 160.0, coverage, cloud.params1.xy, aa);
       let grad3 = (dSun - dens) * 0.5 + (dSideA - dens) * 0.25 + (dSideB - dens) * 0.25;
       let directional = clamp(1.0 + grad3 * 2.2, 0.35, 1.65);
 
@@ -341,13 +351,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     / vec2<f32>(f32(dims.x), f32(dims.y));
   // uv → 覆盖区平面米坐标（params.x = EARTH_SCALE / extentM）。
   let planeM = (uv01 - vec2<f32>(0.5)) / max(shadow.params.x, 1e-9);
-  let dens = cloudDensity(planeM, shadow.params.z, shadow.windOffset.xy);
+  // 烘焙域固定网格采样（无屏幕导数），aa = 1 保持原频率（逐字节不变）。
+  let dens = cloudDensity(planeM, shadow.params.z, shadow.windOffset.xy, 1.0);
   // 卷云投影叠加（低权重 ×0.3）：地面上淡淡纤维条纹影。
   var total = dens;
   if (cirrus.params0.x > 0.5) {
     let cD = cirrusDensity(
       planeM, cirrus.params0.y, shadow.windOffset.xy,
-      cirrus.params1.x, cirrus.params1.y
+      cirrus.params1.x, cirrus.params1.y, 1.0
     );
     total = clamp(dens + cD * 0.3, 0.0, 1.0);
   }
