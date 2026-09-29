@@ -499,26 +499,41 @@
       // 贴地保护兜底（2026-09-29 实锤：右键拖拽下拉走 Viewer 的 camera.zoom，绕过上面 wheel 拦截，
       // 直接打到引擎 128m 钳制底+平视掠射→白膜消失/底图放射变形）。持续监控覆盖 wheel/右键/pinch
       // 全部拉近路径：低于 FLOOR_H 即抬回并压 -45° 俯视。
+      // 拖动后视野保持（2026-09-29 实测实锤：左键拖动=大幅平移/爬升——左拖 12 步白膜完全出画剩农田、
+      // 下拖相机飙到 2.4km 白膜缩没，用户"一拖动就看不到白膜"即此）。mouseup 后 0.6~3s 检查窗内：
+      // 高度>2500m 或离白膜中心水平漂移>1500m → 拉回白膜俯瞰。滚轮路径无 mouseup 不受影响
+      // （滚轮拉远看全景仍允许到 CEIL_H）。
+      let lastDragEnd = 0;
+      document.addEventListener('mouseup', () => { lastDragEnd = performance.now(); }, true);
       setInterval(() => {
         if (camMode !== 'free') return;
         const c = viewer && viewer.camera, p = c && c.position;
         if (!p) return;
         const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
+        const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
+        const lat = Math.atan2(p.z, Math.sqrt(p.x * p.x + p.y * p.y)) * 180 / Math.PI;
+        const dHoriz = Math.hypot((lon - ORIGIN.lon) * 111320 * Math.cos(ORIGIN.lat * Math.PI / 180),
+                                  (lat - ORIGIN.lat) * 110540);
         if (hM < FLOOR_H) {
-          const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
-          const lat = Math.atan2(p.z, Math.sqrt(p.x * p.x + p.y * p.y)) * 180 / Math.PI;
           c.setView({
             destination: engineApi.Cartesian3.fromDegrees(lon, lat, FLOOR_H),
             orientation: { heading: 0, pitch: -45 * Math.PI / 180, roll: 0 },
           });
         } else if (hM > CEIL_H) {
           // 拉远超限顶回全景构图（12.8 万 km 无底洞 → 2km 俯瞰白膜全景）
-          const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
-          const lat = Math.atan2(p.z, Math.sqrt(p.x * p.x + p.y * p.y)) * 180 / Math.PI;
           c.setView({
             destination: engineApi.Cartesian3.fromDegrees(lon, lat, 2000),
             orientation: { heading: 0, pitch: -60 * Math.PI / 180, roll: 0 },
           });
+        } else if (lastDragEnd > 0) {
+          const sinceDrag = performance.now() - lastDragEnd;
+          if (sinceDrag > 600 && sinceDrag < 3000 && (hM > 2500 || dHoriz > 1500)) {
+            c.setView({
+              destination: engineApi.Cartesian3.fromDegrees(ORIGIN.lon, ORIGIN.lat, 300),
+              orientation: { heading: 0, pitch: -60 * Math.PI / 180, roll: 0 },
+            });
+            lastDragEnd = 0; // 已拉回，清标志防重复触发
+          } else if (sinceDrag >= 3000) lastDragEnd = 0; // 检查窗过期
         }
       }, 200);
 
