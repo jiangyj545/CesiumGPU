@@ -695,10 +695,16 @@ struct VSOut {
 
 @vertex
 fn vs_main( input : VSIn ) -> VSOut {
-  // 前 3 个大级联位移（最小 7.1m 级联留给片元法线/泡沫）；显式 level 0
+  // 前 3 个大级联位移（最小 7.1m 级联留给片元法线/泡沫）。
+  // 掠射防混叠：texel ≈ extent/256（~10m），mip0 在远距欠采样出 moiré——
+  // VS 无隐式微分，按相机距离手动选 mip（tidewater 同款手动 LOD fetch；
+  // 位移基准用未变形 ecef 近似，位移 <3m 对百米级距离无感）。
   var disp = vec3<f32>( 0.0 );
+  let vsDistM = length( input.ecef - camera.cameraPosition.xyz ) * 6378137.0;
   for ( var c = 0; c < OCEAN_CASCADES - 1; c++ ) {
-    let d = textureSampleLevel( dispTex, smp, input.planeXZ / ocean.sizes[ c ].x, c, 0.0 );
+    let texelM = ocean.sizes[ c ].x / 256.0;
+    let lod = clamp( log2( max( vsDistM / ( texelM * 700.0 ), 1.0 ) ), 0.0, 8.0 );
+    let d = textureSampleLevel( dispTex, smp, input.planeXZ / ocean.sizes[ c ].x, c, lod );
     disp += d.xyz;
   }
   // 船迹波高（A4，米）：planeXZ → 跟随窗口 uv，R 通道波高直接入竖直位移。
@@ -768,8 +774,12 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   var divg = 0.0;
   for ( var c = 0; c < OCEAN_CASCADES; c++ ) {
     let uv = input.planeXZ / ocean.sizes[ c ].x;
-    foam += textureSampleLevel( dispTex, smp, uv, c, 0.0 ).w;
-    let g = textureSampleLevel( derivTex, smp, uv, c, 0.0 );
+    // 隐式 LOD（FS 微分自动选 mip）：mip 链每帧已生成（MIP_LEVELS 9），此前
+    // 强制 mip0 在掠射机位下欠采样，屏幕上出 ~11px 周期 moiré 竖条纹
+    //（2026-09-29 贴水机位实测）。OCEAN_CASCADES 编译期常量 → uniform 循环，
+    // textureSample 合法。
+    foam += textureSample( dispTex, smp, uv, c ).w;
+    let g = textureSample( derivTex, smp, uv, c );
     slopeX += g.x;
     slopeZ += g.y;
     divg += g.z + g.w; // λ(Dxx + Dzz)：水平压缩度 → 粗糙度调制
@@ -800,7 +810,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let hv = normalize( viewDir + sunDir );
   let ndh = max( dot( nLit, hv ), 0.0 );
   let rough = clamp( 1.0 + divg * 0.35, 0.6, 1.6 );
-  var spec = ( pow( ndh, 500.0 / rough ) * 2.2 + pow( ndh, 48.0 / rough ) * 0.30 ) * ( 0.25 + fresnel );
+  var spec = ( pow( ndh, 500.0 / rough ) * 2.8 + pow( ndh, 48.0 / rough ) * 0.38 ) * ( 0.25 + fresnel );
   spec = select( spec, spec * 0.35, uw );
 
   // CSSM 阴影因子（L3）：太阳直射贡献（太阳高光 + 天光反射）同乘，软边船影；
@@ -872,7 +882,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 
   // 水色：深水 → 地平线浅色（距离混合）；水下切换透射青绿（透光增强）；
   // 浅水碧绿：沙洲上方瞬时水深 0-7m 增亮偏绿（隔水看水下不再一片死蓝）
-  let shallow = vec3<f32>( 0.075, 0.19, 0.27 );
+  let shallow = vec3<f32>( 0.10, 0.32, 0.30 );
   var baseCol = mix( renderParams.deepColor.rgb, shallow, smoothstep( 150.0, 5000.0, distM ) );
   let lime = vec3<f32>( 0.17, 0.46, 0.38 );
   baseCol = mix( baseCol, lime, smoothstep( 8.0, 1.0, shoreDepth ) * 0.68 );
@@ -903,7 +913,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
       renderParams.underwater.y );
   }
 
-  var col = waterTint * ( 0.82 + 0.18 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
+  var col = waterTint * ( 0.88 + 0.12 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
     + skyRad * fresnel * 0.9 * shadowF * cloudF
     + vec3<f32>( spec ) * mix( vec3<f32>( 1.0 ), sunTint, flagSpecTint ) * shadowF * cloudF;
 
@@ -984,11 +994,14 @@ struct PeelVSOut {
 
 @vertex
 fn peel_vs( input : VSIn ) -> PeelVSOut {
-  // 位移采样与 vs_main 完全同款（前 3 级联 + 船迹 + 破碎变形）——保持两
-  // draw 的基准面一致，卷曲面片才贴合主水面波峰
+  // 位移采样与 vs_main 完全同款（前 3 级联 + 船迹 + 破碎变形，含手动 LOD
+  // 掠射防混叠）——保持两 draw 的基准面一致，卷曲面片才贴合主水面波峰
   var disp = vec3<f32>( 0.0 );
+  let peelDistM = length( input.ecef - camera.cameraPosition.xyz ) * 6378137.0;
   for ( var c = 0; c < OCEAN_CASCADES - 1; c++ ) {
-    let d = textureSampleLevel( dispTex, smp, input.planeXZ / ocean.sizes[ c ].x, c, 0.0 );
+    let texelM = ocean.sizes[ c ].x / 256.0;
+    let lod = clamp( log2( max( peelDistM / ( texelM * 700.0 ), 1.0 ) ), 0.0, 8.0 );
+    let d = textureSampleLevel( dispTex, smp, input.planeXZ / ocean.sizes[ c ].x, c, lod );
     disp += d.xyz;
   }
   if ( renderParams.flags.y > 0.5 ) {

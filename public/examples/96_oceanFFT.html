@@ -32,11 +32,11 @@
       <b>Track C/G</b>：体积云 + 云影（地形/海面双通道）+ 光柱（godRays /
       水下太阳光柱）+ 岸线冲刷。</p>
     <label>风速 <b id="windSpeedVal">8.0</b> m/s</label>
-    <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="8" />
+    <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="13" />
     <label>风向 <b id="windDirVal">20</b>°</label>
     <input id="windDir" type="range" min="0" max="360" step="5" value="20" />
     <label>choppiness 卷浪度 <b id="choppinessVal">0.90</b></label>
-    <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="0.9" />
+    <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="1.15" />
     <label>foamBias 白沫阈值 <b id="foamBiasVal">0.65</b></label>
     <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.65" />
     <label>时间尺度 <b id="timeScaleVal">1.0</b>×</label>
@@ -78,7 +78,10 @@
     async function demo(viewer, engine) {
       // ── 0. 常量：海域中心 / 太阳方向 / 米度换算 ──────────────────────
       const CEN_LON = 121.65, CEN_LAT = 31.15;
-      const SUN = [0.4, 0.5, 0.77];
+      // 低角度斜射太阳（本地 NNE、仰角 ~28.5°）：高光 glitter 路径进画 +
+      // SSS 逆光成立（正午陡太阳下镜面反射不在反射几何内，高光全灭）。
+      // ECEF = N*0.72 + E*0.28 + U*0.42 @ (121.65E, 31.15N) 归一化。
+      const SUN = [-0.264, -0.179, 0.948];
       const METERS_PER_DEG = 111320;
       const R_EARTH = engine.Cartesian3.EARTH_RADIUS; // 6378137
       const context = viewer.scene.context;
@@ -126,9 +129,9 @@
         extentKm: 2.5,
         segments: 256,
         waterLevel: 0,
-        windSpeed: 8,
+        windSpeed: 13,
         windDirection: 20,
-        choppiness: 0.9,
+        choppiness: 1.15,
         timeScale: 1,
         sunDirection: SUN,
         foamPattern,
@@ -625,10 +628,12 @@
         },
       };
 
-      // ── 12. 初始视角：海域南缘上空 450 m，俯角约 -25° 望向中心 ────────
+      // ── 12. 初始视角：贴海面 7 m / 俯角 -3.5°（tidewater 观感——地平线
+      // 进画、菲涅尔亮带 + 波形占屏；450 m 俯视时 1 m 级波高在 2.5 km tile
+      // 上摊薄为 0.04%，远看必成"平板鱼塘"）────────────────────────────
       viewer.camera.flyTo({
-        destination: { lon: CEN_LON, lat: CEN_LAT - 0.0087, height: 450 },
-        orientation: { heading: 0, pitch: -25 * Math.PI / 180 },
+        destination: { lon: CEN_LON, lat: CEN_LAT - 0.0011, height: 7 },
+        orientation: { heading: 0, pitch: -3.5 * Math.PI / 180 },
       });
     }
 
