@@ -245,9 +245,14 @@ export class Camera {
     } else {
       next = Cartesian3.multiplyByScalar(pos, s, new Cartesian3());
     }
-    // 贴地/上限钳制：沿径向抬回安全高度（触底时锚已近在脚下，跳变可忽略）
+    // 贴地/上限钳制：沿径向抬回安全高度（触底时锚已近在脚下，跳变可忽略）。
+    // 2026-09-29 双面取大：引擎双约定并存（Globe 压扁系 / 传感器未压扁 WGS84 系），此处无法判别
+    // position 属哪系——surfaceRadius 是压扁面公式，对未压扁坐标低估 ~13km（30.5°N 实测），
+    // 钳制面沉到真实地表之下 → 连续缩放可瞬间穿地（97 页 burst 实测 hM=-2414m、白膜消失）。
+    // 取两面之大者：未压扁系钳在真地面（根治穿地）；压扁系低空漫游（如有）下限抬高至未压扁面
+    // （~+13km）——穿地是硬 bug，下限抬高是行为变化，两害取轻。
     const r2 = Cartesian3.magnitude(next);
-    const minR = Camera.surfaceRadius(next) + 0.00002;
+    const minR = Math.max(Camera.surfaceRadius(next), Camera.wgs84Radius(next)) + 0.00002;
     const clamped = CesiumMath.clamp(r2, minR, 50.0);
     if (clamped !== r2) {
       const k = clamped / r2;
@@ -509,6 +514,19 @@ export class Camera {
     const n = Math.sqrt(ux * ux + uy * uy + uz * uz); // ≈1，消浮点漂移
     const cx2 = ((ux / n) * (ux / n));                // cosφcosλ 分量的平方
     return Math.sqrt(cx2 + rho * rho * (1.0 - cx2));
+  }
+
+  /**
+   * 未压扁 WGS84 椭球表面矢长（归一化）——数值法：沿单位方向解椭球
+   * x²/a² + y²/a² + z²/b² = 1 的 t 倍（a=1, b=rho）。与 surfaceRadius（压扁世界
+   * 公式）配对用于 zoom 的双面取大钳制，见 zoom() 内注释（2026-09-29）。
+   */
+  static wgs84Radius(position: Cartesian3): number {
+    const r = Cartesian3.magnitude(position);
+    if (r < 1e-9) return 1.0;
+    const rho = Camera.WGS84_POLAR_RATIO;
+    const ux = position.x / r, uy = position.y / r, uz = position.z / r;
+    return 1.0 / Math.sqrt(ux * ux + uy * uy + (uz * uz) / (rho * rho));
   }
 
   /**

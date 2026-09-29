@@ -483,14 +483,18 @@
       // 引擎 Camera.zoom 的 minR 钳在椭球上方 ~128m 且沿径向抬回——贴地掠射观感依旧；页面级在
       // document 捕获阶段拦截"高度 < FLOOR_H 时的继续拉近"（引擎 handler 已先注册在 canvas，同元素拦不住）。
       const FLOOR_H = 300; // 米；必须高于引擎 zoom 的椭球上 ~128m 钳制才能先一步拦住（127.6m 平视即掠射消失）
+      const CEIL_H = 30000; // 米；拉远上限（burst 实测 40 格滚轮飙到 12.8 万 km、白膜缩成不可见点）
       document.addEventListener('wheel', (e) => {
-        // 不分模式拦截拉近（2026-09-29 铁证：跟拍模式下滚轮一路 14705→127.6m 引擎钳制底无人拦，
-        // 用户"一缩放白膜就消失"即此路径）。free 模式由下方监控兜底。
-        if (e.deltaY >= 0) return; // 只拦拉近（deltaY<0）
+        // 拉近低于 FLOOR_H 拦（2026-09-29 铁证：跟拍模式滚轮一路 14705→127.6m 引擎钳制底无人拦）；
+        // 拉远高于 CEIL_H 拦（12.8 万 km 无底洞）。free 模式由下方监控兜底。
         const p = viewer && viewer.camera && viewer.camera.position;
         if (!p) return;
         const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
-        if (hM < FLOOR_H) { e.stopPropagation(); e.preventDefault(); }
+        if (e.deltaY < 0) {
+          if (hM < FLOOR_H) { e.stopPropagation(); e.preventDefault(); }
+        } else if (hM > CEIL_H) {
+          e.stopPropagation(); e.preventDefault();
+        }
       }, true);
       // 贴地保护兜底（2026-09-29 实锤：右键拖拽下拉走 Viewer 的 camera.zoom，绕过上面 wheel 拦截，
       // 直接打到引擎 128m 钳制底+平视掠射→白膜消失/底图放射变形）。持续监控覆盖 wheel/右键/pinch
@@ -506,6 +510,14 @@
           c.setView({
             destination: engineApi.Cartesian3.fromDegrees(lon, lat, FLOOR_H),
             orientation: { heading: 0, pitch: -45 * Math.PI / 180, roll: 0 },
+          });
+        } else if (hM > CEIL_H) {
+          // 拉远超限顶回全景构图（12.8 万 km 无底洞 → 2km 俯瞰白膜全景）
+          const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
+          const lat = Math.atan2(p.z, Math.sqrt(p.x * p.x + p.y * p.y)) * 180 / Math.PI;
+          c.setView({
+            destination: engineApi.Cartesian3.fromDegrees(lon, lat, 2000),
+            orientation: { heading: 0, pitch: -60 * Math.PI / 180, roll: 0 },
           });
         }
       }, 200);
