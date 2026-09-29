@@ -236,6 +236,11 @@
         particleDensity: 0.9,
       });
       uwFog.setSunShaftIntensity(1.6); // Track G：水下太阳光柱（潜水观感）
+      // 距离衰减雾（水下应该是透明的）：G-Buffer worldPos 重建水下路径长，
+      // 近处海床/沙洲/焦散透出、远处渐蓝（未绑定为均匀俯仰近似）
+      uwFog.setScenePosView(() => viewer.scene.gbufferPass
+        ? viewer.scene.gbufferPass.textures.worldPosView
+        : null);
       const spray = new engine.BowSpray(context, { maxParticles: 2048, scene: viewer.scene });
       // L5/T4 岸线破碎波喷雾：发射带 = 沙洲岸线（吸附源取 ocean 的海床/位移视图）
       const breakSpray = new engine.BreakSpray(context, {

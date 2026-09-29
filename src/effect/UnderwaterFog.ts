@@ -80,6 +80,19 @@ export class UnderwaterFog implements IPass {
   private _cameraUBO: GPUBuffer | null = null;
   private _paramsUBO: GPUBuffer | null = null;
   private _bindGroup: GPUBindGroup | null = null;
+
+  /**
+   * 场景位置纹理源（G-Buffer worldPos，rgba32float 归一化 ECEF）。距离
+   * 衰减雾（近清澈远蓝）的水下路径长来源；null = 回退俯仰近似（零回归）。
+   * 用 getter 惰性求值——gbuffer resize 会重建纹理，逐帧取最新身份。
+   */
+  private _scenePosGetter: (() => GPUTextureView | null) | null = null;
+  /** 1×1 零纹理 + 点采样器（scenePos 未绑定时的 BGL 占位，采样值 0 → dist 巨大 → 全雾）。 */
+  private _fallbackTex: GPUTexture | null = null;
+  private _fallbackView: GPUTextureView | null = null;
+  private _posSampler: GPUSampler | null = null;
+  /** 当前 BG 里绑定的场景位置 view（身份缓存，防逐帧重建 bind group）。 */
+  private _boundScenePos: GPUTextureView | null = null;
   private _failed = false;
   private _destroyed = false;
   /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
@@ -101,6 +114,14 @@ export class UnderwaterFog implements IPass {
   /** 手动开关水下模式（B1 在相机入水判定后调用）。 */
   setUnderwater(on: boolean): void {
     this._underwater = on;
+  }
+
+  /**
+   * 注入场景位置纹理源（G-Buffer worldPos view 或返回它的 getter）。
+   * 绑定后水下雾按水下路径长 Beer 衰减（近清澈/远蓝）；null 回退俯仰近似。
+   */
+  setScenePosView(getter: (() => GPUTextureView | null) | null): void {
+    this._scenePosGetter = getter;
   }
 
   /** 当前是否处于水下渲染状态。 */
@@ -140,11 +161,15 @@ export class UnderwaterFog implements IPass {
     this._targetFormat = format;
     this._cameraUBO?.destroy();
     this._paramsUBO?.destroy();
+    this._fallbackTex?.destroy();
     this._pipeline = null;
     this._bindGroup = null;
     this._bindGroupLayout = null;
     this._cameraUBO = null;
     this._paramsUBO = null;
+    this._fallbackTex = null;   // prepare() 会重建全套（含 fallback）
+    this._fallbackView = null;
+    this._boundScenePos = null;
   }
 
   /** 幂等初始化（管线 / BGL / UBO / bindGroup）。失败置 _failed 闸禁用整效果。 */
@@ -169,7 +194,25 @@ export class UnderwaterFog implements IPass {
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: CAMERA_UBO_SIZE } },
         { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: PARAMS_BYTES } },
+        // 距离衰减雾：G-Buffer worldPos（rgba32float 不可过滤 → 点采样 +
+        // textureSampleLevel，深度值无需滤波）
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
       ],
+    });
+
+    // 1×1 零纹理占位（采样值 0 → FS dist 巨大 → 全雾，语义安全）
+    this._fallbackTex = device.createTexture({
+      label: `${this.label}.ScenePosFallback`,
+      size: [1, 1],
+      format: 'rgba32float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this._fallbackView = this._fallbackTex.createView();
+    this._posSampler = device.createSampler({
+      label: `${this.label}.PosSampler`,
+      magFilter: 'nearest',
+      minFilter: 'nearest',
     });
 
     this._pipeline = device.createRenderPipeline({
@@ -209,6 +252,8 @@ export class UnderwaterFog implements IPass {
       entries: [
         { binding: 0, resource: { buffer: this._cameraUBO } },
         { binding: 1, resource: { buffer: this._paramsUBO } },
+        { binding: 2, resource: this._fallbackView! },
+        { binding: 3, resource: this._posSampler! },
       ],
     });
   }
@@ -248,12 +293,35 @@ export class UnderwaterFog implements IPass {
     }
     this._context.writeBuffer(this._cameraUBO, 0, camData);
 
-    // ── 参数 UBO：[time, intensity, density, _] [w, h, _, _] [rgb, _]
+    // ── 场景位置纹理（距离衰减雾）：getter 逐帧取最新身份，变更重建 BG ──
+    let hasScenePos = 0;
+    if (this._scenePosGetter) {
+      const view = this._scenePosGetter();
+      if (view) {
+        hasScenePos = 1;
+        if (view !== this._boundScenePos && this._bindGroupLayout) {
+          this._bindGroup = this._context.device.createBindGroup({
+            label: `${this.label}.BG`,
+            layout: this._bindGroupLayout,
+            entries: [
+              { binding: 0, resource: { buffer: this._cameraUBO! } },
+              { binding: 1, resource: { buffer: this._paramsUBO! } },
+              { binding: 2, resource: view },
+              { binding: 3, resource: this._posSampler! },
+            ],
+          });
+          this._boundScenePos = view;
+        }
+      }
+    }
+
+    // ── 参数 UBO：[time, intensity, density, hasScenePos] [w, h, _, _] [rgb, _]
     //              [sunDir.xyz, sunShaftIntensity]（Track G 水下光柱）──
     const p = this._params;
     p[0] = time;
     p[1] = this._intensity;
     p[2] = this._particleDensity;
+    p[3] = hasScenePos;
     p[4] = this._context.drawingBufferWidth;
     p[5] = this._context.drawingBufferHeight;
     p[8]  = this._waterColor[0];
@@ -287,10 +355,14 @@ export class UnderwaterFog implements IPass {
     this._destroyed = true;
     this._cameraUBO?.destroy();
     this._paramsUBO?.destroy();
+    this._fallbackTex?.destroy();
     this._cameraUBO = null;
     this._paramsUBO = null;
+    this._fallbackTex = null;
+    this._fallbackView = null;
     this._pipeline = null;
     this._bindGroup = null;
     this._bindGroupLayout = null;
+    this._boundScenePos = null;
   }
 }

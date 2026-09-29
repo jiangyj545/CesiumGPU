@@ -50,6 +50,10 @@ struct UWParams {
 
 @group(0) @binding(0) var<uniform> cam : CameraUniforms;
 @group(0) @binding(1) var<uniform> uw  : UWParams;
+// G-Buffer worldPos（rgba32float，归一化 ECEF；unfilterable → non-filtering
+// 采样 + textureSampleLevel）。距离衰减雾的水下路径长来源。
+@group(0) @binding(2) var scenePosTex : texture_2d<f32>;
+@group(0) @binding(3) var posSmp      : sampler;
 
 // VSOut 由 FULLSCREEN_VS 前置声明（重复声明会使模块解析失败——同 BrightShader）
 
@@ -98,10 +102,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let r    = length(ndc);
   let vig  = smoothstep(0.55, 1.45, r);
 
-  // ── 1、蓝绿深度雾：低头更浓，边缘更厚 ─────────────────────────────
-  //（2026-09-29 透明化收敛：原 0.28-0.78/cap 0.95 观感"不透明实心墙"）
+  // ── 1、蓝绿深度雾 ─────────────────────────────────────────────────
+  // 深度感知版（2026-09-29 用户"水下应该是透明的"）：G-Buffer worldPos 重建
+  // 像素水下路径长（米）→ Beer 衰减 fogDist = 1-exp(-dist·σ)，σ=0.06/m
+  //（~16m 清澈视距，tidewater 热带水）——近处海床/沙洲/焦散透出，远处
+  // 渐蓝；背景（wp≈0 → dist≈地球半径）自动全雾。低头更浓的旧近似只作小
+  // 权重基底。未绑定场景位置（params0.w=0）回退纯俯仰近似（零回归）。
   let fogBase = mix(0.22, 0.60, lookDown);
-  let fog     = clamp(fogBase * (0.6 + 0.4 * vig) * intensity, 0.0, 0.85);
+  var fog     = 0.0;
+  if ( uw.params0.w > 0.5 ) {
+    let wp      = textureSampleLevel( scenePosTex, posSmp, in.uv, 0.0 ).xyz;
+    let distPx  = length( wp - cam.cameraPosition.xyz ) * 6378137.0;
+    let fogDist = 1.0 - exp( - distPx * 0.06 );
+    fog = clamp( ( fogBase * 0.35 + fogDist * 0.9 ) * intensity, 0.0, 0.88 );
+  } else {
+    fog = clamp( fogBase * ( 0.6 + 0.4 * vig ) * intensity, 0.0, 0.85 );
+  }
 
   // 轻微色偏青（绿/蓝通道略抬、红压暗）+ 边缘暗化
   var tint = uw.waterColor.rgb * vec3<f32>(0.85, 1.06, 1.04);
