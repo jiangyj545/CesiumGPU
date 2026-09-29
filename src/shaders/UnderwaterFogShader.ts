@@ -99,8 +99,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let vig  = smoothstep(0.55, 1.45, r);
 
   // ── 1、蓝绿深度雾：低头更浓，边缘更厚 ─────────────────────────────
-  let fogBase = mix(0.28, 0.78, lookDown);
-  let fog     = clamp(fogBase * (0.6 + 0.4 * vig) * intensity, 0.0, 0.95);
+  //（2026-09-29 透明化收敛：原 0.28-0.78/cap 0.95 观感"不透明实心墙"）
+  let fogBase = mix(0.22, 0.60, lookDown);
+  let fog     = clamp(fogBase * (0.6 + 0.4 * vig) * intensity, 0.0, 0.85);
 
   // 轻微色偏青（绿/蓝通道略抬、红压暗）+ 边缘暗化
   var tint = uw.waterColor.rgb * vec3<f32>(0.85, 1.06, 1.04);

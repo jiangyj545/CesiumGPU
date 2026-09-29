@@ -229,8 +229,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   ) * CLOUD_EARTH_SCALE;
   let fwC = max( length( dpdx( planeMC ) ), length( dpdy( planeMC ) ) );
   let fw  = max( length( dpdx( planeM  ) ), length( dpdy( planeM  ) ) );
-  let aaC = clamp( fwC / 900.0 + 1.0, 1.0, 24.0 );
-  let aa  = clamp( fw  / 900.0 + 1.0, 1.0, 24.0 );
+  // AA 收敛（2026-09-29 用户"天空不正常"）：上限 24 会把远云噪声特征放大
+  // 到 ~58 km——整片糊墙；6 封顶保形（最远特征 ~14 km，连续仍有云形）。
+  let aaC = clamp( fwC / 1500.0 + 1.0, 1.0, 6.0 );
+  let aa  = clamp( fw  / 1500.0 + 1.0, 1.0, 6.0 );
 
   if (horizon <= 0.002) { discard; }
 

@@ -231,7 +231,7 @@
       //      → caustics(纹理生成) → floor(半透明叠画在水面上)
       //      → spray(船首喷雾粒子，GBuffer 深度测试) → uwFog(全屏罩)
       const uwFog = new engine.UnderwaterFog(context, {
-        intensity: 1.15,
+        intensity: 0.85,
         waterColor: [0.06, 0.34, 0.31],  // 青绿透光（tidewater 潜水观感）
         particleDensity: 0.9,
       });

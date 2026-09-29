@@ -974,6 +974,16 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let fog = 1.0 - exp( - distM / FOG_DIST );
   col = mix( col, fogCol, fog * 0.95 );
 
+  // 水下仰视 Snell 窗：视线与竖直夹角 < 临界角 ~48.6°（ndv > ~0.66）区域
+  // 透明天空（亮窗），窗外全反射暗带；alpha 同步降——此前海面 alpha 恒
+  // ≈1，水下仰视是一堵不透明水墙（2026-09-29 用户"水下不透明"实测）。
+  // 透出的背景是先画的天空 pass（水下相机向上射线的天空辐射）。
+  if ( uw ) {
+    let snell = smoothstep( 0.60, 0.74, ndv );
+    col = mix( col, renderParams.skyColor.rgb * 1.1, snell * 0.75 );
+    edgeFade = mix( edgeFade, edgeFade * 0.3, snell );
+  }
+
   return vec4<f32>( col, edgeFade );
 }
 
