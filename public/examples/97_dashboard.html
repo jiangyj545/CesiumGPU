@@ -489,6 +489,23 @@
         const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
         if (hM < FLOOR_H) { e.stopPropagation(); e.preventDefault(); }
       }, true);
+      // 贴地保护兜底（2026-09-29 实锤：右键拖拽下拉走 Viewer 的 camera.zoom，绕过上面 wheel 拦截，
+      // 直接打到引擎 128m 钳制底+平视掠射→白膜消失/底图放射变形）。持续监控覆盖 wheel/右键/pinch
+      // 全部拉近路径：低于 FLOOR_H 即抬回并压 -45° 俯视。
+      setInterval(() => {
+        if (camMode !== 'free') return;
+        const c = viewer && viewer.camera, p = c && c.position;
+        if (!p) return;
+        const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
+        if (hM < FLOOR_H) {
+          const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
+          const lat = Math.atan2(p.z, Math.sqrt(p.x * p.x + p.y * p.y)) * 180 / Math.PI;
+          c.setView({
+            destination: engineApi.Cartesian3.fromDegrees(lon, lat, FLOOR_H),
+            orientation: { heading: 0, pitch: -45 * Math.PI / 180, roll: 0 },
+          });
+        }
+      }, 200);
 
       // 1) 程序化小城市（90 页同款 50×40 网格；CITY_OFF 已按 spec origin 对准航线）
       const builder = new CityBlockBuilder();
