@@ -76,6 +76,13 @@ export class Context {
           8,
           this._adapter.limits.maxStorageTexturesPerShaderStage
         ),
+        // 提升管线布局 bind group 数上限（默认 4）：LightingPass AP 变体 =
+        // 基础 + CSSM 阴影 + 云影 + 大气透视共 5 组正交堆叠（2026-09-29 真机
+        // "bindGroupLayoutCount (5) is larger than the maximum allowed (4)"）。
+        // 注：limit 键名是 maxBindGroups——Dawn 内部名
+        // maxBindGroupLayoutsPerPipelineLayout 不在 JS API（读它得 undefined，
+        // Math.min 出 NaN 直接 TypeError "not of type 'unsigned long long'"）。
+        maxBindGroups: Math.min(8, this._adapter.limits.maxBindGroups),
       },
     });
 

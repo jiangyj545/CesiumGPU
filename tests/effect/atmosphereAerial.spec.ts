@@ -83,12 +83,12 @@ describe('AtmosphereSkyShader AP 模块', () => {
 });
 
 describe('LightingShader AP 变体', () => {
-  it('组 4 声明契约逐字存在（T6 BGL 依据：uniform/texture/sampler/uniform）', () => {
+  it('组 3 扩展段声明契约逐字存在（uniform/texture/sampler/uniform，binding 4-7 与云影合组）', () => {
     for (const code of AP_8) {
-      expect(code).toContain('@group(4) @binding(0) var<uniform> aerialParams     : AerialParams;');
-      expect(code).toContain('@group(4) @binding(1) var atmSkyViewLUT             : texture_2d<f32>;');
-      expect(code).toContain('@group(4) @binding(2) var atmLinearClamp            : sampler;');
-      expect(code).toContain('@group(4) @binding(3) var<uniform> atmosphereParams : AtmosphereParams;');
+      expect(code).toContain('@group(3) @binding(4) var<uniform> aerialParams     : AerialParams;');
+      expect(code).toContain('@group(3) @binding(5) var atmSkyViewLUT             : texture_2d<f32>;');
+      expect(code).toContain('@group(3) @binding(6) var atmLinearClamp            : sampler;');
+      expect(code).toContain('@group(3) @binding(7) var<uniform> atmosphereParams : AtmosphereParams;');
       expect(code).toContain(ATMO_PARAMS_STRUCT_WGSL);
       expect(code).toContain(AERIAL_PARAMS_STRUCT_WGSL);
     }
@@ -144,9 +144,8 @@ describe('LightingShader AP 变体', () => {
 });
 
 describe('既有 8 变体零回归（AP 不触碰）', () => {
-  it('原 8 变体不含任何 AP 痕迹（组 4 / aerialParams / atmAerialColor）', () => {
+  it('原 8 变体不含任何 AP 痕迹（aerialParams / atmAerialColor）', () => {
     for (const code of ORIGINAL_8) {
-      expect(code).not.toContain('@group(4)');
       expect(code).not.toContain('aerialParams');
       expect(code).not.toContain('atmAerialColor');
       expect(code).not.toContain('AerialParams');
@@ -192,18 +191,18 @@ describe('LightingPass 16 变体选择（selectLightingShader，T6 接线）', (
     for (const hdr of [false, true]) {
       for (const shadow of [false, true]) {
         for (const cloud of [false, true]) {
-          expect(EXPECT(hdr, shadow, cloud, false)).not.toContain('@group(4)');
+          expect(EXPECT(hdr, shadow, cloud, false)).not.toContain('aerialParams');
         }
       }
     }
   });
 
-  it('接 AP 8 组合含组 4 声明（aerialParams 绑定落地）', () => {
+  it('接 AP 8 组合含组 3 扩展段声明（aerialParams 绑定落地，binding 4-7 与云影合组）', () => {
     for (const hdr of [false, true]) {
       for (const shadow of [false, true]) {
         for (const cloud of [false, true]) {
           expect(selectLightingShader(hdr, shadow, cloud, true))
-            .toContain('@group(4) @binding(0) var<uniform> aerialParams     : AerialParams;');
+            .toContain('@group(3) @binding(4) var<uniform> aerialParams     : AerialParams;');
         }
       }
     }

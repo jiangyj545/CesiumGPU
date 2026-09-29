@@ -89,7 +89,6 @@ export class LightingPass implements IPass {
    */
   private _cloudShadowSource: CloudShadowReceiverBinding | null = null;
   private _cloudShadowActive = false;
-  private _cloudShadowBindGroup: GPUBindGroup | null = null;
 
   /**
    * Track A 大气透视源（工厂求值产物）。null = 无 AP 管线变体（原 8 变体
@@ -97,7 +96,15 @@ export class LightingPass implements IPass {
    */
   private _aerialSource: AerialReceiverBinding | null = null;
   private _aerialActive = false;
-  private _aerialBindGroup: GPUBindGroup | null = null;
+
+  /**
+   * 组 3 扩展组合体 bind group（云影 binding 0-2 与/或 AP binding 4-7）。
+   * adapter maxBindGroups 普遍为 4（本机实测 adapter.limits.maxBindGroups=4，
+   * requestDevice 无法提升），云影+AP 分列组 3/4 的 5 组布局在
+   * CreatePipelineLayout 即炸（2026-09-29 真机）——二者共享组 3、
+   * 按变体各自 ready 组合 entries，全开也只 4 组。
+   */
+  private _extBindGroup: GPUBindGroup | null = null;
   /** AerialParams UBO（32B，本 pass 所有，writeAerialParams 每帧写）。 */
   private _aerialUBO: GPUBuffer;
   /** skyView LUT 线性 clamp 采样器（本 pass 所有，T6 契约 b2）。 */
@@ -278,38 +285,39 @@ export class LightingPass implements IPass {
       });
     }
 
-    // 组 3 仅在云影激活时存在（独立 bind group，保守不动既有组结构）。
+    // 组 3 扩展组（云影 binding 0-2 与/或 AP binding 4-7，按变体各自 ready
+    // 组合 entries）：adapter maxBindGroups 普遍 4（本机实测 4，requestDevice
+    // 的 Math.min(8, 4) 无法提升），云影+AP 分列两组的 5 组布局在
+    // CreatePipelineLayout 即炸（2026-09-29 真机）——二者共享组 3。
     let bindGroupLayout3: GPUBindGroupLayout | null = null;
-    if (cloudReady && cloud) {
-      bindGroupLayout3 = device.createBindGroupLayout({
-        label: 'Lighting.BGL3',
-        entries: [
+    {
+      const entries: GPUBindGroupLayoutEntry[] = [];
+      if (cloudReady && cloud) {
+        entries.push(
           { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
           { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
           { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-        ],
-      });
-    }
-
-    // 组 4 仅在 AP 激活时存在（T6 契约：uniform + skyView 纹理 + filtering
-    // 采样器 + atmosphereParams uniform）。
-    let bindGroupLayout4: GPUBindGroupLayout | null = null;
-    if (aerialReady && aerial) {
-      bindGroupLayout4 = device.createBindGroupLayout({
-        label: 'Lighting.BGL4',
-        entries: [
-          { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: 32 } },
-          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-          { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-          { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: 64 } },
-        ],
-      });
+        );
+      }
+      if (aerialReady && aerial) {
+        entries.push(
+          { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: 32 } },
+          { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+          { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+          { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: 64 } },
+        );
+      }
+      if (entries.length > 0) {
+        bindGroupLayout3 = device.createBindGroupLayout({
+          label: 'Lighting.BGL3',
+          entries,
+        });
+      }
     }
 
     const bindGroupLayouts = [bindGroupLayout0, bindGroupLayout1];
     if (bindGroupLayout2) bindGroupLayouts.push(bindGroupLayout2);
     if (bindGroupLayout3) bindGroupLayouts.push(bindGroupLayout3);
-    if (bindGroupLayout4) bindGroupLayouts.push(bindGroupLayout4);
 
     this._pipeline = device.createRenderPipeline({
       label:  'LightingPipeline',
@@ -365,34 +373,34 @@ export class LightingPass implements IPass {
       });
     }
 
-    // Group 3: 云影（uniform + rgba8unorm 影纹理 + filtering 采样器）。
-    this._cloudShadowBindGroup = null;
-    if (cloudReady && cloud && bindGroupLayout3) {
-      this._cloudShadowBindGroup = device.createBindGroup({
-        label:  'Lighting.BG3',
-        layout: bindGroupLayout3,
-        entries: [
+    // Group 3: 云影 + AP 扩展组（云影 binding 0-2 / AP binding 4-7，按与
+    // BGL3 完全相同的 ready 组装配；本 pass 自有 UBO/采样器，云/天空资源为
+    // 外部身份）。
+    this._extBindGroup = null;
+    if (bindGroupLayout3) {
+      const bgEntries: GPUBindGroupEntry[] = [];
+      if (cloudReady && cloud) {
+        bgEntries.push(
           { binding: 0, resource: { buffer: cloud.ubo } },
           { binding: 1, resource: cloud.view },
           { binding: 2, resource: cloud.sampler },
-        ],
-      });
-    }
-
-    // Group 4: 大气透视（AerialParams UBO + skyView LUT + linear/clamp 采样器
-    // + AtmosphereParams UBO；本 pass 自有 UBO/采样器，天空资源为外部身份）。
-    this._aerialBindGroup = null;
-    if (aerialReady && aerial && bindGroupLayout4) {
-      this._aerialBindGroup = device.createBindGroup({
-        label:  'Lighting.BG4',
-        layout: bindGroupLayout4,
-        entries: [
-          { binding: 0, resource: { buffer: this._aerialUBO } },
-          { binding: 1, resource: aerial.view },
-          { binding: 2, resource: this._aerialSampler },
-          { binding: 3, resource: { buffer: aerial.atmosphereParamsBuffer } },
-        ],
-      });
+        );
+      }
+      if (aerialReady && aerial) {
+        bgEntries.push(
+          { binding: 4, resource: { buffer: this._aerialUBO } },
+          { binding: 5, resource: aerial.view },
+          { binding: 6, resource: this._aerialSampler },
+          { binding: 7, resource: { buffer: aerial.atmosphereParamsBuffer } },
+        );
+      }
+      if (bgEntries.length > 0) {
+        this._extBindGroup = device.createBindGroup({
+          label:  'Lighting.BG3',
+          layout: bindGroupLayout3,
+          entries: bgEntries,
+        });
+      }
     }
   }
 
@@ -496,13 +504,10 @@ export class LightingPass implements IPass {
     if (this._shadowActive && this._shadowBindGroup) {
       pass.setBindGroup(2, this._shadowBindGroup);
     }
-    // Track C：云影激活时补组 3（管线布局已含 BGL3）。
-    if (this._cloudShadowActive && this._cloudShadowBindGroup) {
-      pass.setBindGroup(3, this._cloudShadowBindGroup);
-    }
-    // Track A：AP 激活时补组 4（管线布局已含 BGL4）。
-    if (this._aerialActive && this._aerialBindGroup) {
-      pass.setBindGroup(4, this._aerialBindGroup);
+    // 组 3 扩展组：云影（binding 0-2）与/或 AP（binding 4-7）合体 bind group
+    //（变体按 prepare 的同一 ready 组合选择，含云影/AP 任一段即有本组）。
+    if (this._extBindGroup) {
+      pass.setBindGroup(3, this._extBindGroup);
     }
     pass.draw(3); // full-screen triangle
     pass.end();

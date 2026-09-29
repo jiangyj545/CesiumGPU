@@ -682,6 +682,10 @@ struct AerialParams {
 `;
 
 const ATMO_AERIAL_BODY_WGSL = /* wgsl */`
+// CORE 常量段必须自带：atmSkyLuminance 引用 ATMO_RG/ATMO_RT/PI（定义在
+// ATMO_CORE_WGSL）——漏拼时真机解析期 unresolved value 'ATMO_RG'（2026-09-29
+// LightingShader AP 变体级联作废实测；CORE 未导出，消费方无法自拼）。
+${ATMO_CORE_WGSL}
 // 局地基（与 ATMO_SKY_REFLECTION_WGSL.atmLocalBasis 同算法，独立命名防拼冲突）
 fn atmAerialLocalBasis(up: vec3f) -> mat3x3<f32> {
   // refAxis：ref 是 WGSL 保留字，用 ref 会使模块解析失败（真机 CDP 验证发现）

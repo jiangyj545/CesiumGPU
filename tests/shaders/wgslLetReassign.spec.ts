@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { OCEAN_FFT_RENDER_SHADER } from '../../src/shaders/OceanFFTShader';
 import { ATMO_SKY_RENDER_WGSL } from '../../src/shaders/AtmosphereSkyShader';
+import { selectLightingShader } from '../../src/shaders/LightingShader';
 
 /**
  * WGSL `let` 不可变静态守卫（2026-09-28 CloudShader "cannot assign to 'let q'"
@@ -216,5 +217,90 @@ describe('WGSL 拼接模块 fn 调用解析守卫', () => {
     expect(scanUnresolvedCalls(bad, '(selftest)')).toHaveLength(1);
     const good = 'fn skyHash13(p: vec3f) -> f32 { return fract(p.x); } fn skyStars() { let h = skyHash13(vec3f(1.0)); }';
     expect(scanUnresolvedCalls(good, '(selftest)')).toHaveLength(0);
+  });
+});
+
+/**
+ * 拼接产物大写 const 引用守卫（2026-09-29 ATMO_AERIAL 漏拼 ATMO_CORE 致
+ * LightingShader "unresolved value 'ATMO_RG'" 级联作废黑屏的防回归）：
+ * fn 调用守卫只扫 `name(` 形式，const 裸引用（ATMO_RG * ATMO_RG）漏网——
+ * 本扫描补上：产物中被引用的全大写标识符必须有 const（或同名声明）定义。
+ */
+function scanUnresolvedConsts(wgsl: string, label: string): string[] {
+  const cleaned = stripWgslComments(wgsl);
+  const defined = new Set<string>();
+  for (const m of cleaned.matchAll(/\bconst\s+([A-Za-z_]\w*)/g)) defined.add(m[1]);
+  // let/var/fn/struct 声明名同样占位：局部变量名若为全大写不误报
+  for (const m of cleaned.matchAll(/\b(?:let|var|fn|struct)\s+([A-Za-z_]\w*)/g)) defined.add(m[1]);
+  const unresolved: string[] = [];
+  const seen = new Set<string>();
+  for (const m of cleaned.matchAll(/\b([A-Z][A-Z0-9_]{1,})\b/g)) {
+    const name = m[1];
+    if (!defined.has(name) && !seen.has(name)) {
+      seen.add(name);
+      unresolved.push(`${label}: 引用大写常量 "${name}" 无 const 定义`);
+    }
+  }
+  return unresolved;
+}
+
+/**
+ * 拼接产物重复定义守卫：fn / 模块级 const 在同一模块定义两次即解析错——
+ * 多段拼接（CORE/AERIAL/REFLECTION 共享子段）时的符号冲突防线。
+ */
+function scanDuplicateDefs(wgsl: string, label: string): string[] {
+  const cleaned = stripWgslComments(wgsl);
+  const counts = new Map<string, number>();
+  const bump = (name: string) => counts.set(name, (counts.get(name) ?? 0) + 1);
+  for (const m of cleaned.matchAll(/\bfn\s+([A-Za-z_]\w*)\s*[(<]/g)) bump(m[1]);
+  for (const m of cleaned.matchAll(/(?:^|\n)\s*const\s+([A-Za-z_]\w*)\s*:/g)) bump(m[1]);
+  const dups: string[] = [];
+  counts.forEach((n, name) => {
+    if (n > 1) dups.push(`${label}: "${name}" 定义 ${n} 次（同模块重复定义）`);
+  });
+  return dups;
+}
+
+describe('WGSL 拼接模块 const 引用 + 重复定义守卫', () => {
+  it('LightingShader 16 变体（hdr×CSSM×云影×AP 正交）无未解析 const/fn、无重复定义', () => {
+    const bad: string[] = [];
+    for (let i = 0; i < 16; i++) {
+      const src = selectLightingShader(!!(i & 8), !!(i & 4), !!(i & 2), !!(i & 1));
+      bad.push(...scanUnresolvedConsts(src, `LIGHTING[${i}]`));
+      bad.push(...scanUnresolvedCalls(src, `LIGHTING[${i}]`));
+      bad.push(...scanDuplicateDefs(src, `LIGHTING[${i}]`));
+    }
+    expect(bad, bad.join('\n')).toHaveLength(0);
+  });
+
+  it('OCEAN_FFT_RENDER_SHADER / ATMO_SKY_RENDER_WGSL 无未解析 const、无重复定义', () => {
+    const bad = [
+      ...scanUnresolvedConsts(OCEAN_FFT_RENDER_SHADER, 'OCEAN_FFT_RENDER_SHADER'),
+      ...scanUnresolvedConsts(ATMO_SKY_RENDER_WGSL, 'ATMO_SKY_RENDER_WGSL'),
+      ...scanDuplicateDefs(OCEAN_FFT_RENDER_SHADER, 'OCEAN_FFT_RENDER_SHADER'),
+      ...scanDuplicateDefs(ATMO_SKY_RENDER_WGSL, 'ATMO_SKY_RENDER_WGSL'),
+    ];
+    expect(bad, bad.join('\n')).toHaveLength(0);
+  });
+
+  it('LightingShader 16 变体 @group 号均 < 8（Context.requestDevice 已提 BGL 上限至 8）', () => {
+    // 2026-09-29 真机 "bindGroupLayoutCount (5) is larger than the maximum
+    // allowed (4)"：AP 变体堆到组 4 超默认 4 组。Context 已按 adapter 能力提至
+    // 8——本守卫在变体再堆组（≥8）时提前红，而非等真机 CreatePipelineLayout 炸。
+    for (let i = 0; i < 16; i++) {
+      const src = selectLightingShader(!!(i & 8), !!(i & 4), !!(i & 2), !!(i & 1));
+      let maxG = -1;
+      for (const m of src.matchAll(/@group\((\d+)\)/g)) maxG = Math.max(maxG, +m[1]);
+      expect(maxG + 1, `LIGHTING[${i}] 最高 @group(${maxG}) 超出 BGL 上限 8`).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it('守卫自检：能捕获 ATMO_AERIAL 漏拼 CORE 的历史坏模式', () => {
+    expect(scanUnresolvedConsts('let v = viewH * viewH - ATMO_RG * ATMO_RG;', '(selftest)')).toHaveLength(1);
+    expect(scanUnresolvedConsts('const ATMO_RG: f32 = 6360.0;\nlet v = ATMO_RG;', '(selftest)')).toHaveLength(0);
+    expect(scanDuplicateDefs('fn a() {}\nfn a() {}', '(selftest)')).toHaveLength(1);
+    expect(scanDuplicateDefs('const A: f32 = 1.0;\nconst A: f32 = 2.0;', '(selftest)')).toHaveLength(1);
+    expect(scanDuplicateDefs('fn a() {}\nconst b: f32 = 1.0;', '(selftest)')).toHaveLength(0);
+    expect(scanDuplicateDefs('fn a() {}\nconst a: f32 = 1.0;', '(selftest)')).toHaveLength(1); // 同名 fn/const 同为声明冲突
   });
 });

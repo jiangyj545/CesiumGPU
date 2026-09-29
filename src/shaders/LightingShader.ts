@@ -282,11 +282,12 @@ export const LIGHTING_SHADER_SHADOW_CLOUD_HDR =
 // **T6 接线契约**（LightingPass.setAerialSource 仿 setCloudShadowSource）：
 //  1. 变体：接 AP 后按 CSSM/云影状态选对应 `LIGHTING_SHADER_AP_*` 变体；
 //     未接时走原 8 变体（零回归）。
-//  2. 管线布局：bindGroupLayouts 追加第 5 个 BGL（组 4，全 FRAGMENT）：
-//     binding 0 uniform（AerialParams，minBindingSize 32）
-//     binding 1 texture（sampleType 'float'）
-//     binding 2 sampler（type 'filtering'）
-//     binding 3 uniform（AtmosphereParams，minBindingSize 64）
+//  2. 管线布局：组 3 扩展组（与云影合并——adapter maxBindGroups=4，5 组布局
+//     CreatePipelineLayout 即炸，2026-09-29 真机），全 FRAGMENT 追加：
+//     binding 4 uniform（AerialParams，minBindingSize 32）
+//     binding 5 texture（sampleType 'float'）
+//     binding 6 sampler（type 'filtering'）
+//     binding 7 uniform（AtmosphereParams，minBindingSize 64）
 //  3. 组 4 资源（4 个）：
 //     - 0: T6 新建 32B AerialParams UBO，每帧写（布局 = AERIAL_PARAMS_STRUCT_WGSL）：
 //          @0 strength（0 = 恒旧 limb haze，零回归闸）/ @4 distM（米，默认 25000）
@@ -297,15 +298,17 @@ export const LIGHTING_SHADER_SHADOW_CLOUD_HDR =
 //  4. 语义：fogAmount = 1 - exp(-dist / distM)，雾色 = atmAerialColor(-viewDir,
 //     normalize(worldPos), sunDir)（视线方向天空辐射，无日月盘）。
 
-/** AP receiver 模块：组 4 声明 + atmAerialColor（WGSL 声明先于使用，插在 fs_main 前）。 */
+/** AP receiver 模块：组 3 扩展段声明 + atmAerialColor（WGSL 声明先于使用，插在 fs_main 前）。 */
 const AP_RECEIVER_MODULE = /* wgsl */`
 ${ATMO_PARAMS_STRUCT_WGSL}
 ${AERIAL_PARAMS_STRUCT_WGSL}
-// 组 4：大气透视绑定（T6 契约见文件内「Track A 大气透视」注释）。
-@group(4) @binding(0) var<uniform> aerialParams     : AerialParams;
-@group(4) @binding(1) var atmSkyViewLUT             : texture_2d<f32>;
-@group(4) @binding(2) var atmLinearClamp            : sampler;
-@group(4) @binding(3) var<uniform> atmosphereParams : AtmosphereParams;
+// 组 3 扩展段（与云影合并）：多数 adapter maxBindGroups=4，云影+AP 分列组 3/4
+// 时 5 组管线布局真机炸 "bindGroupLayoutCount (5) is larger than the maximum
+// allowed (4)"（2026-09-29）。云影占 binding 0-2，AP 占 4-7（3 空置缓冲）。
+@group(3) @binding(4) var<uniform> aerialParams     : AerialParams;
+@group(3) @binding(5) var atmSkyViewLUT             : texture_2d<f32>;
+@group(3) @binding(6) var atmLinearClamp            : sampler;
+@group(3) @binding(7) var<uniform> atmosphereParams : AtmosphereParams;
 ${ATMO_AERIAL_WGSL}
 `;
 
