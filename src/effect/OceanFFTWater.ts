@@ -1159,12 +1159,12 @@ export class OceanFFTWater implements IPass {
         size: OCEAN_RENDER_PARAMS_UBO_BYTES,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
-      // 静态渲染参数：sunDir + 深水色(#052a2b 青绿系，tidewater 远海调) +
-      // 天空/雾色（flags/wakeUv 每帧写）。旧值 #04121f 偏钢蓝灰——贴水机位
-      // 下观感"浑浊发灰"（2026-09-29 图像对照分析），G 通道上移转青绿。
+      // 静态渲染参数：sunDir + 深水色（2026-09-30 差距7：远海深蓝——B 通道
+      // 上移压过 G，#0a1647 系深蓝；近岸青绿由 FS 距离混合 shallow 端给出）
+      // + 天空/雾色（flags/wakeUv 每帧写）。
       const RP = this._renderParamsF32;
       RP[0] = this._sunDir[0]; RP[1] = this._sunDir[1]; RP[2] = this._sunDir[2]; RP[3] = 0;
-      RP[4] = 0.018; RP[5] = 0.105; RP[6] = 0.115; RP[7] = 1;
+      RP[4] = 0.014; RP[5] = 0.088; RP[6] = 0.140; RP[7] = 1;
       RP[8] = 0.55; RP[9] = 0.72; RP[10] = 0.88; RP[11] = 1;
       this._context.writeBuffer(this._renderParamsUBO, 0, OceanFFTWater._asBytes(RP));
 

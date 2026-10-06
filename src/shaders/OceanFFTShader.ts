@@ -728,7 +728,11 @@ fn vs_main( input : VSIn ) -> VSOut {
     breakW = smoothstep( breakParams.band.y, breakParams.band.x, disp.y - sbH );
     let g0 = textureSampleLevel( derivTex, smp, input.planeXZ / ocean.sizes[ 0 ].x, 0, 0.0 );
     disp.y *= mix( 1.0, breakParams.gain.y, breakW );                    // 振幅调制
-    disp.xz -= g0.xy * max( disp.y, 0.0 ) * breakParams.gain.z * breakW; // 波峰前倾
+    // 波峰前倾。不用 disp.xz -=（多分量 swizzle 复合赋值）：naga 系校验器
+    // 拒绝（2026-09-30 用户实机 "no matching overload for operator -="，
+    // Tint 恰好放行）——整向量重建，两校验器都合法。
+    let leanXY = g0.xy * max( disp.y, 0.0 ) * breakParams.gain.z * breakW;
+    disp = vec3<f32>( disp.x - leanXY.x, disp.y, disp.z - leanXY.y );
   }
   // eastDir/northDir/upDir 是「每米归一化 ECEF 增量」（CPU 侧已除米数），
   // 位移纹理单位为米 → 直接线性组合；λ 已在 column kernel 写纹理时乘过
@@ -867,9 +871,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     }
     let depth = input.waveH - seabedH;        // 瞬时水深（米）
     shoreDepth = depth;
-    let surf = smoothstep( 7.0, 3.0, depth ); // 破碎带：≤3m 全量、≥7m 归零（tidewater SurfFoam 同款语义）
+    // 2026-09-30 差距8「泡沫大片团块」：破碎带 7→3m 收窄到 5→1.2m 贴岸，
+    // 噪声调制 0.75+0.5fN → 0.45+0.55fN（低基高调）——碎浪线细碎断续
+    let surf = smoothstep( 5.0, 1.2, depth );
     jacW = 1.0 - 0.5 * surf;
-    shoreCov = surf * renderParams.shoreParams.y * ( 0.75 + 0.5 * fN );
+    shoreCov = surf * renderParams.shoreParams.y * ( 0.45 + 0.55 * fN );
     edgeFade = smoothstep( 0.0, 0.05, depth );
   }
 
@@ -899,10 +905,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     albedoJit = 1.0 + ( p.b - 0.5 ) * 0.2;
   }
 
-  // 水色：深水 → 地平线浅色（距离混合）；水下切换透射青绿（透光增强）；
-  // 浅水碧绿：沙洲上方瞬时水深 0-7m 增亮偏绿（隔水看水下不再一片死蓝）
+  // 水色：近岸青绿 → 远海深蓝（距离混合，2026-09-30 差距7：旧式
+  // mix(deep, shallow, dist) 方向反了——近处死蓝、远处泛青）；水下切换
+  // 透射青绿（透光增强）；浅水碧绿：沙洲上方瞬时水深 0-7m 增亮偏绿
   let shallow = vec3<f32>( 0.10, 0.32, 0.30 );
-  var baseCol = mix( renderParams.deepColor.rgb, shallow, smoothstep( 150.0, 5000.0, distM ) );
+  var baseCol = mix( shallow, renderParams.deepColor.rgb, smoothstep( 150.0, 5000.0, distM ) );
   let lime = vec3<f32>( 0.17, 0.46, 0.38 );
   baseCol = mix( baseCol, lime, smoothstep( 8.0, 1.0, shoreDepth ) * 0.68 );
   let uwWater = vec3<f32>( 0.10, 0.46, 0.42 );
@@ -999,7 +1006,22 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 透出的背景是先画的天空 pass（水下相机向上射线的天空辐射）。
   if ( uw ) {
     let snell = smoothstep( 0.60, 0.74, ndv );
-    col = mix( col, renderParams.skyColor.rgb * 1.1, snell * 0.75 );
+    // 2026-09-30 用户"水下天空效果不对"：旧版窗内填 CPU 平色 skyColor×1.1
+    // ——无渐变无日盘，一堵假色墙。绑定物大气（flagSky）时改为真实折射：
+    // 视线过水-气界面（水→空气 eta=1.33，TIR 区 refract 归零、snell 门同步
+    // 压零），沿透射向采样 skyView LUT 辐射——窗内见真实天空渐变与太阳
+    // 亮斑；未绑定时回退平色（零回归）。
+    var skyThrough = renderParams.skyColor.rgb * 1.1;
+    if ( flagSky > 0.5 && snell > 0.001 ) {
+      let refrDir = refract( - viewDir, nLit, 1.33 );
+      // TIR 边带（ndv 0.60~0.66）refract 归零——零向量不查 LUT（NaN 防护）
+      if ( dot( refrDir, refrDir ) > 0.0 ) {
+        skyThrough = atmSkyReflectionRadiance(
+          refrDir, atmUp, normalize( skyParams.sunDir ), normalize( skyParams.moonDir ),
+          renderParams.underwater.y ) * 1.35;
+      }
+    }
+    col = mix( col, skyThrough, snell * 0.75 );
     edgeFade = mix( edgeFade, edgeFade * 0.3, snell );
   }
 
@@ -1051,7 +1073,9 @@ fn peel_vs( input : VSIn ) -> PeelVSOut {
     breakW = smoothstep( breakParams.band.y, breakParams.band.x, disp.y - sbH );
     g0 = textureSampleLevel( derivTex, smp, input.planeXZ / ocean.sizes[ 0 ].x, 0, 0.0 );
     disp.y *= mix( 1.0, breakParams.gain.y, breakW );
-    disp.xz -= g0.xy * max( disp.y, 0.0 ) * breakParams.gain.z * breakW;
+    // 同 vs_main：避免 disp.xz -=（naga 拒绝多分量 swizzle 复合赋值）
+    let leanXY = g0.xy * max( disp.y, 0.0 ) * breakParams.gain.z * breakW;
+    disp = vec3<f32>( disp.x - leanXY.x, disp.y, disp.z - leanXY.y );
   }
 
   // 卷唇变形：breakW 越过 peel.w 阈值且梯度非退化的波峰顶点才翻卷
@@ -1065,7 +1089,8 @@ fn peel_vs( input : VSIn ) -> PeelVSOut {
     roll = breakParams.peel.y * w * ( 0.65 + 0.35 * sin( phase ) )
          * smoothstep( 0.0, 0.6, disp.y );   // 只卷波峰之上（波谷不翻）
     let h = max( disp.y, 0.0 );
-    disp.xz += adv2 * ( h * sin( roll ) );   // 绕波峰线前移
+    let advXY = adv2 * ( h * sin( roll ) );   // 绕波峰线前移（无 swizzle 复合赋值）
+    disp = vec3<f32>( disp.x + advXY.x, disp.y, disp.z + advXY.y );
     disp.y    -= h * ( 1.0 - cos( roll ) );  // 绕波峰线下压（舌面翻过波峰）
     advEcef = ocean.eastDir * adv2.x + ocean.northDir * adv2.y;
   }

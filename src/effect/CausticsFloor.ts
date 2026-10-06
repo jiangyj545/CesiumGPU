@@ -1,6 +1,7 @@
 import type { IPass } from '../scene/passes/IPass';
-import type { Camera } from '../scene/Camera';
 import type { Context } from '../renderer/Context';
+import { Camera } from '../scene/Camera';
+import { Cartesian3 } from '../math/Cartesian3';
 import type { FFTDataSource, OceanCaustics } from './OceanCaustics';
 import type { SeabedHeightField } from './SeabedHeightField';
 import type { SwashField } from './SwashField';
@@ -29,8 +30,8 @@ export interface CausticsFloorOptions {
 const METERS_PER_DEG = 111320;
 /** 沙洲网格每边段数（3.1m/quad @400m）。 */
 const FLOOR_SEGMENTS = 128;
-/** 沙色（暖沙滩色）与天空/雾色（与 OceanFFTWater 渲染参数一致）。 */
-const SAND_COLOR: [number, number, number] = [0.78, 0.70, 0.52];
+/** 沙色（tidewater 白沙观感）与天空/雾色（与 OceanFFTWater 渲染参数一致）。 */
+const SAND_COLOR: [number, number, number] = [0.90, 0.85, 0.72];
 const SKY_COLOR: [number, number, number] = [0.55, 0.72, 0.88];
 
 /**
@@ -131,12 +132,20 @@ export class CausticsFloor implements IPass {
     this.shoreStrength = options.shoreStrength ?? 0;
     this.swash = options.swash ?? 0;
 
-    // 太阳方向 ECEF → 局部 ENU；upDir 为「每米归一化 ECEF 增量」（数值差分）
+    // 太阳方向 ECEF → 局部 ENU；upDir 为「每米归一化 ECEF 增量」（数值差分）。
+    // 2026-09-30 实锤修复：sunLocal 的点积须用归一化基——enu 向量模长
+    // ~1.6e-7（每米增量），单位太阳点积后 ≈ 0，焦散网采样/折射全灭。
     const enu = CausticsFloor._enuBasis(lon, lat);
     const sun = CausticsFloor._normalize(options.sunDirection ?? [0.4, 0.5, 0.77]);
+    const nrm = (v: [number, number, number]): [number, number, number] => {
+      const m = Math.hypot(v[0], v[1], v[2]) || 1;
+      return [v[0] / m, v[1] / m, v[2] / m];
+    };
     const dot = (a: [number, number, number], b: [number, number, number]): number =>
       a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    this._sunLocal = [dot(sun, enu.east), dot(sun, enu.up), dot(sun, enu.north)];
+    this._sunLocal = [
+      dot(sun, nrm(enu.east)), dot(sun, nrm(enu.up)), dot(sun, nrm(enu.north)),
+    ];
     this._upDir = enu.up;
     this._eastDir = enu.east;
     this._northDir = enu.north;
@@ -398,6 +407,9 @@ export class CausticsFloor implements IPass {
     // ── 参数 UBO（128B；P[0..23] 焦面深度/覆盖域与 OceanCaustics 保持一致）──
     const P = this._paramsF32;
     P.set(this._sunLocal, 0);
+    // sunLocal.w：水下相机旗标（压扁面公式判海拔，与 demo tick 同源）——
+    // 水下视角跳过湿沙/深水/swash 的隔水吸收（uwFog 统一水柱，防 ~14× 双重压黑）
+    P[3] = Cartesian3.magnitude(cam.position) < Camera.surfaceRadius(cam.position) ? 1 : 0;
     P.set(this._upDir, 4);
     P[8]  = this._source?.coverMeters ?? this._sizeM;      // spacing.x 焦散纹理覆盖
     P[9]  = this._sizeM;                                   // spacing.y 沙洲边长

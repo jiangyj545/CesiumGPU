@@ -322,7 +322,7 @@ describe('OCEAN_FFT_RENDER_SHADER 岸线泡沫源串', () => {
   });
 
   it('破碎带 smoothstep + Jacobian 打 5 折 + 浅水 alpha 收边', () => {
-    expect(s).toContain('smoothstep(7.0,3.0,depth)');
+    expect(s).toContain('smoothstep(5.0,1.2,depth)'); // 2026-09-30 破碎带收窄贴岸（tidewater 细碎浪线）
     expect(s).toContain('1.0-0.5*surf');
     expect(s).toContain('surf*renderParams.shoreParams.y');
     expect(s).toContain('smoothstep(0.0,0.05,depth)');
@@ -346,7 +346,8 @@ describe('OCEAN_FFT_RENDER_SHADER 岸线泡沫源串', () => {
     expect(s).toContain('@location(4)breakW:f32');
     expect(s).toContain('breakW=smoothstep(breakParams.band.y,breakParams.band.x,disp.y-sbH)');
     expect(s).toContain('disp.y*=mix(1.0,breakParams.gain.y,breakW)');
-    expect(s).toContain('disp.xz-=g0.xy*max(disp.y,0.0)*breakParams.gain.z*breakW');
+    expect(s).toContain('letleanXY=g0.xy*max(disp.y,0.0)*breakParams.gain.z*breakW');
+    expect(s).toContain('disp=vec3<f32>(disp.x-leanXY.x,disp.y,disp.z-leanXY.y)');
     // FS：foam lace 独立 smoothstep + 内卷水幕（nLit·viewDir<0 背面门）
     expect(s).toContain('letlaceW=smoothstep(breakParams.band.w,breakParams.band.w*0.35,shoreDepth)');
     expect(s).toContain('letbackFace=select(0.0,1.0,dot(nLit,viewDir)<0.0)');
@@ -382,7 +383,8 @@ describe('T-P 真 peeling 卷唇（二次 draw 卷曲面 + 海面雾太阳染色
     expect(s).toContain('fnpeel_fs(input:PeelVSOut)->@location(0)vec4<f32>');
     // 卷曲几何：波前进方向 = 级联0 梯度反方向；h 绕波峰轴转 roll
     expect(s).toContain('letadv2=-g0.xy/vec2<f32>(gLen)');
-    expect(s).toContain('disp.xz+=adv2*(h*sin(roll))');
+    expect(s).toContain('letadvXY=adv2*(h*sin(roll))');
+    expect(s).toContain('disp=vec3<f32>(disp.x+advXY.x,disp.y,disp.z+advXY.y)');
     expect(s).toContain('disp.y-=h*(1.0-cos(roll))');
     expect(s).toContain('ocean.time*breakParams.peel.z');
     // FS：curlW 低 discard / 法线内翻（-n）/ 白 0.95 / 半透明 0.85 封顶

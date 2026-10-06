@@ -42,8 +42,8 @@ struct CameraUniforms {
 }
 
 struct UWParams {
-  params0    : vec4<f32>,   // x = time (s), y = intensity, z = particleDensity, w = unused
-  viewport   : vec4<f32>,   // xy = 画布尺寸 (px), zw = unused
+  params0    : vec4<f32>,   // x = time (s), y = intensity, z = particleDensity, w = hasScenePos(0/1)
+  viewport   : vec4<f32>,   // xy = 画布尺寸 (px), z = 海面球半径（归一化 ECEF）, w = 参考海床深（米，0=关）
   waterColor : vec4<f32>,   // rgb = 水体染色, w = unused
   sunShaft   : vec4<f32>,   // xyz = 太阳方向（归一化 ECEF，指向太阳）, w = sunShaftIntensity（默认 0 = 关）
 }
@@ -73,8 +73,9 @@ fn particleLayer(p: vec2<f32>, cells: f32, t: f32, seed: f32) -> f32 {
     cos(t * 0.11 + h2 * 6.2832) * 0.35
   );
   let local = fract(g) - vec2<f32>(0.5) - drift;
-  // 反转写法：WGSL smoothstep 要求 low < high（CircleScanShader 同款规避）
-  let spark = 1.0 - smoothstep(0.0, 0.16, length(local));
+  // 2026-09-30 颗粒实体收细：0.16 半径在 9 格层上 ≈14 px 白斑（视觉模型
+  // 判"bokeh 雪片"非悬浮物）；0.05 → ~4 px 细屑，漂移同款。
+  let spark = 1.0 - smoothstep(0.0, 0.05, length(local));
   let tw    = 0.55 + 0.45 * sin(t * (1.1 + h1 * 1.7) + h1 * 6.2832);
   return spark * tw;
 }
@@ -104,23 +105,68 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
   // ── 1、蓝绿深度雾 ─────────────────────────────────────────────────
   // 深度感知版（2026-09-29 用户"水下应该是透明的"）：G-Buffer worldPos 重建
-  // 像素水下路径长（米）→ Beer 衰减 fogDist = 1-exp(-dist·σ)，σ=0.06/m
-  //（~16m 清澈视距，tidewater 热带水）——近处海床/沙洲/焦散透出，远处
-  // 渐蓝；背景（wp≈0 → dist≈地球半径）自动全雾。低头更浓的旧近似只作小
-  // 权重基底。未绑定场景位置（params0.w=0）回退纯俯仰近似（零回归）。
-  let fogBase = mix(0.22, 0.60, lookDown);
+  // 像素水下路径长（米）→ Beer 衰减 fogDist = 1-exp(-dist·σ)。2026-09-30
+  // 三修历程：① 背景像素（GBuffer worldPos 清零 = 水下视角的水面本体 +
+  // 掠过水面的天空）旧按 |wp-camPos|≈地球半径处理 → 全屏 ~0.83 青纱连
+  // Snell 窗一起糊死，改射线-海面球出射距离（抬头 3m 即透、水平 6km 全
+  // 雾、朝下被 GBuffer 几何优先接管）；② σ 0.06→0.035 矫枉过正（用户
+  // "看不到水下效果"）——tint 随 alpha 同淡、潜水后无水下观感 → σ 回
+  // 0.05、基底 0.30、cap 0.87，染色 ×1.25 与浓度解耦：Snell 窗（≤6m
+  // 路径）仍透光，远景/环境保有明确青绿水色。未绑定场景位置
+  // （params0.w=0）回退俯仰近似（零回归）。
+  let fogBase = mix(0.22, 0.45, lookDown);
   var fog     = 0.0;
   if ( uw.params0.w > 0.5 ) {
-    let wp      = textureSampleLevel( scenePosTex, posSmp, in.uv, 0.0 ).xyz;
-    let distPx  = length( wp - cam.cameraPosition.xyz ) * 6378137.0;
-    let fogDist = 1.0 - exp( - distPx * 0.06 );
-    fog = clamp( ( fogBase * 0.35 + fogDist * 0.9 ) * intensity, 0.0, 0.88 );
+    // 世界射线（与 AtmosphereSky.fs_main 同式：view 行 = 相机基，proj 对角）
+    let camR = vec3<f32>(cam.viewMatrix[0][0], cam.viewMatrix[1][0], cam.viewMatrix[2][0]);
+    let camU = vec3<f32>(cam.viewMatrix[0][1], cam.viewMatrix[1][1], cam.viewMatrix[2][1]);
+    let camF = vec3<f32>(-cam.viewMatrix[0][2], -cam.viewMatrix[1][2], -cam.viewMatrix[2][2]);
+    let rd = normalize(camR * (ndc.x / cam.projMatrix[0][0])
+                     + camU * (ndc.y / cam.projMatrix[1][1]) + camF);
+    let wp = textureSampleLevel( scenePosTex, posSmp, in.uv, 0.0 ).xyz;
+    var distPx : f32;
+    let ro = cam.cameraPosition.xyz;
+    let dn = dot( rd, up );
+    let camDepthM = ( uw.viewport.z - length( ro ) ) * 6378137.0;
+    let isBg = dot(wp, wp) < 0.25;
+    if ( dn < -1e-3 && uw.viewport.w > 0.5 ) {
+      // 俯视（2026-09-30 用户"想看水底效果"）：水下下半球射线穿不出海面球
+      //（出射在地球另一端）——背景像素与远景像素都拿不到有效水路长：前者
+      // 无几何，后者是四叉树瓦片弦高下垂到海面下的远景几何（公里级 wp）。
+      // 两者一律按参考海床深取 (海床深-相机深)/|俯视分量|，近景真实几何
+      //（船底 <100m）用 min 保真——浅水海床/焦散透出，掠射向水路自然拉长。
+      // 2026-09-30 沙底可见性：CausticsFloor 是 gbuffer 之外的叠加 pass，
+      // 沙面像素在此恒 isBg——掠射向 (|dn|<0.08) 平面参考水路按 1/|dn|
+      // 发散到数百米，雾顶满 cap，前方 50-150 m 沙洲斜坡全灭。按浅水参考
+      // 平面最大展幅 90 m 封顶：近/中距沙面雾随真实距离增长，开阔水与
+      // 网格外远景仍沉入深青。
+      let dSeabed = min( max( uw.viewport.w - camDepthM, 0.5 ) / ( - dn ), 90.0 );
+      let dGeom = select( 1e9, length( wp - ro ) * 6378137.0, !isBg );
+      distPx = min( dGeom, dSeabed );
+    } else if ( isBg ) {
+      // 仰视背景：相机在海面球内，出射根 t = -b+√(b²-c)，有理化避免相消；
+      // c<0（水下）保证分母恒正。tExit 命名避开外层时间 t。
+      let b  = dot(ro, rd);
+      let cc = dot(ro, ro) - uw.viewport.z * uw.viewport.z;
+      let tExit = -cc / ( b + sqrt(max(b * b - cc, 0.0)) );
+      distPx = max(tExit, 0.0) * 6378137.0;
+    } else {
+      distPx = length( wp - ro ) * 6378137.0;
+    }
+    // σ 0.05→0.016（沙底清晰度二调）：0.05 时 50 m 沙面 Beer 项已 0.92——
+    // 前方沙洲斜坡全灭成弥散亮斑；0.02 视觉模型仍判中景"乳白纱"，0.016
+    // 下 30 m 内近沙清澈（0.38）、90 m 封顶 0.76，沙洲层次透出远景仍沉青。
+    let fogDist = 1.0 - exp( - distPx * 0.016 );
+    fog = clamp( ( fogBase * 0.22 + fogDist * 1.0 ) * intensity, 0.0, 0.92 );
   } else {
     fog = clamp( fogBase * ( 0.6 + 0.4 * vig ) * intensity, 0.0, 0.85 );
   }
 
-  // 轻微色偏青（绿/蓝通道略抬、红压暗）+ 边缘暗化
-  var tint = uw.waterColor.rgb * vec3<f32>(0.85, 1.06, 1.04);
+  // 轻微色偏青（绿/蓝通道略抬、红压暗）+ 边缘暗化。染色浓度 ×1.25 与
+  // alpha 解耦（2026-09-30 用户"看不到水下效果"：α 降透明时水色也跟着
+  // 变淡水下感消失——浓度独立保底）。
+  var tint = uw.waterColor.rgb * vec3<f32>(0.85, 1.06, 1.04) * 1.25;
+  tint = min(tint, vec3<f32>(1.0));
   tint = mix(tint, tint * 0.55, vig * 0.6);
 
   // ── 2、浮动颗粒：两层 hash 点阵，密度受 particleDensity 调制 ───────
@@ -130,10 +176,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let particles = clamp(p1 + p2 * 0.6, 0.0, 1.0) * dens * intensity;
 
   // ── 3、焦散光斑：两层正弦波纹相乘缓动（抬头方向权重更大）──────────
-  let w1 = sin(sp.x * 6.0 + sp.y * 3.0 + t * 0.90);
-  let w2 = sin(sp.x * 2.5 - sp.y * 5.0 - t * 0.62);
-  let shimmer = pow(clamp(w1 * w2, 0.0, 1.0), 2.0);
-  let shafts  = shimmer * (0.12 + 0.55 * lookUp) * intensity;
+  // 2026-09-30 假波纹收敛：真焦散网（CausticsFloor）已是水下主体后，此
+  // 屏幕空间正弦"焦散"与真网叠成双重软斑（视觉模型判 bokeh 弥散）——
+  // 俯视基底 0.16→0.04（只留水面漏光残迹），仰视权重保留（抬头看水面
+  // 的光斑语义不变），pow 2.6→3.2 收窄。
+  let w1 = sin(sp.x * 9.0 + sp.y * 4.0 + t * 1.70);
+  let w2 = sin(sp.x * 3.5 - sp.y * 7.5 - t * 1.15);
+  let shimmer = pow(clamp(w1 * w2, 0.0, 1.0), 3.2);
+  let shafts  = shimmer * (0.04 + 0.66 * lookUp) * intensity;
 
   // ── 4、水下太阳光柱（Track G 联动，god rays 的水下侧近似）───────────
   // 太阳方向投到屏幕（相机 + 无穷远点过 viewProj），视线→太阳夹角用

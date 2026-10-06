@@ -433,16 +433,17 @@ describe('CloudShader 源串结构', () => {
 
   it('主云散射升级：Beer-Powder + 银边 + 半球环境光 + 3 方向能量传播', () => {
     // Beer-Powder：穿透项 × 粉末项（峰形能量，云心亮边缘透光）。
-    expect(CLOUD_RENDER_WGSL).toContain('exp(-dens * CLOUD_EXTINCTION)');
-    expect(CLOUD_RENDER_WGSL).toContain('1.0 - exp(-dens * CLOUD_EXTINCTION * 2.0)');
+    expect(CLOUD_RENDER_WGSL).toContain('exp(-cont * CLOUD_EXTINCTION)');
+    expect(CLOUD_RENDER_WGSL).toContain('1.0 - exp(-cont * CLOUD_EXTINCTION * 2.0)');
     // 银边：视线朝太阳 × 薄云 (1-dens) 的发丝光。
     expect(CLOUD_RENDER_WGSL).toContain(
       'pow(clamp(dot(rd, cloud.sunDirection.xyz), 0.0, 1.0), 4.0) * (1.0 - dens) * 0.85',
     );
-    // 云底环境光：半球近似 ×0.35。
+    // 云底环境光：半球近似 × 光深增亮地板（厚云芯多重散射不塌黑）。
     expect(CLOUD_RENDER_WGSL).toContain(
-      'mix(cloud.tintLow.rgb, cloud.tintHigh.rgb, hemi) * 0.35',
+      'mix(cloud.tintLow.rgb, cloud.tintHigh.rgb, hemi)',
     );
+    expect(CLOUD_RENDER_WGSL).toContain('(0.35 + 0.45 * cont)'); // 2026-09-30 连续云内深度驱动（cloudFieldN）
     // 多方向能量传播：太阳向 + ±60° 正交抖动，0.5/0.25/0.25 加权。
     expect(CLOUD_RENDER_WGSL).toContain('let dSun = cloudDensity');
     expect(CLOUD_RENDER_WGSL).toContain('let dSideA = cloudDensity');

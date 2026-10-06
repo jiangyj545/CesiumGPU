@@ -10,18 +10,17 @@ import { UNDERWATER_FOG_SHADER } from '../shaders/UnderwaterFogShader';
  * UnderwaterFog - 水下观感全屏叠加 pass（tidewater "split underwater/above-water
  * view" 的水下侧简化版；水面双面渲染归 OceanFFTWater 侧）。
  *
- * 相机处于海面之下时（B1 判定后调 {@link setUnderwater}），在已合成场景之上
- * 叠加一张全屏三角（draw(3)，照 BrightPass/LightingPass 模式）：
- *   1. 蓝绿深度雾 —— 无场景深度纹理，深度感用视线俯仰渐变（低头看海床更浓）
- *      + 屏幕径向暗角近似；
+ *   1. 蓝绿深度雾 —— 距离衰减（Beer）：G-Buffer worldPos 重建像素水下
+ *      路径长；背景像素（水面/天空，worldPos 清零）用射线-海面球出射距离
+ *      （抬头 3m 即透 / 水平 6km 全雾）。未绑定 scenePos 时回退俯仰近似；
  *   2. 浮动颗粒/光斑 —— 两层屏幕空间 hash 点阵缓漂 + 两层正弦波纹相乘的焦散
  *      缓动（呼应 OceanCaustics 观感，独立实现、零纹理采样）；
  *   3. 边缘暗角 + 轻微色偏青 —— 水下通透感；
  *   4. 水下太阳光柱 —— sunShaftIntensity > 0 时启用（Track G 联动，默认 0
  *      关闭零回归），与屏幕空间 god rays（PostProcessManager.godRays）叠加。
  *
- * 完全独立：不依赖 OceanFFT/OceanCaustics 任何符号，bind group 仅含两个
- * uniform buffer（相机 UBO 256 B + 参数 UBO 48 B），无任何纹理。
+ * 独立性：不依赖 OceanFFT/OceanCaustics 任何符号；bind group 含相机/参数
+ * UBO + G-Buffer worldPos 纹理（距离衰减雾，可选绑定）。
  *
  * 混合模式：premultiplied-alpha（one, one-minus-src-alpha）。FS 输出的 rgb
  * 已乘覆盖权重——薄雾区的颗粒/焦散高光自然呈加性提亮，浓雾区近似 alpha
@@ -47,12 +46,19 @@ import { UNDERWATER_FOG_SHADER } from '../shaders/UnderwaterFogShader';
 export interface UnderwaterFogOptions {
   /** 效果强度（乘到雾透明度与高光上）。Default: `1` */
   intensity?: number;
-  /** 水体染色（线性 RGB）。Default: 深青蓝 `[0.05, 0.22, 0.30]` */
+  /** 水体染色（线性 RGB）。Default: `深青蓝 [0.05, 0.22, 0.30]` */
   waterColor?: [number, number, number];
   /** 浮游颗粒密度倍率。Default: `0.5` */
   particleDensity?: number;
   /** 水下太阳光柱强度（Track G 联动；0 = 关闭）。Default: `0`（零回归） */
   sunShaftIntensity?: number;
+  /**
+   * 参考海床深度（米，海面下）。水下俯视的背景像素（GBuffer 无几何——
+   * 海面在相机上方、下半球射线穿不出海面球）按「相机深 + 此深度」算
+   * 水下路径长，海床/焦散从青纱下透出；0 = 关闭（俯视背景全雾，旧行为）。
+   * Default: `6`
+   */
+  seabedDepthM?: number;
 }
 
 /** 参数 UBO：4 x vec4 = 64 字节（布局见 UnderwaterFogShader 的 UWParams）。 */
@@ -74,6 +80,8 @@ export class UnderwaterFog implements IPass {
   private _waterColor: [number, number, number];
   private _particleDensity: number;
   private _sunShaftIntensity: number;
+  /** 参考海床深度（米；水下俯视背景像素的水路长基准，0 = 关闭全雾）。 */
+  private _seabedDepthM: number;
 
   private _pipeline: GPURenderPipeline | null = null;
   private _bindGroupLayout: GPUBindGroupLayout | null = null;
@@ -109,6 +117,7 @@ export class UnderwaterFog implements IPass {
     this._waterColor = opts?.waterColor ?? DEFAULT_WATER_COLOR;
     this._particleDensity = opts?.particleDensity ?? 0.5;
     this._sunShaftIntensity = opts?.sunShaftIntensity ?? 0;
+    this._seabedDepthM = opts?.seabedDepthM ?? 6;
   }
 
   /** 手动开关水下模式（B1 在相机入水判定后调用）。 */
@@ -315,8 +324,10 @@ export class UnderwaterFog implements IPass {
       }
     }
 
-    // ── 参数 UBO：[time, intensity, density, hasScenePos] [w, h, _, _] [rgb, _]
-    //              [sunDir.xyz, sunShaftIntensity]（Track G 水下光柱）──
+    // ── 参数 UBO：[time, intensity, density, hasScenePos] [w, h, seaR, _]
+    //              [rgb, _] [sunDir.xyz, sunShaftIntensity]（Track G 水下光柱）──
+    // seaR = 相机星下点海面球半径（归一化，Camera.surfaceRadius 压扁面公式，
+    // 与 GBuffer 几何同系）——FS 背景像素用它做射线-海面求交（水下路径长）。
     const p = this._params;
     p[0] = time;
     p[1] = this._intensity;
@@ -324,6 +335,8 @@ export class UnderwaterFog implements IPass {
     p[3] = hasScenePos;
     p[4] = this._context.drawingBufferWidth;
     p[5] = this._context.drawingBufferHeight;
+    p[6] = cam ? Camera.surfaceRadius(cam.position) : 1.0;
+    p[7] = this._seabedDepthM; // viewport.w：水下俯视参考海床深（米，0=关）
     p[8]  = this._waterColor[0];
     p[9]  = this._waterColor[1];
     p[10] = this._waterColor[2];

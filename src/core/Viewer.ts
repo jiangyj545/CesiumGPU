@@ -284,10 +284,15 @@ export class Viewer {
       // Pre-render hook (clock tick, sun direction update, etc.)
       this.preRender?.();
 
-      // Camera flight (T2.6): advance the active flyTo by the frame delta time
-      const dt = this._lastFrameTime === null ? 0 : Math.min((now - this._lastFrameTime) / 1000, 0.1);
+      // Camera flight (T2.6): advance the active flyTo by the frame delta time.
+      // 飞行用宽松上限（1s/帧 vs 渲染 dt 的 0.1s）：动画应走墙钟——慢机/
+      // 标签页冻结解冻后 3s 飞行被 0.1s 上限拉长成 15s+ 墙钟（96 页
+      // 「相机 15 秒还悬在半空」的放大器），1s/帧保证低速下也在墙钟内
+      // 走完、解冻后 3 帧内到位。
+      const dtFlight = this._lastFrameTime === null ? 0 : Math.min((now - this._lastFrameTime) / 1000, 1.0);
+      //（渲染侧其他 dt 消费者仍用 0.1s 上限，此处不再重复计算）
       this._lastFrameTime = now;
-      this._scene.camera.updateFlight(dt);
+      this._scene.camera.updateFlight(dtFlight);
 
       this._scene.render();
 
@@ -372,13 +377,18 @@ export class Viewer {
       const ndcX = (pos.x / this._canvas.clientWidth) * 2 - 1;
       const ndcY = 1 - (pos.y / this._canvas.clientHeight) * 2;
       // Pick the globe at the click position; fall back to screen centre
-      this._middlePivot = camera.pickGlobe(ndcX, ndcY) ?? camera.pickGlobe(0, 0);
-      if (this._middlePivot) {
-        camera.cancelFlight(); // user input interrupts flyTo (T2.6)
-        this._isMiddleDragging = true;
-        this._lastMiddleMouseX = pos.x;
-        this._lastMiddleMouseY = pos.y;
-      }
+      //（水下/朝天视角拾取不到地表——2026-09-30 用户「中键不能拖动视角」
+      // 水下实锤：再兜底视线前方 10 m 的 look-at 点，任何机位中键都能转）
+      const lookAhead = new Cartesian3(
+        camera.position.x + camera.direction.x * (10 / Camera.EARTH_SCALE),
+        camera.position.y + camera.direction.y * (10 / Camera.EARTH_SCALE),
+        camera.position.z + camera.direction.z * (10 / Camera.EARTH_SCALE),
+      );
+      this._middlePivot = camera.pickGlobe(ndcX, ndcY) ?? camera.pickGlobe(0, 0) ?? lookAhead;
+      camera.cancelFlight(); // user input interrupts flyTo (T2.6)
+      this._isMiddleDragging = true;
+      this._lastMiddleMouseX = pos.x;
+      this._lastMiddleMouseY = pos.y;
     }, 'MIDDLE_DOWN');
 
     handler.setInputAction(() => {

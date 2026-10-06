@@ -6,13 +6,6 @@ import { Camera } from './Camera';
 import type { FlyToOptions } from './Camera';
 
 /**
- * Minimum camera altitude enforced mid-flight, as a fraction of the Earth's
- * radius (0.5 % ≈ 32 km).  Blended out at both endpoints so the flight still
- * lands exactly on the requested destination height.
- */
-const MIN_ALTITUDE = 0.005;
-
-/**
  * CameraFlightPath - animated camera flight between two positions/orientations.
  *
  * The horizontal path follows the great circle between the start and end
@@ -27,8 +20,12 @@ const MIN_ALTITUDE = 0.005;
  * peak = max(0, arcAngle * R * 0.25 - (h0 + h1) / 2)
  * ```
  *
- * with a floor of {@link MIN_ALTITUDE} blended by sin(π·t) so interior points
- * never dip below the surface while t = 0 / t = 1 remain exact.
+ * A mid-flight safety floor keeps interior points above the LOCAL surface
+ * (see the class-doc note in `evaluate`); when either endpoint is below the
+ * surface (dive / resurface flights) the floor is disabled — the water column
+ * is a legitimate flight space, and the old absolute "unit sphere + 0.005"
+ * (≈ +32 km) floor lifted every short hop ~30 km into the sky (96 页潜水
+ * 切换中帧实锤 2026-09-30).
  *
  * Orientation (heading/pitch) is interpolated numerically along the shortest
  * angular path for heading (wrap at 2π); the start values are derived from the
@@ -54,6 +51,7 @@ export class CameraFlightPath {
   private readonly _r0: number;              // start position magnitude（含椭球深度的真实矢长）
   private readonly _r1: number;              // end   position magnitude
   private readonly _peak: number;            // parabolic arch height, normalised units
+  private readonly _floorOn: boolean;         // 两端点都在地表之上时启用中途安全地板
 
   // ── Orientation path ──────────────────────────────────────────────────────
   private readonly _startHeading: number;
@@ -85,8 +83,13 @@ export class CameraFlightPath {
       Cartesian3.multiplyByScalar(endPos, Camera.EARTH_SCALE, new Cartesian3()),
     );
 
-    this._h0 = startCarto.height;
-    this._h1 = endCarto.height;
+    // 双约定海拔（判别同 zoom 的 surfaceRadius/wgs84Radius）：压扁系机位被
+    // Cartographic 逆解成 ~-11 km 虚假大地高 → meanHeight 大负值 → parabolic
+    // arch 对任何小跳都 +11 km（96 页潜水/上浮中帧弧顶出水、初始入水飞行
+    // 长时间悬在高空的根因 2026-09-30）。取「绝对值小」者：真海拔总在
+    // 米级，错系候选总在公里级（与 _updateProjMatrix 的双候选同思路）。
+    this._h0 = CameraFlightPath._altitude(startPos, startCarto.height);
+    this._h1 = CameraFlightPath._altitude(endPos, endCarto.height);
     // 起终点真实矢长（resolveDestination 的椭球 ECEF 线性归一化在中纬度
     // 地表 ≈ 0.999x，即球面下数 km）。飞行半径必须插值真实矢长而非
     // 「1 + 大地高」，否则 flyTo 落点被抬到单位球面、与 setView /
@@ -122,6 +125,10 @@ export class CameraFlightPath {
     // R = 1 in normalised units (Earth radius).
     const meanHeight = (this._h0 + this._h1) * 0.5;
     this._peak = Math.max(0.0, arcAngle * 1.0 * 0.25 - meanHeight);
+    // 中途安全地板开关：两端点都在（各自方向的）压扁地表之上才启用；
+    // 起或终点在水下（潜水/上浮）→ 关闭，路径不抬升（96 页）。
+    this._floorOn = this._r0 >= Camera.surfaceRadius(startPos)
+      && this._r1 >= Camera.surfaceRadius(endPos);
 
     // ── Orientation path ────────────────────────────────────────────────────
     const derived = camera._deriveHeadingPitch();
@@ -180,17 +187,18 @@ export class CameraFlightPath {
 
     // Altitude: interpolate the endpoints' true position magnitudes (which
     // carry the ellipsoid depth of the linear-ECEF/R convention) plus the
-    // parabolic arch, floored above the unit sphere. The floor is blended by
-    // sin(π·t) so both endpoints stay exact (t = 0/1 land precisely on
-    // start/end positions in the same coordinate convention as setView).
+    // parabolic arch. 安全地板相对「路径方向的当地地表矢长 + 2 m」且仅在
+    // 两端点都在地表之上时生效，sin(π·t) 端点归零 → t = 0/1 仍精确落在
+    // 起/终点（与 setView 同坐标约定）。旧地板 min(base,1)+0.005 对任何
+    // 飞行无条件抬 +32 km（含潜水小跳），见类头注释。
     const dome = Math.sin(Math.PI * t);
     const base = CesiumMath.lerp(this._r0, this._r1, t);
-    // 地板取 min(base, 1)：端点（dome=0）不被钳制、精确落位；飞行中段
-    // 相对「max(端点深度, 单位球面)」保底 MIN_ALTITUDE 净空
-    const radius = Math.max(
-      base + this._peak * dome,
-      Math.min(base, 1.0) + MIN_ALTITUDE * dome,
-    );
+    const radius = this._floorOn
+      ? Math.max(
+        base + this._peak * dome,
+        Camera.surfaceRadius(dir) + Camera.SURFACE_CLEARANCE * dome,
+      )
+      : base + this._peak * dome;
     camera.position.x = dir.x * radius;
     camera.position.y = dir.y * radius;
     camera.position.z = dir.z * radius;
@@ -199,6 +207,18 @@ export class CameraFlightPath {
     const heading = this._startHeading + this._headingDelta * t;
     const pitch = CesiumMath.lerp(this._startPitch, this._endPitch, t);
     camera._applyOrientation(heading, pitch, this._endRoll);
+  }
+
+  /**
+   * 双约定海拔取「绝对值小」者（归一化单位）：`geodetic` 是
+   * Cartographic.fromCartesian 的大地高（未压扁 WGS84 逆解），`flat` 是
+   * 压扁世界矢径差 |pos| − surfaceRadius。压扁系机位的 geodetic 是
+   * ~-11 km 的虚假值（错系逆解），未压扁系机位的 flat 是 ~-17 km 的
+   * 虚假值——真海拔总在米级，两个候选里绝对值小的那个总是对的。
+   */
+  private static _altitude(pos: Cartesian3, geodetic: number): number {
+    const flat = Cartesian3.magnitude(pos) - Camera.surfaceRadius(pos);
+    return Math.abs(flat) <= Math.abs(geodetic) ? flat : geodetic;
   }
 }
 

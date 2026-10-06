@@ -1,3 +1,4 @@
+import { Cartesian3 } from '../../math/Cartesian3';
 import { Context } from '../../renderer/Context';
 import { Frustum } from '../../renderer/Frustum';
 import { Camera } from '../Camera';
@@ -147,13 +148,16 @@ export class GBufferPass implements IPass {
     // the planet (TileTextureCache PIN_LEVEL), so nothing flashes through.
     // Not frustum-culled here: the base mesh is a single planet-wide sphere
     // and tile visibility is already decided by the imagery quadtree
-    // selection each frame.
-    // Lighting off (CesiumJS `globe.enableLighting=false` default): the whole
-    // globe surface draws through the unlit pipeline so imagery shows its raw
-    // albedo — with the sun light the back-lit hemisphere drops to ambient
-    // (~5% brightness) and reads as holes against the space background.
-    const gp = inputs.globe.primitive;
-    if (inputs.globe.show) {
+    // 水下相机跳过球体（2026-09-30 视觉模型实锤）：四叉树瓦片的弦高
+    // 下垂几何会沉到真实地表之下，水下相机的下半球视线把这些公里级
+    // 远几何拍成铺满全屏的放射状扫帚纹（米色/绿色条纹），盖在所有水
+    // 下效果之下。水下世界语义上不应看到海面处的地表 imagery——跳过
+    // 后背景由天空 pass 与海洋/水底效果接管。
+    const camUnder = this._camera !== null
+      && Cartesian3.magnitude(this._camera.position)
+        < Camera.surfaceRadius(this._camera.position);
+    if (inputs.globe.show && !camUnder) {
+      const gp = inputs.globe.primitive;
       const globePipeline =
         inputs.globe.enableLighting || !inputs.unlitPipeline
           ? inputs.opaquePipeline

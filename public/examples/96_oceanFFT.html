@@ -37,10 +37,10 @@
     <input id="windDir" type="range" min="0" max="360" step="5" value="20" />
     <label>choppiness 卷浪度 <b id="choppinessVal">0.90</b></label>
     <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="1.15" />
-    <label>foamBias 白沫阈值 <b id="foamBiasVal">0.65</b></label>
-    <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.65" />
-    <label>时间尺度 <b id="timeScaleVal">1.0</b>×</label>
-    <input id="timeScale" type="range" min="0" max="3" step="0.1" value="1" />
+    <label>foamBias 白沫阈值 <b id="foamBiasVal">0.52</b></label>
+    <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.52" />
+    <label>时间尺度 <b id="timeScaleVal">1.6</b>×</label>
+    <input id="timeScale" type="range" min="0" max="3" step="0.1" value="1.6" />
     <label>船速 <b id="boatSpeedVal">6.0</b> m/s（0 = 停船）</label>
     <input id="boatSpeed" type="range" min="0" max="10" step="0.5" value="6" />
     <div class="checks">
@@ -104,6 +104,9 @@
         sunDirection: SUN,
         starIntensity: 0,          // 白昼场景关星星
         sunDiskIntensity: 1.7,     // 太阳盘+Mie 光晕（tidewater 观感 1.5-2）
+        mieScale: 0.6,             // 干净晴天低气溶胶：前向眩光减弱，主角视角
+                                   //（朝太阳 ~20°）的天空从灰白回蓝（默认 1 偏霾）
+        rayleighScale: 1.1,        // 瑞利略增 → 中高仰角蓝更深
       });
       sky.setDepthView(() => viewer.scene.gbufferPass
         ? viewer.scene.gbufferPass.getDepthView()
@@ -116,6 +119,7 @@
       const clouds = new engine.CloudLayer(context, {
         center: [CEN_LON, CEN_LAT],
         sunDirection: SUN,
+        coverage: 0.42,          // 散云观感（与卷云 0.42 同档；默认 0.5 偏满）
       });
       clouds.setDepthView(() => viewer.scene.gbufferPass
         ? viewer.scene.gbufferPass.getDepthView()
@@ -146,14 +150,14 @@
       const sbLat = CEN_LAT - 500 / METERS_PER_DEG;
       const caustics = new engine.OceanCaustics(context, {
         center: [sbLon, sbLat],
-        floorSizeM: 420,
+        floorSizeM: 500,
         floorDepthM: 5,
         sunDirection: SUN,
       });
       caustics.bindFFT(ocean);     // ocean 实现 FFTDataSource
       const floor = new engine.CausticsFloor(context, {
         center: [sbLon, sbLat],
-        sizeM: 420,
+        sizeM: 500,
         depthM: 5,
         sunDirection: SUN,
       });
@@ -233,9 +237,12 @@
       const uwFog = new engine.UnderwaterFog(context, {
         intensity: 0.85,
         waterColor: [0.06, 0.34, 0.31],  // 青绿透光（tidewater 潜水观感）
-        particleDensity: 0.9,
+        particleDensity: 0.2,            // 0.9→0.32 仍偏高（检查 agent），再降到 0.2：稀疏悬浮颗粒
+        seabedDepthM: 5,                 // 水下俯视参考海床深（沙洲周边 4-6 m）
       });
-      uwFog.setSunShaftIntensity(1.6); // Track G：水下太阳光柱（潜水观感）
+      uwFog.setSunShaftIntensity(0.45); // Track G：水下太阳光柱（潜水观感）
+                                         // 1.6 过强：角向辐条 sin(ang·9) 在俯视构图里
+                                         // 铺满全屏成放射星芒（视觉模型实锤），压到微弱漏光
       // 距离衰减雾（水下应该是透明的）：G-Buffer worldPos 重建水下路径长，
       // 近处海床/沙洲/焦散透出、远处渐蓝（未绑定为均匀俯仰近似）
       uwFog.setScenePosView(() => viewer.scene.gbufferPass
@@ -438,6 +445,9 @@
       const seaLen = Math.hypot(seaP[0], seaP[1], seaP[2]);
 
       let uwMode = false;
+      // 面板云开关（tick 里水下自动隐藏：地平线云底从水下隔水雾看是
+      // 生硬深色三角剪影——2026-09-30 视觉模型实锤，逐项排查定位到云）
+      let cloudsUserOn = true;
       let savedAbove = null; // 潜水前水上机位快照 { lon, lat, height }
       function setDive(on) {
         if (on === uwMode) return;
@@ -453,7 +463,7 @@
         } else if (savedAbove) {
           viewer.camera.flyTo({
             destination: { lon: savedAbove.lon, lat: savedAbove.lat, height: savedAbove.height },
-            orientation: { heading: 0, pitch: -25 * Math.PI / 180 },
+            orientation: { heading: 0, pitch: -10 * Math.PI / 180 }, // -25° 太俯：天空出不了画
           });
         }
         const btn = document.getElementById('diveBtn');
@@ -489,6 +499,7 @@
         const under = Math.hypot(cp.x, cp.y, cp.z) < seaLen;
         uwFog.setUnderwater(under);
         ocean.setUnderwaterView(under);
+        clouds.setShow(cloudsUserOn && !under);
         requestAnimationFrame(tick);
       }
       requestAnimationFrame(tick);
@@ -537,7 +548,7 @@
       });
       // Track C/G 开关：体积云 / 云影 / 光柱 / 岸线冲刷 / 水下光柱
       document.getElementById('cloudsToggle').addEventListener('change', (e) => {
-        clouds.setShow(e.target.checked);
+        cloudsUserOn = e.target.checked; // 实际 show 由 tick 按水下状态统一裁决
       });
       document.getElementById('cloudShadowToggle').addEventListener('change', (e) => {
         const on = e.target.checked;
@@ -594,7 +605,7 @@
         setSunTint(b) { ocean.setSunTint(b); ck('sunTintToggle', b); },
         setBreakSpray(b) { breakSpray.show = b; ck('breakSprayToggle', b); },
         // ── Track C/G 探针扩展：体积云 / 云影 / 光柱 / 冲刷 / 水下光柱 ──
-        setClouds(b) { clouds.setShow(b); ck('cloudsToggle', b); },
+        setClouds(b) { cloudsUserOn = b; ck('cloudsToggle', b); },
         setCloudShadow(b) {
           viewer.scene.cloudShadowSource = b ? () => clouds.cloudShadowSource : null;
           ocean.bindCloudShadow(b ? () => clouds.cloudShadow : null);
@@ -602,7 +613,7 @@
         },
         setGodRays(b) { viewer.scene.postProcess.godRays.enabled = b; ck('godRaysToggle', b); },
         setSwash(b) { floor.setSwash(b ? 0.85 : 0); ck('swashToggle', b); },
-        setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 1.2 : 0); ck('sunShaftToggle', b); },
+        setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 0.45 : 0); ck('sunShaftToggle', b); },
         // ── T-P/W/V/A 探针扩展：卷唇破碎 / 卷云层 / 冲刷模拟 / 大气透视 ──
         setPeel(b) { ocean.setPeelWave(b ? PEEL : null); ck('peelToggle', b); },
         setCirrus(b) { clouds.setCirrus({ enable: b, coverage: 0.42, density: 0.55 }); ck('cirrusToggle', b); },
@@ -634,12 +645,29 @@
         },
       };
 
-      // ── 12. 初始视角：贴海面 7 m / 俯角 -3.5°（tidewater 观感——地平线
-      // 进画、菲涅尔亮带 + 波形占屏；450 m 俯视时 1 m 级波高在 2.5 km tile
-      // 上摊薄为 0.04%，远看必成"平板鱼塘"）────────────────────────────
+      // ── 12. 初始视角（2026-09-30 用户"想看水底效果，向下俯视"）：水下
+      // 俯视沙洲——机位在沙洲东北 ~200 m 浅水上方、海面下 1.5 m、俯角
+      // 55° 朝西南看：入画即见海床沙面 + 焦散光斑 + 岸线湿沙 + 露出水
+      // 面的沙洲尖顶，水体青绿罩色随水深渐浓（近清远蓝）。潜水按钮切回
+      // 贴水 7 m 机位（savedAbove 已备好，uwMode=true 与入水事实一致），
+      // tick() 模长判定自动驱动 uwFog/海面双面视角。
+      savedAbove = { lon: CEN_LON, lat: CEN_LAT - 0.0011, height: 7 };
+      uwMode = true;
+      const btnInit = document.getElementById('diveBtn');
+      if (btnInit) btnInit.textContent = '上浮（恢复水上机位）';
       viewer.camera.flyTo({
-        destination: { lon: CEN_LON, lat: CEN_LAT - 0.0011, height: 7 },
-        orientation: { heading: 0, pitch: -3.5 * Math.PI / 180 },
+        destination: {
+          // 沙洲中心东北 245 m 对角（173m 东 + 173m 北——旧版两轴各 245
+          // 实为 346m 对角：超出 250m 海拔场，脚下无沙面，-35° 俯角里
+          // 整片沙洲只在画面顶部 0.5-2° 细带，水下所见只剩雾+假焦散斑）。
+          // floor/caustics 网格 500m（对齐海拔场全域）：相机 -2.5 m（低于
+          // 波谷 ~-2 m 防波面切锥）距脚下沙面 ~4.2 m，-28° 俯角下画幅从
+          // 近沙 5 m 铺到前方沙洲尖顶 ~245 m，近清远雾透视展开
+          lon: sbLon + 173 / (METERS_PER_DEG * Math.cos(CEN_LAT * Math.PI / 180)),
+          lat: sbLat + 173 / METERS_PER_DEG,
+          height: -2.5,
+        },
+        orientation: { heading: 225 * Math.PI / 180, pitch: -28 * Math.PI / 180 },
       });
     }
 

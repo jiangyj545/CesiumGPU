@@ -1,7 +1,6 @@
 import type { IPass } from '../scene/passes/IPass';
 import type { Context } from '../renderer/Context';
 import { Camera } from '../scene/Camera';
-import { Matrix4 } from '../math/Matrix4';
 import { Cartesian3 } from '../math/Cartesian3';
 import { ecefFromLonLatHeight } from '../terrain/TerrainProvider';
 import {
@@ -190,7 +189,6 @@ export class CloudLayer implements IPass {
   private readonly _paramsF32 = new Float32Array(CLOUD_PARAMS_UBO_BYTES / 4);
   private readonly _cirrusF32 = new Float32Array(CIRRUS_PARAMS_UBO_BYTES / 4);
   private readonly _shadowF32 = new Float32Array(CLOUD_SHADOW_PARAMS_UBO_BYTES / 4);
-  private readonly _scratchInv = new Matrix4();
 
   constructor(context: Context, options: CloudLayerOptions) {
     this._context = context;
@@ -736,13 +734,17 @@ export class CloudLayer implements IPass {
   }
 
   private _writeCameraUniforms(cam: Camera): void {
-    Matrix4.inverse(cam.viewProjectionMatrix, this._scratchInv);
+    // 视图矩阵 + tanHalfFov 上传（GPU 正向重建射线，见 CLOUD_RENDER_WGSL
+    // fs_main 头注释）：旧 invViewProj 元素 ±3.1e6，真机大数相消使部分屏区
+    // 射线方向错乱——云被投影成平涂多边形板块（2026-09-30 根因）。
+    const proj = cam.projectionMatrix.values;
     const f = this._camF32;
-    f.set(this._scratchInv.values, 0);
+    f.set(cam.viewMatrix.values, 0);
     f[16] = cam.position.x; f[17] = cam.position.y; f[18] = cam.position.z; f[19] = 1;
     f[20] = this._context.drawingBufferWidth;
     f[21] = this._context.drawingBufferHeight;
-    f[22] = 0; f[23] = 0;
+    f[22] = 1 / proj[0]; // tanHalfFovX（proj[0][0] = cot(fov/2)/aspect）
+    f[23] = 1 / proj[5]; // tanHalfFovY
     this._context.writeBuffer(this._cameraUBO!, 0, f);
   }
 

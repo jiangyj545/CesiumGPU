@@ -120,12 +120,21 @@ export class OceanCaustics implements IPass {
     this._shallowD = options.shallowDepthM ?? 2.5;
     this._deepD = options.deepDepthM ?? options.floorDepthM ?? 6;
 
-    // 太阳方向 ECEF → 局部 ENU（x 东 / y 上 / z 北）
+    // 太阳方向 ECEF → 局部 ENU（x 东 / y 上 / z 北）。
+    // 2026-09-30 实锤修复：_enuBasis 返回「每米归一化增量」（模长 ~1.6e-7），
+    // 单位太阳向量与之点积 ≈ 1e-7 ≈ 0——sunLocal 全零使折射向量归零、焦散
+    // 生成四层全部画不出（纹理读回全 0）、水底自始全黑。点积前须归一化。
     const sun = OceanCaustics._normalize(options.sunDirection ?? [0.4, 0.5, 0.77]);
     const enu = OceanCaustics._enuBasis(lon, lat);
+    const nrm = (v: [number, number, number]): [number, number, number] => {
+      const m = Math.hypot(v[0], v[1], v[2]) || 1;
+      return [v[0] / m, v[1] / m, v[2] / m];
+    };
     const dot = (a: [number, number, number], b: [number, number, number]): number =>
       a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    this._sunLocal = [dot(sun, enu.east), dot(sun, enu.up), dot(sun, enu.north)];
+    this._sunLocal = [
+      dot(sun, nrm(enu.east)), dot(sun, nrm(enu.up)), dot(sun, nrm(enu.north)),
+    ];
 
     // 静态 uniform 段（tiles.x/y/w 依赖绑定 FFT，execute 时填）
     const P = this._paramsF32;

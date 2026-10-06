@@ -198,7 +198,7 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
     expect(P[13]).toBe(6);    // depths.y
     expect(P[14]).toBe(Math.fround(33.3));  // depths.z
     expect(P[15]).toBe(Math.fround(0.92));  // depths.w
-    expect([P[16], P[17], P[18]]).toEqual([Math.fround(0.78), Math.fround(0.70), Math.fround(0.52)]); // sandCol
+    expect([P[16], P[17], P[18]]).toEqual([Math.fround(0.90), Math.fround(0.85), Math.fround(0.72)]); // sandCol（2026-09-30 白沙提亮，tidewater 观感）
     expect([P[20], P[21], P[22]]).toEqual([Math.fround(0.55), Math.fround(0.72), Math.fround(0.88)]); // skyCol
     expect(P[24]).toBe(0);    // shoreStrength 关
     expect(P[25]).toBe(12.5); // time 透传
@@ -273,7 +273,7 @@ describe('CausticsFloor 湿沙 UBO / 几何（海洋 L4-B）', () => {
       'smoothstep( 1.7, 0.5, seabedH + nz * 0.3 ) * shoreStrength * mottle * shoreFade'
     );
     expect(CAUSTICS_FLOOR_SHADER).toContain('0.7 + 0.3 * nz2');                           // mottle
-    expect(CAUSTICS_FLOOR_SHADER).toContain('col * 0.58 * vec3<f32>( 0.97, 0.98, 1.0 )'); // 湿色
+    expect(CAUSTICS_FLOOR_SHADER).toContain('col * select( 0.58, 0.85, uwCam ) * vec3<f32>( 0.97, 0.98, 1.0 )'); // 湿色（水下相机放宽 0.85，uwFog 统一水柱）
     expect(CAUSTICS_FLOOR_SHADER).toContain('0.25 + 0.45 * sin( wt * 0.7 + nz * 3.0 )');  // runup
     expect(CAUSTICS_FLOOR_SHADER).toContain(
       'smoothstep( 0.22, 0.0, abs( seabedH - runup ) ) * shoreStrength * shoreFade'

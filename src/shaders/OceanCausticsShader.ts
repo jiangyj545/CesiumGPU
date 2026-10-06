@@ -102,13 +102,16 @@ fn fs_main( input : CauOut ) -> @location(0) vec4<f32> {
 `;
 }
 
-/** 细级联浅焦面 → R（tidewater fine 层 depths[0]）。 */
+/** 细级联浅焦面 → R（tidewater fine 层 depths[0]）。slopeLevel 实测
+ * 保留 mip1：mip0（全部细波折射）四边形立即折叠散焦——焦散纹理均值
+ * 塌到 ~0、沙面全黑（2026-09-30 实测 p50=0）；mip1 的网纹频率由级联
+ * 波长×焦深决定，锐度经采样侧 t² 重映射补偿。 */
 export const OCEAN_CAUSTICS_GEN_FINE_SHALLOW = genLayerShader({
   cascadeIdx: 3, slopeLevel: 1, tileSwizzle: 'x', depthSwizzle: 'x',
   rExpr: 'I', gExpr: '0.0', grid: 512, margin: 0.05,
 });
 
-/** 细级联深焦面 → G（tidewater fine 层 depths[1]）。 */
+/** 细级联深焦面 → G（tidewater fine 层 depths[1]，slopeLevel 同上 mip1）。 */
 export const OCEAN_CAUSTICS_GEN_FINE_DEEP = genLayerShader({
   cascadeIdx: 3, slopeLevel: 1, tileSwizzle: 'x', depthSwizzle: 'y',
   rExpr: '0.0', gExpr: 'I', grid: 512, margin: 0.05,
@@ -156,13 +159,16 @@ struct CameraUniforms {
 
 // 128B 沙洲参数
 struct FloorParams {
-  sunLocal : vec4<f32>,  // @0   指向太阳，局部 ENU（x 东 / y 上 / z 北）
-  upDir    : vec4<f32>,  // @16  每米归一化 ECEF 增量（向上，含极轴压扁）
-  spacing  : vec4<f32>,  // @32  x=焦散纹理覆盖(m) y=沙洲边长(m) z=沙面深度(m) w=级联0平铺(m)
-  depths   : vec4<f32>,  // @48  x=浅焦面 D y=深焦面 D z=级联1平铺(m) w=基础 alpha
-  sandCol  : vec4<f32>,  // @64  沙色 rgb
-  skyCol   : vec4<f32>,  // @80  天空/雾色 rgb
-  wet      : vec4<f32>,  // @96  x=湿沙强度 shoreStrength(0=关) y=time(s) z=高度模式(1=海拔已烘焙) w=swash 冲刷强度(0=关)
+  // sunLocal.w：水下相机旗标（1=相机在海面下）——湿沙/深水/swash 浸水
+  // 衰减是「水上隔水看沙」的吸收近似，水下视角由 uwFog 水柱统一处理，
+  // 双重叠加会把整片水底压到近黑（2026-09-30 实测 ~14×）。
+  sunLocal : vec4<f32>,  // @0  指向太阳，局部 ENU（x 东 / y 上 / z 北）；w = 水下相机
+  upDir    : vec4<f32>,  // @16 每米归一化 ECEF 增量（向上，含极轴压扁）
+  spacing  : vec4<f32>,  // @32 x=焦散纹理覆盖(m) y=沙洲边长(m) z=沙面深度(m) w=级联0平铺(m)
+  depths   : vec4<f32>,  // @48 x=浅焦面 D y=深焦面 D z=级联1平铺(m) w=基础 alpha
+  sandCol  : vec4<f32>,  // @64 沙色 rgb
+  skyCol   : vec4<f32>,  // @80 天空/雾色 rgb
+  wet      : vec4<f32>,  // @96 x=湿沙强度 shoreStrength(0=关) y=time(s) z=高度模式(1=海拔已烘焙) w=swash 冲刷强度(0=关)
   /** seabedUv 仿射（P[28..31]）：uv = planeXZ * seabed_uv.zw + seabed_uv.xy（高度场米域 → 纹理 [0,1]）。 */
   seabed_uv: vec4<f32>,  // @112
   /** swashUv 仿射（P[32..35]）：swash 纹理米域 → [0,1]；scale 0 = 未绑定 → 解析路径。 */
@@ -264,10 +270,18 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 
   // 双焦平面按沙面真实深度混合（tidewater wD 同款）
   let wD = clamp( ( depthM - floorParams.depths.x ) / max( floorParams.depths.y - floorParams.depths.x, 1e-4 ), 0.0, 1.0 );
+  // 2026-09-30 焦散网纹重标定：旧重映射按「均值≈0.2」标定，但当前生成
+// 纹理实测 R/G 均值 0.78（p10 0.57 / p90 1.09 / p99 1.5，含宽级联加性
+// 层）——旧式 ×1.8−0.18 把中位推到 3.5，沙面整体 ≥1.2 线性，ACES 肩部
+// 压平成 uniform 白斑（水下焦散"弥散亮斑"根因）。按实测分布重映射：
+// t=(v−0.35)/0.8 钳 [0,1]，cNet = 0.10+1.65·t²——中位 0.58、亮脊 1.75、
+// 暗槽 0.28，网纹对比 ~5:1（t² 收暗槽加深网眼，视觉模型判 t^1.5 仍偏软）。
   let caustic = max( mix( c.r, c.g, wD ), 0.0 );
+  let t = clamp( ( caustic - 0.35 ) / 0.8, 0.0, 1.0 );
+  let cNet = 0.10 + 1.65 * t * t;
 
   // 沙色 × 焦散 + 深水衰减蓝（红先被吸收，越深越偏蓝）
-  var col = floorParams.sandCol.rgb * caustic;
+  var col = floorParams.sandCol.rgb * cNet;
 
   // ── 湿沙线（海洋 L4-B，tidewater Terrain.js 静态 fallback 直译）────────
   // shoreStrength=0 时 wetK/swashLine 恒 0，两个 mix 逐字节回到原着色；
@@ -292,12 +306,17 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 浪痕爬升干湿呼吸：噪声采样点随 time 缓慢漂移（time*0.15 偏移）
   let nz  = vnoise( input.planeXZ * 0.35 + vec2<f32>( wt * 0.15 ) );
   let nz2 = vnoise( input.planeXZ * 0.9 + vec2<f32>( wt * 0.15 + 17.3 ) );
+  // 水下相机（sunLocal.w=1）：湿沙/深水/swash 浸水吸收是「水上隔水看沙」
+  // 的近似，水下视角由 uwFog 水柱统一处理——双重叠加把整片水底压到近黑
+  // （2026-09-30 实测 ~14×）。水下只留基础湿润（×0.85）+ 太阳仰角因子。
+  let uwCam = floorParams.sunLocal.w > 0.5;
   // 干湿过渡带斑驳 + 湿沙变暗（0.58）+ 轻去饱和偏蓝（0.97,0.98,1.00）
   let mottle = 0.7 + 0.3 * nz2;
   let wetK = smoothstep( 1.7, 0.5, seabedH + nz * 0.3 ) * shoreStrength * mottle * shoreFade;
-  col = mix( col, col * 0.58 * vec3<f32>( 0.97, 0.98, 1.0 ), wetK );
+  col = mix( col, col * select( 0.58, 0.85, uwCam ) * vec3<f32>( 0.97, 0.98, 1.0 ),
+             select( wetK, min( wetK, 0.5 ), uwCam ) );
 
-  let deepK = clamp( depthM * 0.08, 0.0, 0.5 );
+  let deepK = select( clamp( depthM * 0.08, 0.0, 0.5 ), 0.0, uwCam );
   col = mix( col, col * vec3<f32>( 0.45, 0.72, 1.0 ), deepK );
   col *= 0.35 + 0.75 * clamp( floorParams.sunLocal.y, 0.0, 1.0 );
 
@@ -327,10 +346,10 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
       // 动态湿沙带：海床低于当前水位即湿（前沿推进由模拟给出），0.3m 毛细
       // 边缘带 + 刚退出的湿痕渐隐
       let underW = smoothstep( 0.30, -0.10, seabedH - etaSw );
-      col = mix( col, col * 0.45 * vec3<f32>( 0.96, 0.98, 1.0 ),
+      col = mix( col, col * select( 0.45, 0.72, uwCam ) * vec3<f32>( 0.96, 0.98, 1.0 ),
                  min( underW * swashAmt * shoreFade, 1.0 ) );
-      // 着水色联动：动态水深（与解析路径同款 ±0.15 钳制防过冲）
-      let dkDyn = clamp( dSw * 0.08, 0.0, 0.5 );
+      // 着水色联动：动态水深（与解析路径同款 ±0.15 钳制防过冲）；水下相机跳过
+      let dkDyn = select( clamp( dSw * 0.08, 0.0, 0.5 ), 0.0, uwCam );
       col = mix( col, col * vec3<f32>( 0.45, 0.72, 1.0 ),
                  clamp( dkDyn - depthM * 0.08, -0.15, 0.15 ) * swashAmt );
       // 白沫：|u| 大 = 翻滚白沫（m/s 门限 ~ √(g·A) 量级低段），色同海面泡沫
@@ -370,13 +389,14 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     let envH = 0.25 + 0.6 * swashAmt;                // 最近 run-up 包络（静态线 + A）
     let hN = seabedH + nz * 0.3;                     // 与静态湿沙同款噪声边缘
     // 浸水湿润衰减：当前水位以下更深色（刚被覆盖），前沿..包络过渡带随相位呼吸
+    //（水下相机同款放宽：0.45→0.72，着水色跳过——uwFog 统一水柱吸收）
     let underW = smoothstep( frontH + 0.2, frontH - 0.15, hN );
     let bandW = smoothstep( envH + 0.2, frontH, hN ) * ( 0.35 + 0.4 * ( 0.5 + 0.5 * sin( phase ) ) );
-    col = mix( col, col * 0.45 * vec3<f32>( 0.96, 0.98, 1.0 ),
+    col = mix( col, col * select( 0.45, 0.72, uwCam ) * vec3<f32>( 0.96, 0.98, 1.0 ),
                min( max( underW * 0.9, bandW ) * swashAmt * shoreFade, 1.0 ) );
     // 着水色联动：deepK 蓝调按动态水深（前沿海拔 - 海床）微调（动态水深与静态
     // depthM 等价时修正为 0；mix 负 t 为线性外推，钳 ±0.15 防过冲）
-    let dkDyn = clamp( max( frontH - seabedH, 0.0 ) * 0.08, 0.0, 0.5 );
+    let dkDyn = select( clamp( max( frontH - seabedH, 0.0 ) * 0.08, 0.0, 0.5 ), 0.0, uwCam );
     col = mix( col, col * vec3<f32>( 0.45, 0.72, 1.0 ),
                clamp( dkDyn - depthM * 0.08, -0.15, 0.15 ) * swashAmt );
     // 回退白沫线：退潮（cos<0 ⇒ d(swashLevel)/dt<0）在前沿叠白沫，强度 ∝ 退速，
@@ -390,8 +410,14 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   }
 
   // 距离雾 + 沙洲边缘 alpha 淡出（免 400m 网格硬边）
-  let fog = 1.0 - exp( - distM / FOG_DIST );
-  col = mix( col, floorParams.skyCol.rgb, fog * 0.9 );
+  // 2026-09-30 差距4/5 首改水下短雾距（90m）；本轮（沙底清晰度）改 300m：
+  // 水柱 Beer 衰减已由 uwFog 统一承担（σ0.02 + 90m 封顶），本层 90m 雾
+  // 与其叠乘把 50m 沙面双雾 ~0.85——沙洲斜坡无层次。300m 只 soften 网格
+  // 远缘；edge 起坡勿提前（机位常在 tile 角部 b≈0.82）。水上逐字节不变。
+  let fogScale = select( 1.0 / FOG_DIST, 1.0 / 300.0, uwCam );
+  let fog = 1.0 - exp( - distM * fogScale );
+  let fogCol = select( floorParams.skyCol.rgb, vec3<f32>( 0.05, 0.26, 0.25 ), uwCam );
+  col = mix( col, fogCol, fog * 0.9 );
   let b = max( abs( input.planeXZ.x ), abs( input.planeXZ.y ) ) / ( floorParams.spacing.y * 0.5 );
   let edge = 1.0 - smoothstep( 0.85, 1.0, b );
   let alpha = clamp( floorParams.depths.w * edge * ( 1.0 - fog * 0.85 ), 0.0, 1.0 );

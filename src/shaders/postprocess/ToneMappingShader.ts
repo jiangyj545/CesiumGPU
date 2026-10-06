@@ -45,11 +45,19 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Reinhard + gamma（与旧内嵌 LDR 路径公式一致）
     mapped = pow(c / (c + vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
   } else if (params.mode == 2u) {
-    // ACES + gamma
-    mapped = pow(acesFilmic(c), vec3<f32>(1.0 / 2.2));
+    // ACES + 饱和保持 + gamma：ACES 中高调把 chroma 洗灰（天顶蓝 B 通道
+    // 123 vs 应有 200+——与 LDR 侧 AtmosphereSkyShader.atmTonemap 2026-09-29
+    // "洗衣水色"同根因，HDR 链此前漏配）。tonemap 后按 luma 重标 chroma
+    // ×1.2；高亮区（max 通道 >0.78，云/太阳盘）渐出提升——R/B 主导的
+    // 亮云被推向品红的实锤（视觉模型 2026-09-30），中低亮度天空不受影响。
+    let t = acesFilmic(c);
+    let luma = dot(t, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let boost = 1.2 * ( 1.0 - smoothstep( 0.78, 0.95, max( t.r, max( t.g, t.b ) ) ) );
+    mapped = pow(
+      clamp(mix(vec3<f32>(luma), t, boost), vec3<f32>(0.0), vec3<f32>(1.0)),
+      vec3<f32>(1.0 / 2.2));
   }
   // mode 0：线性直通（调试用）
-
   return vec4<f32>(mapped, 1.0);
 }
 `;

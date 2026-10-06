@@ -47,8 +47,10 @@ export const ATMO_SUN_ILLUMINANCE = 11.0;
 export const ATMO_TRANSMITTANCE_SIZE = { width: 256, height: 64 } as const;
 /** multiScat LUT 尺寸（正方形）。 */
 export const ATMO_MULTISCAT_SIZE = { width: 32, height: 32 } as const;
-/** skyView LUT 尺寸。 */
-export const ATMO_SKYVIEW_SIZE = { width: 192, height: 108 } as const;
+/** skyView LUT 尺寸。384×216：192×108 在双线性放大下残余 2-4° 三角面片
+ * （渲染端 u=sqrt(方位) 拉扭 → 屏幕上呈斜向三角网格，视觉模型实锤
+ * 「灰褐/浅蓝交替棋盘」2026-09-30）；翻倍后同一梯度跨 ≥4 texel，平滑。 */
+export const ATMO_SKYVIEW_SIZE = { width: 384, height: 216 } as const;
 
 /** AtmosphereParams uniform 字节数。 */
 export const ATMO_PARAMS_UBO_BYTES = 64;
@@ -363,7 +365,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let tBottom = atmosphereRaySphereNearest(ro, rd, ATMO_RG);
   let tTop = atmosphereRaySphereNearest(ro, rd, ATMO_RT);
   let tMax = select(tTop, tBottom, tBottom > 0.0);
-  let steps = 32;
+  // 64 步：32 步二次分布积分的相邻 texel 四舍五入差在 LUT 上呈高频噪
+  // （放大后即面片色差）；步数×2 让相邻 texel 的积分误差低于感知阈。
+  let steps = 64;
   let cosTheta = dot(rd, sunDir);
   let rayPhase = ${fx(3 / (16 * Math.PI))} * (cosTheta * cosTheta + 1.0);
   let g = atmosphereParams.mieG;
