@@ -409,17 +409,27 @@ describe('OCEAN_FFT_RENDER_SHADER L5 源串', () => {
     expect(s).toContain('letflagSky=select(0.0,1.0,(ffb&1)!=0)');
     expect(s).toContain('letrefl=reflect(-viewDir,nLit)');
     expect(s).toContain('varskyRad=renderParams.skyColor.rgb');
-    expect(s).toContain('+skyRad*fresnel*0.9*shadowF');
+    // 2026-10-06 视觉迭代 Round6 V2：反射项乘入 bandCalm（近场群谷压镜像反射）
+    expect(s).toContain('+skyRad*fresnel*0.9*bandCalm*shadowF');
     expect(s).toContain('renderParams.underwater.y)');
+    // 同轮折射权重改 (1-f)²·0.75 + shoreDepth 门控（掠射视线采屏幕空间历史帧
+    // 的天空亮色不再以 0.30 混入前景）
+    expect(s).toContain(
+      'letrefrW=clamp((1.0-fresnel)*(1.0-fresnel)*0.75,0.0,0.60)*(1.0-smoothstep(4.5,8.0,shoreDepth));'
+    );
   });
 
   it('T2 太阳染色源串 + bit3 短路 mix', () => {
     expect(s).toContain('sunTint=atmosphereSampleTransmittance(atmosphereParams.viewHeight,clamp(dot(sunDir,atmUp),-1.0,1.0))');
-    expect(s).toContain('vec3<f32>(spec)*mix(vec3<f32>(1.0),sunTint,flagSpecTint)*shadowF');
+    // 2026-10-06 视觉迭代 Round6 V2：bandCalm 近场谷 0.78→0.92（太阳耀光门控
+    // ——iso2 全源关断实锤残留亮源为耀光柱，非泡沫）
+    expect(s).toContain('letbandCalm=1.0-0.92*nearW*(1.0-swellBand);');
+    expect(s).toContain('vec3<f32>(spec)*mix(vec3<f32>(1.0),sunTint,flagSpecTint)*bandCalm*shadowF');
   });
 
   it('T3 SSS 青绿透射公式源串', () => {
-    expect(s).toContain('col+=vec3<f32>(0.06,0.42,0.34)*sssW*sunTint');
+    // 2026-10-06 视觉迭代：透射色绿斑 [0.06,0.42,0.34] → 偏青蓝 [0.05,0.30,0.38]
+    expect(s).toContain('col+=vec3<f32>(0.05,0.30,0.38)*sssW*sunTint');
     expect(s).toContain('letH=clamp(input.waveH*0.28,0.0,1.0)');
     expect(s).toContain('*upY*renderParams.underwater.z*shadowF');
     expect(s).toContain('col=mix(col,col*(1.0-0.25*H),0.5)');

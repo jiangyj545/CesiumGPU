@@ -467,3 +467,25 @@ G-Buffer 纹理在 resize 时重建，`Weather.setDepthView` 需要重设（建�
 
 **Q: 为什么 DynamicWall 要在构造时传 camera，CircleScan 却用 setCamera？**
 历史接口差异，二者语义等价（每帧重传 viewProj）。自定义特效任选其一并保持一致即可，参考第 9 节约定第 4 条。
+
+## 雾染色 / 闪电（P2-7：FogEffect / LightningEffect）
+
+对齐 hexapod weather-fog.js（scene.fog 密度/高度雾 + tint 染色）与 weather-lightning.js（急升-衰减-余辉闪白）：
+
+```typescript
+// 雾：距离 + 高度衰减，G-Buffer worldPos 提供像素距离/海拔
+const fog = new FogEffect(viewer.context, { density: 0.45, heightFalloff: 0.12 });
+fog.updateCamera(viewer.camera);
+fog.setScenePosView(() => viewer.scene.gbufferPass?.textures.worldPosView ?? null);
+viewer.scene.effects.add(fog);
+
+// 闪电：手动 strike() 或随机自动序列（meanIntervalSec），双闪概率可调
+const lightning = new LightningEffect(viewer.context, { intensity: 0.8, meanIntervalSec: 6 });
+viewer.scene.effects.add(lightning);
+viewer.preRender = () => lightning.step(1 / 60);
+lightning.strike(); // 手动触发一闪
+```
+
+- 雾因子 `1 − exp(−density·dist·exp(−falloff·h))`（纯函数 `computeFogFactor`，WGSL 同式）；天空像素按 `skyTint` 淡染。
+- 闪电包络 `lightningEnvelope`：attack 20ms 线性急升 → decay 80ms 主衰减 → afterglow 500ms 余辉；`step(dt)` 推进（泊松自动序列 + 双闪）。
+- 两者为 EffectManager IPass（全屏 premultiplied 叠加），挂载即满足 P2-5 持续脏。

@@ -3,6 +3,7 @@ import { Primitive } from '../scene/Primitive';
 import { ExtrudedGeometry } from './ExtrudedGeometry';
 import type { ExtrudedGeometryBuffers, LonLatPoint } from './ExtrudedGeometry';
 import { GeometryPipeline } from './GeometryPipeline';
+import { allocatePickInstanceIds } from '../picking/InstanceIdPool';
 
 export interface CityBlockBuilderOptions {
   /**
@@ -11,6 +12,12 @@ export interface CityBlockBuilderOptions {
    * 余量避开 WebGPU `maxBufferSize` 上限（主流实现 256MB）。
    */
   maxChunkBytes?: number;
+  /**
+   * 压扁世界放置（透传 `ExtrudedGeometry` 同名选项）：城市与 Globe/影像
+   * 瓦片共面。需要贴地白模的页面（如 97 大屏）必须开——默认未压扁系
+   * 城市悬在影像上空 ~13km（中纬度）。
+   */
+  flattenedWorld?: boolean;
 }
 
 /** 一个分块的纯数据结果（无 GPU 依赖，可直接测试 / 离线检查）。 */
@@ -56,6 +63,8 @@ export class CityBlockBuilder {
   static readonly DEFAULT_MAX_CHUNK_BYTES = 128 * 1024 * 1024;
 
   private readonly _maxChunkBytes: number;
+  /** 压扁世界放置（透传 ExtrudedGeometry.flattened）。 */
+  private readonly _flattenedWorld: boolean;
 
   /** 实例 id 分配上限（23-bit）：pick shader 输出 `0x800000 | id`，bit23 为实例标记位。 */
   static readonly MAX_INSTANCE_ID = 0x7FFFFF;
@@ -65,7 +74,8 @@ export class CityBlockBuilder {
   private _idxSegs: number[] = [];        // 已含分块内顶点基址偏移
   private _semanticSegs: Uint32Array[] = [];
   private _instanceSegs: Uint32Array[] = [];
-  private _nextInstanceId = 1;            // builder 内全局唯一建筑序号（F12）
+  // F12 实例 id 经进程级共享分配器领取（与 TilesetPickRegistry 等 0x800000
+  // 实例拾取生产方互不相交，见 picking/InstanceIdPool.ts）。
   private _chunkVertFloats = 0;           // 当前分块 vertices 总 float 数
   private _chunkBytes = 0;                // 当前分块 顶点+索引 字节数
   private _chunkBuildings = 0;
@@ -79,6 +89,7 @@ export class CityBlockBuilder {
 
   constructor(options: CityBlockBuilderOptions = {}) {
     this._maxChunkBytes = options.maxChunkBytes ?? CityBlockBuilder.DEFAULT_MAX_CHUNK_BYTES;
+    this._flattenedWorld = options.flattenedWorld ?? false;
   }
 
   /** 累计楼栋总数。 */
@@ -96,15 +107,12 @@ export class CityBlockBuilder {
    * @returns this，支持链式调用
    */
   addBuilding(ring: LonLatPoint[], heightM: number, semanticId = 0): this {
-    const g = ExtrudedGeometry.create({ ring, heightM, semanticId });
+    const g = ExtrudedGeometry.create({ ring, heightM, semanticId, flattened: this._flattenedWorld });
     if (g.indexCount === 0) return this;
 
-    // F12 实例 id：builder 内全局唯一建筑序号（1 起）。semanticId 是类别 id
-    // （palette 查表用），不唯一；实例分离靠本 id。
-    if (this._nextInstanceId > CityBlockBuilder.MAX_INSTANCE_ID) {
-      throw new Error('CityBlockBuilder: 23-bit instance id space exhausted');
-    }
-    const instanceId = this._nextInstanceId++;
+    // F12 实例 id：进程级唯一建筑序号（共享 23-bit 分配器，防跨系统串扰）。
+    // semanticId 是类别 id（palette 查表用），不唯一；实例分离靠本 id。
+    const instanceId = allocatePickInstanceIds(1);
 
     // 分块预算：顶点(32B/顶点) + 索引(4B/索引)。放不下且当前块非空 → 先 flush
     const bytes = g.vertices.byteLength + g.indices.byteLength;

@@ -27,6 +27,23 @@ export { Color } from './math/Color';
 export { JulianDate } from './math/JulianDate';
 export { Cartographic } from './math/Cartographic';
 export { EasingFunction } from './math/EasingFunction';
+export { CallbackProperty, resolveProperty, isProperty } from './dataSource/CallbackProperty';
+export { HeadingPitchRoll } from './math/HeadingPitchRoll';
+export { composeEntityFrameMatrix } from './scene/EntityModelMatrix';
+export { CylinderGeometry } from './geometry/CylinderGeometry';
+export {
+  LabelStyle,
+  HorizontalOrigin,
+  VerticalOrigin,
+  HeightReference,
+  billboardAnchorOffset,
+  billboardScreenOffset,
+  depthTestDisabled,
+  applyHeightReference,
+} from './dataSource/BillboardStyle';
+export type { TerrainHeightSampler } from './dataSource/BillboardStyle';
+export { RenderScheduler } from './core/RenderScheduler';
+export type { PropertyLike, PropertyOrValue } from './dataSource/CallbackProperty';
 export { HermiteSpline, CatmullRomSpline } from './math/Spline';
 
 // Analysis
@@ -47,6 +64,14 @@ export { Globe } from './scene/Globe';
 export { DirectionalLight } from './scene/DirectionalLight';
 export { Primitive, PrimitiveCollection } from './scene/Primitive';
 export { EllipsoidGeometry } from './scene/EllipsoidGeometry';
+export { HeadingPitchRange } from './scene/HeadingPitchRange';
+export { BoundingSphere } from './scene/BoundingSphere';
+export { SceneTransforms } from './scene/SceneTransforms';
+export type { SceneTransformsScene } from './scene/SceneTransforms';
+export { EntityTracker, headingPitchRangeFromCamera } from './scene/EntityTracker';
+export { PathHistory, sampleLeadPositions } from './scene/PathHistory';
+export type { PathSample } from './scene/PathHistory';
+export { composeEntityModelMatrix, resolveMinimumPixelScale } from './scene/EntityModelMatrix';
 export { SunPosition } from './scene/SunPosition';
 
 // Geometry (F2b 城市建筑白模批量渲染)
@@ -123,6 +148,8 @@ export type {
   PolygonGraphics,
   PolygonHierarchy,
   LabelGraphics,
+  PathGraphics,
+  CylinderGraphics,
 } from './dataSource/Entity';
 export { EntityCollection } from './dataSource/EntityCollection';
 export { GeoJsonDataSource } from './dataSource/GeoJsonDataSource';
@@ -140,6 +167,25 @@ export type { Effect } from './effect/EffectManager';
 
 // Circle scan effect (T3.3)
 export { CircleScan } from './effect/CircleScan';
+// P2-6 FlowArrow 流动箭头线（polyline.material = { type: 'flow', ... }）
+export { FlowArrowPolyline } from './effect/FlowArrowPolyline';
+export {
+  flowArrowPhase,
+  flowArrowMask,
+  buildFlowArrowGeometry,
+  FLOW_ARROW_SHAPE,
+  FLOW_ARROW_DEFAULTS,
+} from './effect/FlowArrowMath';
+export type { FlowArrowPolylineMaterial } from './effect/FlowArrowMath';
+// P2-7 雾 / 闪电
+export { FogEffect, LightningEffect } from './effect/WeatherFx';
+export {
+  computeFogFactor,
+  lightningEnvelope,
+  sanitizeFogParams,
+  sanitizeLightningParams,
+} from './effect/WeatherMath';
+export type { FogParams, LightningParams } from './effect/WeatherMath';
 export type { CircleScanOptions } from './effect/CircleScan';
 
 // Dynamic wall effect (T3.2, 对齐 EV_DynamicWall)
@@ -255,6 +301,14 @@ export type {
 } from './terrain/TerrainProvider';
 export { HttpTerrainProviderBase } from './terrain/TerrainProvider';
 export { LocalQuantizedMeshProvider } from './terrain/LocalQuantizedMeshProvider';
+
+// P1-H 地形采样（Cesium sampleTerrainMostDetailed 语义）
+export { sampleTerrainMostDetailed, sampleTerrain } from './terrain/sampleTerrain';
+// P2-8 LERC (ArcGIS Terrain3D) 地形
+export { LercTerrainProvider, DEFAULT_LERC_URL } from './terrain/LercTerrainProvider';
+export type { LercTerrainProviderOptions } from './terrain/LercTerrainProvider';
+export { decodeLerc1 } from './terrain/LercDecoder';
+export type { Lerc1Tile } from './terrain/LercDecoder';
 export type {
   LocalQuantizedMeshProviderOptions,
 } from './terrain/LocalQuantizedMeshProvider';
@@ -286,9 +340,21 @@ export { GoogleTiles3D } from './tileset/GoogleTilesProvider';
 export type { GoogleTiles3DOptions } from './tileset/GoogleTilesProvider';
 export {
   fetchTilesetJson,
+
   parseTileset,
   TILESET_EARTH_SCALE,
 } from './tileset/TilesetContentLoader';
+
+// P1-E 3DTiles feature 挑拣（b3dm _BATCHID + batchTable）
+export {
+  Cesium3DTileFeature,
+  TilesetPickRegistry,
+  tilesetPickRegistry,
+  decodePickInstanceId,
+  buildTileInstanceIds,
+  PICK_INSTANCE_FLAG,
+  PICK_INSTANCE_MASK,
+} from './tileset/Cesium3DTileFeature';
 export type {
   TileNode,
   TileContent,

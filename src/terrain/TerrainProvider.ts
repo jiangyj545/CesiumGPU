@@ -73,6 +73,11 @@ export interface HttpTerrainProviderOptions {
   tilingScheme: TerrainTilingScheme;
   /** Highest available level. */
   maximumLevel: number;
+  /**
+   * Extra HTTP headers sent with every tile request (P1-F auth parity with
+   * Cesium's `new Resource({ url, headers })`, e.g. Authorization Bearer).
+   */
+  headers?: Record<string, string>;
   /** Subdomains for `{s}` rotation. Default: `[]` (no rotation). */
   subdomains?: readonly string[];
 }
@@ -170,6 +175,8 @@ export abstract class HttpTerrainProviderBase implements TerrainProvider {
   readonly tilingScheme: TerrainTilingScheme;
   readonly maximumLevel: number;
   readonly subdomains: readonly string[];
+  /** Auth headers attached to every tile request (see options.headers). */
+  readonly headers: Record<string, string> | undefined;
 
   private readonly _maxConcurrent = 4;
   private readonly _failedTiles = new Set<string>();
@@ -183,6 +190,7 @@ export abstract class HttpTerrainProviderBase implements TerrainProvider {
     this.tilingScheme = options.tilingScheme;
     this.maximumLevel = options.maximumLevel;
     this.subdomains   = options.subdomains ?? [];
+    this.headers      = options.headers;
   }
 
   /** HTTP template services need no metadata negotiation — ready at once. */
@@ -234,6 +242,7 @@ export abstract class HttpTerrainProviderBase implements TerrainProvider {
       const response = await fetch(this.resolveUrl(z, x, y), {
         mode: 'cors',
         signal: this._abortController.signal,
+        headers: this.headers,
       });
       if (!response.ok) {
         console.warn(

@@ -329,11 +329,17 @@ describe('OCEAN_FFT_RENDER_SHADER 岸线泡沫源串', () => {
     expect(s).toContain('vec4<f32>(col,edgeFade)');
   });
 
-  it('flag=0 零回归自证：初始值退化 + 总量公式还原原语义', () => {
+  it('flag=0 零回归自证：初始值退化 + 总量公式（swellBand 群相位门）', () => {
     expect(s).toContain('varjacW=1.0;');
     expect(s).toContain('varshoreCov=0.0;');
     expect(s).toContain('varedgeFade=1.0;');
-    expect(s).toContain('letcovTotal=foam*jacW+shoreCov+wakeFoam;');
+    // 2026-10-06 视觉迭代 Round6：总量公式贴 swellBand 群相位门——shoreCov 经
+    // shoreBand(=shoreCov*swellBand，去 0.25 底)、wakeFoam 由「不经门控」改乘
+    // wakeBand(=0.15+0.85*swellBand)；flag=0 时 shoreBand=0 退化、foam/wakeFoam
+    // 仍按群相位门调制（原「总量公式还原原语义」不再成立，断言随行为更新）
+    expect(s).toContain('letshoreBand=shoreCov*swellBand;');
+    expect(s).toContain('letwakeBand=0.15+0.85*swellBand;');
+    expect(s).toContain('letcovTotal=foam*jacW*swellBand+shoreBand+wakeFoam*wakeBand;');
     expect(s).toContain('letcoverage=clamp(covTotal,0.0,1.0);');
   });
 

@@ -13,6 +13,8 @@ export interface LocalQuantizedMeshProviderOptions {
   url?: string;
   /** Highest available level. Default: 14 */
   maximumLevel?: number;
+  /** Auth headers for every tile request (P1-F，如 Authorization: Bearer）。 */
+  headers?: Record<string, string>;
 }
 
 const DEFAULT_URL =
@@ -24,6 +26,7 @@ export class LocalQuantizedMeshProvider extends HttpTerrainProviderBase {
       url: options.url ?? DEFAULT_URL,
       tilingScheme: 'geographic',
       maximumLevel: options.maximumLevel ?? 14,
+      headers: options.headers,
     });
   }
 

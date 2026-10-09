@@ -13,6 +13,19 @@
 | 拾取 | ✅ | GPU 1×1 回读（24-bit id + 地表坐标），见 [Interaction 指南](docs/guides/interaction.md) |
 | 量测 | ✅ | 距离 / 面积 / 高度（椭球测地线 / Girard 定理），见 [Analysis 指南](docs/guides/analysis.md) |
 | flyTo | ✅ | 大圆弧 + 抛物线拱起 + 防穿地，见 [Camera 指南](docs/guides/camera.md) |
+| lookAt / zoomTo / trackedEntity | ✅ | HeadingPitchRange 定点视角、包络球飞行、跟机三模式（自由/定位/跟随），见 [Camera 指南](docs/guides/camera.md) |
+| 动态 Entity | ✅ | CallbackProperty 逐帧取值 + model（glTF 每帧重定位）+ path 轨迹线，见 [Entities 指南](docs/guides/entities.md) |
+| SceneTransforms | ✅ | worldToWindowCoordinates / wgs84ToWindowCoordinates（CSS 像素，DPR 感知），见 [Interaction 指南](docs/guides/interaction.md) |
+| 3DTiles feature 挑拣 | ✅ | b3dm `_BATCHID` → `PickResult.feature`（`Cesium3DTileFeature`·getProperty/batchTable），见 [Interaction 指南](docs/guides/interaction.md) |
+| 认证 headers | ✅ | 影像 / 地形 / 3DTiles provider 与 tileset.json 全链路 `headers` 透传，见 [Terrain 指南](docs/guides/terrain.md) |
+| 地形采样 | ✅ | `sampleTerrainMostDetailed` / `sampleTerrain`（包络预载 + 高度回填），见 [Terrain 指南](docs/guides/terrain.md) |
+| Lib 构建 | ✅ | `npm run build:lib` → dist-lib/（ESM + UMD `CesiumGPU` global + d.ts） |
+| Entity cylinder | ✅ | 圆柱/圆锥 graphics（动态 length/radius，HPR 朝向），见 [Entities 指南](docs/guides/entities.md) |
+| 标注细节 | ✅ | LabelStyle 描边 / H·V 锚点 / DistanceDisplayCondition / disableDepthTestDistance / HeightReference，见 [Entities 指南](docs/guides/entities.md) |
+| 按需渲染 | ✅ | `requestRenderMode` + `scene.requestRender()`（RenderScheduler 脏标记），见 [Interaction 指南](docs/guides/interaction.md) |
+| FlowArrow 流动箭头线 | ✅ | polyline.material type:'flow'（弧长相位滚动 + 动态 positions 重建），见 [Entities 指南](docs/guides/entities.md) |
+| 雾 / 闪电 | ✅ | FogEffect（距离+高度雾+染色）/ LightningEffect（strike/包络/随机序列），见 [Effects 指南](docs/guides/effects.md) |
+| LERC 地形 | ✅ | ArcGIS Terrain3D LERC1 解码 + provider（headers/maximumLevel），见 [Terrain 指南](docs/guides/terrain.md) |
 | 动态墙 | ✅ | `DynamicWall` 光带上涌墙体，见 [Effects 指南](docs/guides/effects.md) |
 | 扫描 | ✅ | `CircleScan` 贴地圆形扩散波前，见 [Effects 指南](docs/guides/effects.md) |
 | 粒子 | ✅ | `ParticleSystem` compute shader（火焰/喷泉/烟花/烟雾），见 [Effects 指南](docs/guides/effects.md) |

@@ -4,6 +4,11 @@ import type { Camera } from '../scene/Camera';
 import type { Primitive, PrimitiveCollection } from '../scene/Primitive';
 import { Cartesian3 } from '../math/Cartesian3';
 import { PICK_SHADER, PICK_ID_TEST_SHADER } from '../shaders/PickShader';
+import {
+  decodePickInstanceId,
+  tilesetPickRegistry,
+  type Cesium3DTileFeature,
+} from '../tileset/Cesium3DTileFeature';
 import { CAMERA_UBO_SIZE, writeCameraUniforms } from '../renderer/CameraUniforms';
 
 /** Signature of the per-frame encode hook (matches the Scene.frameHooks shape). */
@@ -70,6 +75,12 @@ export interface PickResult {
   id: number;
   /** The picked primitive, or null for a miss (id 0). */
   primitive: Primitive | null;
+  /**
+   * 3D Tiles feature for this pick (P1-E): batch-level when the b3dm carries
+   * `_BATCHID` (`getProperty` reads the batch table), tile-level (batchId
+   * undefined, properties undefined) otherwise. null for non-tileset hits.
+   */
+  feature: Cesium3DTileFeature | null;
   /** Normalised world-space position (Earth radius = 1), null on miss. */
   worldPosition: Cartesian3 | null;
   /** Timing breakdown (ms). */
@@ -789,9 +800,20 @@ export class PickPass {
       const tMapEnd = performance.now();
       this._pending = null;
 
+      const instanceId = decodePickInstanceId(id);
+      const feature = instanceId !== null
+        ? tilesetPickRegistry.resolve(instanceId)
+        : null;
       const result: PickResult = {
         id,
-        primitive: id !== 0 ? (this._idToPrimitive.get(id) ?? null) : null,
+        primitive:
+          feature?.primitive ??
+          (id !== 0 ? (this._idToPrimitive.get(id) ?? null) : null),
+        feature:
+          feature ??
+          (id !== 0
+            ? tilesetPickRegistry.featureForPrimitive(this._idToPrimitive.get(id) ?? null)
+            : null),
         worldPosition,
         timing: {
           encodeMs:   job.tEncodeEnd - job.tEncodeStart,

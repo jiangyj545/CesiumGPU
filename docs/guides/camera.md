@@ -12,6 +12,7 @@
 6. [CameraFlightPath：飞行轨迹与防穿地](#6-cameraflightpath飞行轨迹与防穿地)
 7. [Spline 路径漫游](#7-spline-路径漫游)
 8. [常见问题](#8-常见问题)
+9. [lookAt / trackedEntity / zoomTo（P0 跟机闭环）](#9-lookat--trackedentity--zoomto-p0-跟机闭环)
 
 ## 相关文档
 
@@ -311,3 +312,38 @@ export class CatmullRomSpline extends HermiteSpline {
 
 **Q: `evaluate` 的时间戳要求？**
 `times` 必须严格递增；`time` 超界被 clamp（不会抛错、不会外插）。
+
+## 9. lookAt / trackedEntity / zoomTo（P0 跟机闭环）
+
+### HeadingPitchRange
+
+```typescript
+import { HeadingPitchRange, CesiumMath } from './src/index';
+const offset = new HeadingPitchRange(0, CesiumMath.toRadians(-90), 500); // 正下看，500 m
+```
+
+`heading` / `pitch` 为弧度（pitch −90° = 相机在目标正上方俯视），`range` 为米。
+
+### Camera.lookAt(target, offset)
+
+`target` 为**米制 ECEF**（`Cartesian3.fromDegrees(...)`），相机被放到目标局部 ENU 框内由 offset 描述的位置并回望目标。pitch −90° = 正上方俯视；pitch 0° = 地平线上水平看向目标。与 Cesium 不同，本引擎 lookAt **不锁定**相机变换——拖拽/缩放照常可用。`camera.lookAt(undefined)` 为 no-op（兼容解锁调用点）。
+
+`Camera.lookAtTransform(Matrix4.IDENTITY)` 是 Cesium 语义的「解锁」兼容点（no-op）；非单位阵会抛错（用 `lookAt` 替代）。
+
+### Viewer.trackedEntity（三模式映射）
+
+hexapod_gcs 的相机三模式（自由 / 定位 / 跟随）映射：
+
+| hexapod 模式 | CesiumGPU 做法 |
+|---|---|
+| 自由 | `viewer.trackedEntity = undefined`（+ `camera.lookAtTransform(Matrix4.IDENTITY)` 兼容调用，no-op） |
+| 定位 | `viewer.zoomTo(entity, new HeadingPitchRange(0, -Math.PI/2, range))` |
+| 跟随 | `viewer.trackedEntity = entity` |
+
+跟随实现（`EntityTracker`，纯数学可在 node 测试）：设置时记录当前相机→实体偏移（`headingPitchRangeFromCamera`）；每帧渲染循环把实体位置帧间增量平移到相机（`camera.translate`），视角朝向不动——用户旋转/缩放即调整相对偏移，下一帧从新偏移继续跟随；置 `undefined` 释放。
+
+### Viewer.zoomTo(target, headingPitchRange?) / Camera.flyToBoundingSphere
+
+`zoomTo` 接受 `Entity`（解析其 position，含动态 Property）、米制 `Cartesian3`、归一化 ECEF `Cartesian3[]`（`BoundingSphere.fromPoints` Ritter 包络球）或 `Tileset3D`（根瓦片包围球），默认 heading 0 / pitch −90° / range = max(2.5·radius, 50 m)，经 `Camera.flyToBoundingSphere` 飞行到位（默认 1.5 s，可传 `offset` 覆盖）。
+
+**P1 补充**：`HeadingPitchRoll` 值类（heading/pitch/roll 弧度，`fromRadians` / `clone` / `equals`）已导出，可直接喂给 `Transforms.headingPitchRollQuaternion(origin, hpr)`（对象重载），对齐 hexapod `droneController` 的调用形态。

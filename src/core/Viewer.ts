@@ -9,12 +9,31 @@ import type { PinchPosition, WheelPosition, ScreenSpacePosition } from './Screen
 import type { PickResult } from '../picking/PickPass';
 import { VideoRecorder } from '../media/VideoRecorder';
 import type { RecordingOptions } from '../media/VideoRecorder';
+import { Entity } from '../dataSource/Entity';
+import { resolveProperty } from '../dataSource/CallbackProperty';
+import { EntityTracker } from '../scene/EntityTracker';
+import { BoundingSphere } from '../scene/BoundingSphere';
+import { HeadingPitchRange } from '../scene/HeadingPitchRange';
+import type { Tileset3D } from '../tileset/Tileset3D';
+import type { TerrainLayer } from '../terrain/TerrainLayer';
+import { RenderScheduler } from './RenderScheduler';
 
 export interface ViewerOptions {
   /** GPU power preference. Default: 'high-performance' */
   powerPreference?: GPUPowerPreference;
   /** Initial background color (space). */
   backgroundColor?: Color;
+  /**
+   * P2-5 按需渲染（Cesium requestRenderMode 对齐）：场景静止时跳过
+   * Scene.render 省 CPU。`scene.requestRender()` / 相机 / 实体 / 图元 /
+   * 瓦片 / 特效 / resize 变化自动触发渲染。默认 false（每帧渲染）。
+   */
+  requestRenderMode?: boolean;
+  /**
+   * 静止超过该秒数自动补渲一帧（P2-5，Cesium maximumRenderTimeChange
+   * 简化语义）。默认 Infinity（永不，对齐 hexapod mapController）。
+   */
+  maximumRenderTimeChange?: number;
 }
 
 /**
@@ -98,12 +117,31 @@ export class Viewer {
   private _initPromise: Promise<void> | null = null;
   private _resizeObserver: ResizeObserver | null = null;
 
+  /** Tracked-entity follow logic (`trackedEntity` getter/setter below). */
+  private _tracker: EntityTracker;
+
   // 4K 视频输出（惰性创建，见 captureStream/startRecording/stopRecording）
   private _recorder: VideoRecorder | null = null;
   /** 录制期间挂起容器自适应 resize（否则 ResizeObserver 会改回录制分辨率）。 */
   private _autoResizePaused = false;
 
-  constructor(containerOrId: string | HTMLElement, _options: ViewerOptions = {}) {
+  // ── P2-5 按需渲染 ─────────────────────────────────────────────────────────
+  private _requestRenderMode = false;
+  private _scheduler = new RenderScheduler(Number.POSITIVE_INFINITY);
+  private _lastCameraFp = '';
+  private _lastSceneFp = '';
+
+  /** 显式请求渲染下一帧（等价 Cesium scene.requestRender；任何时候可用）。 */
+  requestRender(): void {
+    this._scheduler.requestRender();
+  }
+
+  /** 是否启用按需渲染（P2-5）。 */
+  get requestRenderMode(): boolean {
+    return this._requestRenderMode;
+  }
+
+  constructor(containerOrId: string | HTMLElement, options: ViewerOptions = {}) {
     if (typeof containerOrId === 'string') {
       const el = document.getElementById(containerOrId);
       if (!el) throw new Error(`Container element not found: ${containerOrId}`);
@@ -119,6 +157,11 @@ export class Viewer {
 
     this._context = new Context(this._canvas);
     this._scene   = new Scene(this._context);
+    this._tracker = new EntityTracker(this._scene.camera);
+    // P2-5 按需渲染：调度器 + scene.requestRender 钩子。
+    this._requestRenderMode = options.requestRenderMode ?? false;
+    this._scheduler = new RenderScheduler(options.maximumRenderTimeChange ?? Number.POSITIVE_INFINITY);
+    this._scene.setRequestRenderHook(() => this._scheduler.requestRender());
 
     // Look for FPS display element
     this._fpsEl = document.getElementById('fps');
@@ -231,6 +274,84 @@ export class Viewer {
     return this._recorder;
   }
 
+
+  // ── Tracked entity / zoomTo ───────────────────────────────────────────────
+
+  /**
+   * The live terrain layer backing the globe (read-only), or `undefined`
+   * while no terrain provider is attached — direct drop-in for
+   * `sampleTerrainMostDetailed(viewer.terrainLayer, positions)`
+   * (hexapod measurement.js / waypointEditor.js call shape).
+   */
+  get terrainLayer(): TerrainLayer | undefined {
+    return this._scene.globe.terrainLayer ?? undefined;
+  }
+
+  /**
+   * The entity the camera follows, mirroring Cesium's `Viewer.trackedEntity`.
+   *
+   * Setting an entity captures the current camera→entity offset (distance +
+   * heading / pitch) and the render loop then translates the camera in
+   * lockstep with the entity every frame (`EntityTracker.update`). User
+   * orbit / zoom while tracking adjust the offset freely — following resumes
+   * from the new relative placement on the next frame. Assign `undefined` to
+   * release (call `camera.lookAtTransform(Matrix4.IDENTITY)` afterwards for
+   * Cesium call-site parity; it is a no-op unlock in this engine).
+   */
+  get trackedEntity(): Entity | undefined {
+    return this._tracker.entity;
+  }
+
+  set trackedEntity(entity: Entity | undefined) {
+    if (entity) this._tracker.track(entity);
+    else this._tracker.release();
+  }
+
+  /**
+   * Fly the camera to frame a target (Cesium `Viewer.zoomTo`).
+   *
+   * - `Entity` → its (resolved) position; `Cartesian3` (metres ECEF) → that
+   *   point; `Cartesian3[]` (normalised ECEF) → bounding sphere of the points;
+   *   `Tileset3D` → its root tile's bounding sphere.
+   * - `headingPitchRange` defaults to heading 0 / pitch −90° with a range
+   *   sized from the bounding sphere (entities: 50 m).
+   */
+  zoomTo(
+    target: Entity | Cartesian3 | Cartesian3[] | Tileset3D,
+    headingPitchRange?: HeadingPitchRange
+  ): void {
+    const sphere = Viewer.boundingSphereForTarget(target);
+    if (!sphere) return;
+    const offset =
+      headingPitchRange ??
+      new HeadingPitchRange(0, -Math.PI / 2, Math.max(sphere.radius * 2.5, 50));
+    this._scene.camera.flyToBoundingSphere(sphere, { offset });
+  }
+
+  /** Resolve the bounding sphere for a `zoomTo` target (null = nothing to do). */
+  private static boundingSphereForTarget(
+    target: Entity | Cartesian3 | Cartesian3[] | Tileset3D
+  ): BoundingSphere | null {
+    if (target instanceof Entity) {
+      const pos = resolveProperty(target.position);
+      if (!pos) return null;
+      return new BoundingSphere(pos, 0);
+    }
+    if (Array.isArray(target)) return BoundingSphere.fromPoints(target);
+    if ('uri' in target || 'readyPromise' in target || 'root' in target) {
+      // Tileset3D: root tile world bounding sphere (center normalised ECEF,
+      // radius in normalised units → convert to metres).
+      const sphere = (target as Tileset3D).root?.sphere;
+      if (!sphere) return null;
+      return new BoundingSphere(sphere.center, sphere.radius * 6378137.0);
+    }
+    // Plain metre-ECEF Cartesian3 → normalised.
+    return new BoundingSphere(
+      Cartesian3.multiplyByScalar(target, 1 / 6378137.0, new Cartesian3()),
+      0
+    );
+  }
+
   // ── Private ────────────────────────────────────────────────────────────────
 
   private _resizeCanvas(): void {
@@ -241,6 +362,7 @@ export class Viewer {
     this._canvas.width  = Math.round(w * dpr);
     this._canvas.height = Math.round(h * dpr);
     this._scene.resize(this._canvas.width, this._canvas.height);
+    this._scheduler.markDirty(); // P2-5：resize 即脏
   }
 
   /** Cancel the pending animation frame so no further frames are rendered. */
@@ -294,6 +416,17 @@ export class Viewer {
       this._lastFrameTime = now;
       this._scene.camera.updateFlight(dtFlight);
 
+      // trackedEntity follow: translate the camera by the entity's
+      // frame-to-frame position delta (see EntityTracker).
+      this._tracker.update();
+
+      // P2-5 按需渲染：静止场景跳过 Scene.render（相机/实体/图元/瓦片/
+      // 特效/动态 Property 任一变化 → RenderScheduler 置脏）。
+      if (this._requestRenderMode) {
+        this._pollDirtySources(now / 1000);
+        if (!this._scheduler.shouldRender(now / 1000)) return;
+      }
+
       this._scene.render();
 
       // FPS counter
@@ -307,6 +440,44 @@ export class Viewer {
     };
 
     this._animFrameId = requestAnimationFrame(loop);
+  }
+
+  /**
+   * P2-5 脏源轮询：相机指纹（拖拽/飞行/滚轮）、场景内容指纹（图元与
+   * 实体增删、瓦片/地形到达）、动态实体变更（CallbackProperty 每帧变
+   * 化经 updateDynamicEntities 检出）、活动特效（视为持续动画）。
+   */
+  private _pollDirtySources(timeSec: number): void {
+    if (this._scene.updateDynamicEntities(timeSec)) this._scheduler.markDirty();
+
+    const cam = this._scene.camera;
+    const camFp = [
+      cam.position.x, cam.position.y, cam.position.z,
+      cam.direction.x, cam.direction.y, cam.direction.z,
+      cam.up.x, cam.up.y, cam.up.z,
+      cam.frustum.fov, cam.inFlight ? 1 : 0,
+    ].join(',');
+    if (camFp !== this._lastCameraFp) {
+      this._lastCameraFp = camFp;
+      this._scheduler.markDirty();
+    }
+
+    const globe = this._scene.globe;
+    const sceneFp = [
+      this._scene.primitives.opaque.length,
+      this._scene.primitives.transparent.length,
+      this._scene.entities.values.length,
+      globe.tilePrimitiveCount,
+      globe.terrainLayer ? globe.terrainLayer.meshCount : 0,
+      this._scene.effects.list.length,
+    ].join(',');
+    if (sceneFp !== this._lastSceneFp) {
+      this._lastSceneFp = sceneFp;
+      this._scheduler.markDirty();
+    }
+
+    // 特效（粒子/天气/水面等）有逐帧动画：挂载即持续脏。
+    if (this._scene.effects.list.length > 0) this._scheduler.markDirty();
   }
 
   private _setupInputHandlers(): void {

@@ -1,7 +1,17 @@
 import { Cartesian3 } from '../math/Cartesian3';
 import { Color } from '../math/Color';
+import { Quaternion } from '../math/Quaternion';
 import { Event } from './Event';
-
+import type { PropertyOrValue } from './CallbackProperty';
+import { Cartesian2 } from '../math/Cartesian2';
+import type {
+  DistanceDisplayCondition,
+  HeightReference,
+  HorizontalOrigin,
+  LabelStyle,
+  VerticalOrigin,
+} from './BillboardStyle';
+import type { FlowArrowPolylineMaterial } from '../effect/FlowArrowMath';
 /**
  * Point graphics. `pixelSize` is expressed in screen pixels; the render
  * layer (T2.2) converts it to world units.
@@ -9,13 +19,32 @@ import { Event } from './Event';
 export interface PointGraphics {
   color?: Color;
   pixelSize?: number;
+  /** Billboard anchoring against the projected position (default CENTER/CENTER). */
+  horizontalOrigin?: HorizontalOrigin;
+  verticalOrigin?: VerticalOrigin;
+  /** Visibility window in metres (skip rendering outside near..far). */
+  distanceDisplayCondition?: DistanceDisplayCondition;
+  /** Ignore depth occlusion within this camera distance (metres; Infinity = always). */
+  disableDepthTestDistance?: number;
+  /** Per-pixel offset added on top of the anchor offset (Cesium pixelOffset). */
+  pixelOffset?: PropertyOrValue<Cartesian2>;
 }
 
-/** Polyline graphics. Positions are normalised ECEF (see {@link Entity.position}). */
+/** Polyline graphics. Positions are normalised ECEF (see {@link Entity.position}); `positions` may be a dynamic Property. */
 export interface PolylineGraphics {
-  positions?: Cartesian3[];
+  positions?: PropertyOrValue<Cartesian3[]>;
+  /** Ignore depth occlusion within this camera distance (metres; Infinity = always). */
+  disableDepthTestDistance?: number;
+  /** Ribbon width in CSS pixels (visualizer 换算世界宽)。 */
   width?: number;
   color?: Color;
+  /** Visibility window in metres (skip rendering outside near..far; may be a Property). */
+  distanceDisplayCondition?: PropertyOrValue<DistanceDisplayCondition>;
+  /**
+   * FlowArrow 流动箭头材质（P2-6）：type 'flow' 判别；设置后该 polyline
+   * 改由 FlowArrowPolyline 特效渲染（不再走普通 ribbon 图元）。
+   */
+  material?: FlowArrowPolylineMaterial;
 }
 
 /** Polygon contour: outer `positions` ring plus optional `holes` rings. */
@@ -35,12 +64,73 @@ export interface PolygonGraphics {
   color?: Color;
 }
 
-/** Label graphics rendered by the render layer (T2.2). */
+/** Label graphics rendered by the render layer (T2.2). `text` may be a dynamic Property. */
 export interface LabelGraphics {
-  text?: string;
+  text?: PropertyOrValue<string>;
   font?: string;
   fillColor?: Color;
   show?: boolean;
+  /** Outline colour / width and FILL vs OUTLINE composition (P2-4). */
+  outlineColor?: Color;
+  outlineWidth?: number;
+  style?: LabelStyle;
+  /** Billboard anchoring against the projected position (default legacy: bottom + lift). */
+  horizontalOrigin?: HorizontalOrigin;
+  verticalOrigin?: VerticalOrigin;
+  /** Visibility window in metres (skip rendering outside near..far). */
+  distanceDisplayCondition?: DistanceDisplayCondition;
+  /** Ignore depth occlusion within this camera distance (metres; Infinity = always). */
+  disableDepthTestDistance?: number;
+  /** Per-pixel offset added on top of the anchor offset (Cesium pixelOffset). */
+  pixelOffset?: PropertyOrValue<Cartesian2>;
+}
+
+/**
+ * glTF model graphics. `uri` is loaded once by the visualizer and the model
+ * primitive is re-positioned every frame from `entity.position` +
+ * `entity.orientation`. `scale` is a uniform multiplier on the glTF extent;
+ * `minimumPixelSize` (CSS px) clamps the on-screen size from below by
+ * scaling up when the camera is far.
+ */
+export interface ModelGraphics {
+  uri: string;
+  scale?: number;
+  minimumPixelSize?: number;
+}
+
+/**
+ * Path (track) graphics: samples `entity.position` over time and renders the
+ * recent history as a polyline.
+ * - `trailTime` — seconds of past positions kept on screen.
+ * - `leadTime` — seconds of future positions sampled from a dynamic position
+ *   Property (evaluated at `now + t`), rendered ahead of the entity.
+ * - `resolution` — sampling step in seconds (default 1).
+ */
+export interface PathGraphics {
+  leadTime?: number;
+  trailTime?: number;
+  width?: number;
+  color?: Color;
+  resolution?: number;
+  /** Visibility window in metres (skip rendering outside near..far; may be a Property). */
+  distanceDisplayCondition?: PropertyOrValue<DistanceDisplayCondition>;
+}
+
+/**
+ * Cylinder / cone graphics: `length` / `topRadius` / `bottomRadius` in
+ * metres along the entity local +Z axis (identity orientation = vertical;
+ * a nose cone is `topRadius: 0` with the entity oriented along the flight
+ * direction). All numeric fields accept dynamic Properties (P0-A chain).
+ */
+export interface CylinderGraphics {
+  length: PropertyOrValue<number>;
+  topRadius: PropertyOrValue<number>;
+  bottomRadius: PropertyOrValue<number>;
+  color?: Color;
+  /** Alias of `color` (Cesium material colour parity). */
+  material?: Color;
+  /** Visibility window in metres (skip rendering outside near..far; may be a Property). */
+  distanceDisplayCondition?: PropertyOrValue<DistanceDisplayCondition>;
 }
 
 /** Constructor options for {@link Entity}. */
@@ -49,11 +139,18 @@ export interface EntityOptions {
   name?: string;
   show?: boolean;
   showPointOnTop?: boolean;
-  position?: Cartesian3;
+  /** Entity-level height semantics against terrain (NONE / CLAMP_TO_GROUND / RELATIVE_TO_GROUND). */
+  heightReference?: HeightReference;
+  position?: PropertyOrValue<Cartesian3>;
+  /** Orientation quaternion in the local ENU frame at `position` (or a Property). */
+  orientation?: PropertyOrValue<Quaternion>;
   point?: PointGraphics;
   polyline?: PolylineGraphics;
   polygon?: PolygonGraphics;
   label?: LabelGraphics;
+  model?: ModelGraphics;
+  path?: PathGraphics;
+  cylinder?: CylinderGraphics;
 }
 
 /**
@@ -94,22 +191,31 @@ export class Entity {
   private _name: string | undefined;
   private _show: boolean;
   private _showPointOnTop: boolean;
-  private _position: Cartesian3 | undefined;
+  private _heightReference: HeightReference | undefined;
+  private _position: PropertyOrValue<Cartesian3> | undefined;
+  private _orientation: PropertyOrValue<Quaternion> | undefined;
   private _point: PointGraphics | undefined;
   private _polyline: PolylineGraphics | undefined;
   private _polygon: PolygonGraphics | undefined;
   private _label: LabelGraphics | undefined;
-
+  private _model: ModelGraphics | undefined;
+  private _path: PathGraphics | undefined;
+  private _cylinder: CylinderGraphics | undefined;
   constructor(options: EntityOptions = {}) {
     this.id = options.id ?? createUuid();
     this._name = options.name;
     this._show = options.show ?? true;
     this._showPointOnTop = options.showPointOnTop ?? false;
+    this._heightReference = options.heightReference;
     this._position = options.position;
+    this._orientation = options.orientation;
     this._point = options.point;
     this._polyline = options.polyline;
     this._polygon = options.polygon;
     this._label = options.label;
+    this._model = options.model;
+    this._path = options.path;
+    this._cylinder = options.cylinder;
   }
 
   /** A human readable name (may be undefined). */
@@ -149,18 +255,50 @@ export class Entity {
   }
 
   /**
-   * Entity position in **normalised ECEF** (Earth equatorial radius = 1.0).
-   * Assign `Cartesian3.fromDegrees(...)` results only after dividing by
-   * `EARTH_SCALE` and normalising to unit length.
+   * Entity-level height semantics against the terrain surface (P2-4):
+   * CLAMP_TO_GROUND / RELATIVE_TO_GROUND re-scale the entity position against
+   * the sampled terrain height before rendering (billboards via OverlayPass,
+   * geometry via EntityVisualizer).
    */
-  get position(): Cartesian3 | undefined {
+  get heightReference(): HeightReference | undefined {
+    return this._heightReference;
+  }
+
+  set heightReference(value: HeightReference | undefined) {
+    if (this._heightReference === value) return;
+    this._heightReference = value;
+    this.definitionChanged.raiseEvent(this, 'heightReference');
+  }
+
+  /**
+   * Entity position in **normalised ECEF** (Earth equatorial radius = 1.0),
+   * or a Property (`CallbackProperty`, ...) sampled once per frame by the
+   * render layer. Assign `Cartesian3.fromDegrees(...)` results only after
+   * dividing by `EARTH_SCALE` and normalising to unit length.
+   */
+  get position(): PropertyOrValue<Cartesian3> | undefined {
     return this._position;
   }
 
-  set position(value: Cartesian3 | undefined) {
+  set position(value: PropertyOrValue<Cartesian3> | undefined) {
     if (this._position === value) return;
     this._position = value;
     this.definitionChanged.raiseEvent(this, 'position');
+  }
+
+  /**
+   * Orientation in the local ENU frame at `position`, as a quaternion
+   * (e.g. `Transforms.headingPitchRollQuaternion(...)`). Dynamic Properties
+   * are polled every frame. Consumed by the model graphics.
+   */
+  get orientation(): PropertyOrValue<Quaternion> | undefined {
+    return this._orientation;
+  }
+
+  set orientation(value: PropertyOrValue<Quaternion> | undefined) {
+    if (this._orientation === value) return;
+    this._orientation = value;
+    this.definitionChanged.raiseEvent(this, 'orientation');
   }
 
   get point(): PointGraphics | undefined {
@@ -201,6 +339,36 @@ export class Entity {
     if (this._label === value) return;
     this._label = value;
     this.definitionChanged.raiseEvent(this, 'label');
+  }
+
+  get model(): ModelGraphics | undefined {
+    return this._model;
+  }
+
+  set model(value: ModelGraphics | undefined) {
+    if (this._model === value) return;
+    this._model = value;
+    this.definitionChanged.raiseEvent(this, 'model');
+  }
+
+  get path(): PathGraphics | undefined {
+    return this._path;
+  }
+
+  set path(value: PathGraphics | undefined) {
+    if (this._path === value) return;
+    this._path = value;
+    this.definitionChanged.raiseEvent(this, 'path');
+  }
+
+  get cylinder(): CylinderGraphics | undefined {
+    return this._cylinder;
+  }
+
+  set cylinder(value: CylinderGraphics | undefined) {
+    if (this._cylinder === value) return;
+    this._cylinder = value;
+    this.definitionChanged.raiseEvent(this, 'cylinder');
   }
 }
 

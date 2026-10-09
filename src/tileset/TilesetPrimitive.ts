@@ -27,8 +27,17 @@ import { GltfLoader } from '../loader/GltfLoader';
 import type { ParsedGltfModel, ParsedMeshPrimitive } from '../loader/GltfLoader';
 import { Ktx2Decoder } from '../loader/Ktx2Decoder';
 import { fetchArrayBuffer } from '../loader/fetchWithGzip';
-import { extractGlb, parseRtcCenter } from './B3dmDecoder';
-import type { RtcCenter } from './B3dmDecoder';
+import {
+  extractGlb,
+  parseRtcCenter,
+  parseFeatureTableJson,
+  parseBatchTable,
+} from './B3dmDecoder';
+import type { ExpandedBatchTable, RtcCenter } from './B3dmDecoder';
+import {
+  buildTileInstanceIds,
+  tilesetPickRegistry,
+} from './Cesium3DTileFeature';
 import type { TileContent } from './TilesetContentLoader';
 
 /** 一个 tile content 的组装产物。 */
@@ -36,13 +45,31 @@ export interface BuiltTileContent {
   primitives: Primitive[];
   /** Primitive 之外独立持有的 GPU 纹理（KTX2 解码产物），销毁时一并释放。 */
   textures: GPUTexture[];
+  /**
+   * b3dm 批次信息（P1-E feature 挑拣）：instance id 基址与批次表。
+   * null = 无 `_BATCHID`（tile 级降级）。Tileset3D 由此向
+   * `tilesetPickRegistry` 注册 primitive → feature 映射。
+   */
+  batch: TileBatchInfo | null;
+}
+
+/** b3dm 批次挑拣元数据（BuiltTileContent.batch）。 */
+export interface TileBatchInfo {
+  /** 全局 instance id 基址（batchId 编码为 base + id + 1）。 */
+  base: number;
+  /** 批次数（BATCH_LENGTH，或 batchIds 最大值 + 1）。 */
+  count: number;
+  /** 展开的批次表；无表时 null（getProperty 全 undefined）。 */
+  table: ExpandedBatchTable | null;
 }
 
 /** content 加载器签名（Tileset3D 集成测试经此注入假装配）。 */
 export type TileContentLoader = (
   context: Context,
   content: TileContent,
-  tileTransform: Matrix4
+  tileTransform: Matrix4,
+  /** 网络选项（P1-F 认证 headers 等，透传给 fetch）。 */
+  fetchOptions?: { init?: RequestInit }
 ) => Promise<BuiltTileContent>;
 
 /**
@@ -53,15 +80,18 @@ export type TileContentLoader = (
 export const loadTileContent: TileContentLoader = async (
   context: Context,
   content: TileContent,
-  tileTransform: Matrix4
+  tileTransform: Matrix4,
+  fetchOptions?: { init?: RequestInit }
 ): Promise<BuiltTileContent> => {
-  const buffer = await fetchArrayBuffer(content.resolvedUrl);
+  const buffer = await fetchArrayBuffer(content.resolvedUrl, { init: fetchOptions?.init });
 
   let glbBuffer: ArrayBuffer;
   let rtc: RtcCenter | null = null;
+  let batch: TileBatchInfo | null = null;
   if (content.kind === 'b3dm') {
     glbBuffer = extractGlb(buffer);
     rtc = parseRtcCenter(buffer);
+    batch = parseTileBatchInfo(buffer);
   } else {
     // .glb 直content（3DTiles 1.1）或未知扩展名按 GLB 试解析
     //（parseGlbBuffer 对非法容器会抛错 → 调用方计入 failed）
@@ -69,8 +99,25 @@ export const loadTileContent: TileContentLoader = async (
   }
 
   const parsed = await GltfLoader.parseGlbBuffer(glbBuffer);
-  return buildTilePrimitives(context, parsed, tileTransform, rtc);
+  return buildTilePrimitives(context, parsed, tileTransform, rtc, batch);
 };
+
+/**
+ * 解析 b3dm 的批次元数据：BATCH_LENGTH + batchTable 展开；无批次表或
+ * BATCH_LENGTH 缺失时仍返回 base（instance id 空间占位）供注册 tile 级
+ * 降级。base 由全局 `tilesetPickRegistry.allocate` 分配（跨瓦片唯一）。
+ */
+function parseTileBatchInfo(buffer: ArrayBuffer): TileBatchInfo {
+  let batchLength = 0;
+  try {
+    const featureTable = parseFeatureTableJson(buffer);
+    batchLength = Number(featureTable.BATCH_LENGTH ?? 0) || 0;
+  } catch (error) {
+    console.error('TilesetPrimitive: b3dm feature table parse failed', error);
+  }
+  const table = batchLength > 0 ? parseBatchTable(buffer, batchLength) : null;
+  return { base: tilesetPickRegistry.allocate(batchLength), count: batchLength, table };
+}
 
 /**
  * 把解析好的 glTF 组装成 Primitive[]（不注册场景——注册/显隐/销毁
@@ -80,7 +127,8 @@ export async function buildTilePrimitives(
   context: Context,
   parsed: ParsedGltfModel,
   tileTransform: Matrix4,
-  rtc: RtcCenter | null
+  rtc: RtcCenter | null,
+  batch: TileBatchInfo | null = null
 ): Promise<BuiltTileContent> {
   const yUpFix = Matrix4.fromRotationX(Math.PI / 2);
 
@@ -98,6 +146,11 @@ export async function buildTilePrimitives(
       color:       new Color(rgba[0], rgba[1], rgba[2], rgba[3]),
       translucent,
       alpha:       rgba[3],
+      // 3D Tiles 批次挑拣：_BATCHID → 全局 instance id（base + id + 1）
+      instanceIds:
+        batch && meshPrim.batchIds
+          ? buildTileInstanceIds(meshPrim.batchIds, batch.base)
+          : undefined,
     });
 
     primitive.modelMatrix = computeWorldMatrix(tileTransform, yUpFix, rtc, meshPrim);
@@ -108,7 +161,7 @@ export async function buildTilePrimitives(
 
     primitives.push(primitive);
   }
-  return { primitives, textures };
+  return { primitives, textures, batch };
 }
 
 /**

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 98：流动箭头线 FlowArrow - CesiumGPU</title>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    // 经纬度 → 归一化 ECEF（压扁世界，与引擎地表一致）
+    function ll(lon, lat, h = 0) {
+      const rho = 6356752.3142 / 6378137.0;
+      const lr = (lon * Math.PI) / 180, fr = (lat * Math.PI) / 180;
+      const k = 1 + h / 6378137.0;
+      return new engine.Cartesian3(
+        Math.cos(fr) * Math.cos(lr) * k,
+        Math.cos(fr) * Math.sin(lr) * rho * k,
+        Math.sin(fr) * rho * k,
+      );
+    }
+
+    async function demo(viewer) {
+      // ── ① 静态航线：material.type = 'flow'（EntityVisualizer 自动挂特效） ──
+      const route = [ll(116.4, 39.9), ll(114.3, 30.6), ll(121.47, 31.23)];
+      viewer.scene.entities.add(
+        new engine.Entity({
+          polyline: {
+            positions: route,
+            width: 8,
+            material: {
+              type: 'flow',
+              color: [0.1, 0.45, 0.85, 0.35],
+              arrowColor: [0.35, 0.95, 1.0, 0.95],
+              speed: 0.35, // 周期/秒
+              gap: 24, // 每单位弧长箭头数
+            },
+          },
+        }),
+      );
+
+      // ── ② 动态航线：CallbackProperty（每帧新数组 → 箭头跟随重建） ──
+      let t = 0;
+      const dynamicRoute = new engine.CallbackProperty(() => {
+        t += 0.016;
+        const k = (Math.sin(t * 0.5) + 1) / 2;
+        const lon = 113 + 6 * k;
+        const lat = 34 + 4 * Math.sin(t * 0.3);
+        return [ll(lon - 1, lat - 0.5), ll(lon, lat), ll(lon + 1, lat + 0.5)];
+      });
+      viewer.scene.entities.add(
+        new engine.Entity({
+          polyline: {
+            positions: dynamicRoute,
+            width: 6,
+            material: { type: 'flow', arrowColor: [1.0, 0.85, 0.2, 0.95], speed: 0.6, gap: 40 },
+          },
+        }),
+      );
+      DemoUtils.toast('FlowArrow ×2 已挂载（静态三城航线 + 动态正弦航线）');
+    }
+
+    const { viewer } = await DemoUtils.startup({
+      engine,
+      view: [115, 33, 3_500_000],
+      title: '98 FlowArrow 流动箭头线',
+    });
+    await demo(viewer);
+    DemoUtils.showCode(demo, '示例源码');
+  </script>
+</body>
+</html>

@@ -358,3 +358,7 @@ viewer.globe.layers.addImageryProvider(new LocalTileProvider(), {
 - [ADR-0001 瓦片纹理方案：texture-per-tile + LRU 纹理池](../decisions/0001-tile-texture-pool.md) — 纹理池设计与上传预算的完整推导
 - [快速开始](./quick-start.md) — 影像接入的最小示例
 - [API 参考](../api/index.html) — `ImageryProvider` / `XyzImageryProvider` / `ImageryLayer` 完整签名
+
+## P1 新增：XYZ provider 认证 headers
+
+`XyzImageryProvider({ url, headers })` —— headers 透传到每个瓦片请求（如私有影像服务的 `Authorization: Bearer …`）；不传时行为不变。

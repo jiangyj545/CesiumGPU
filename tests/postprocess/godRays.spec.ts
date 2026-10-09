@@ -246,15 +246,58 @@ describe('UnderwaterFog sunShaft（Track G 水下光柱联动）', () => {
     expect(uw2.sunShaftIntensity).toBe(0.8);
   });
 
-  it('shader 源串：UWParams.sunShaft 字段 + HG 前向峰值 + shimmer 条纹调制', () => {
+  it('shader 源串：体积焦散 march（causticsTex + 静态 IGN + HG g=0.85）', () => {
     // UBO 第 4 个 vec4（默认强度 0 = 乘 0 零贡献）
     expect(UNDERWATER_FOG_SHADER).toContain('sunShaft');
     expect(UNDERWATER_FOG_SHADER).toContain('uw.sunShaft.w');
-    // HG(g=0.7)：4π 归一常数与前向峰值域
-    expect(UNDERWATER_FOG_SHADER).toContain('12.566371');
-    expect(UNDERWATER_FOG_SHADER).toContain('streak');
-    // 复用已有 shimmer（波浪间隙漏光观感）
-    expect(UNDERWATER_FOG_SHADER).toContain('hg * streak * shimmer');
+    // march 采真焦散纹理（tidewater _shaftCode 同法）
+    expect(UNDERWATER_FOG_SHADER).toContain('causticsTex');
+    expect(UNDERWATER_FOG_SHADER).toContain('cNet');
+    expect(UNDERWATER_FOG_SHADER).toContain('shaftAcc');
+    // 绑定门控：未绑焦散源（cover=0）不 march
+    expect(UNDERWATER_FOG_SHADER).toContain('cCenter.w > 0.5');
+    // 静态 IGN jitter（无 TAA 防闪烁）
+    expect(UNDERWATER_FOG_SHADER).toContain('52.9829189');
+    // HG(g=0.85) 前向散射（tidewater 相函数）
+    expect(UNDERWATER_FOG_SHADER).toContain('0.85');
+    // Round 3 LDR 域标定：K=12 增益替代 tidewater HDR 域 sunE·sigS·2.5
+    expect(UNDERWATER_FOG_SHADER).toContain('sunTint');
+    expect(UNDERWATER_FOG_SHADER).toContain('12.0');
+    // Round 3：窄锥前向峰（峰值 ×2.1）——仰视 Snell 窗独立束状漏光
+    expect(UNDERWATER_FOG_SHADER).toContain('fwdBoost');
+    // Round 3：俯视减益——沙面真焦散网不被上方辉光摊平
+    expect(UNDERWATER_FOG_SHADER).toContain('downDamp');
+    // Round 4 宽束重标定：LOD 1.4 宽级联 + 重映射 + 仰视加权
+    expect(UNDERWATER_FOG_SHADER).toContain('(cNet - 0.72) * 2.6');
+    expect(UNDERWATER_FOG_SHADER).toContain(', 1.4)');
+    expect(UNDERWATER_FOG_SHADER).toContain('clamp((cNet - 0.72) * 2.6, -1.2, 2.2)');
+    expect(UNDERWATER_FOG_SHADER).toContain('mix(1.0, 0.45');
+    expect(UNDERWATER_FOG_SHADER).toContain('mix(1.0, 1.2');
+    // Round 5：束软限幅膝（仰视防 Snell 窗过曝）+ 保对比合成
+    expect(UNDERWATER_FOG_SHADER).toContain('beamPeak');
+    expect(UNDERWATER_FOG_SHADER).toContain('0.55 * max(beamPeak - 0.55');
+    expect(UNDERWATER_FOG_SHADER).toContain('dot(sunBeam, vec3<f32>(0.3333)) * 0.75');
+  });
+
+  it('bindCaustics：默认未绑不影响 sunShaftIntensity；null / 旧屏幕空间辐条已删', () => {
+    const uw = new UnderwaterFog({} as unknown as Context);
+    expect(uw.sunShaftIntensity).toBe(0);
+    uw.setSunShaftIntensity(1.2);   // 未绑焦散源也可设强度（shader uniform 门控）
+    expect(uw.sunShaftIntensity).toBe(1.2);
+    expect(() => uw.bindCaustics(null)).not.toThrow();
+    expect(() => uw.bindCaustics({
+      view: () => null,
+      coverMeters: 500,
+      centerEcef: [1, 0, 0],
+      eastEcef: [0, 1, 0],
+      upEcef: [0, 0, 1],
+      northEcef: [0, 1, 0],
+      shallowDepthM: 1,
+      deepDepthM: 4,
+    })).not.toThrow();
+    // 旧屏幕空间假光柱（放射星芒）已移除
+    expect(UNDERWATER_FOG_SHADER).not.toContain('streak');
+    expect(UNDERWATER_FOG_SHADER).not.toContain('hg * streak * shimmer');
   });
 
   it('Composite 源串含 godRays 采样输入与强度参数', () => {

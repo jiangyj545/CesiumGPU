@@ -48,10 +48,13 @@ export class Quaternion {
     const cosHalfR = Math.cos(roll * 0.5);
     const sinHalfR = Math.sin(roll * 0.5);
 
-    result.x = sinHalfR * cosHalfP * cosHalfH - cosHalfR * sinHalfP * sinHalfH;
-    result.y = cosHalfR * sinHalfP * cosHalfH + sinHalfR * cosHalfP * sinHalfH;
-    result.z = cosHalfR * cosHalfP * sinHalfH - sinHalfR * sinHalfP * cosHalfH;
-    result.w = cosHalfR * cosHalfP * cosHalfH + sinHalfR * sinHalfP * sinHalfH;
+    // Cesium 语义：q = fromAxisAngle(Z,−h) ⊗ fromAxisAngle(Y,−p) ⊗ fromAxisAngle(X,r)
+    //（heading 俯视顺时针；pitch 负值把局部 +Z 轴倒向 +X/东）。闭式展开见
+    // tests/scene/entityCylinder.spec.ts（与 fromAxisAngle 组合逐步对拍）。
+    result.x = cosHalfH * cosHalfP * sinHalfR - sinHalfH * sinHalfP * cosHalfR;
+    result.y = -(cosHalfH * sinHalfP * cosHalfR + sinHalfH * cosHalfP * sinHalfR);
+    result.z = cosHalfH * sinHalfP * sinHalfR - sinHalfH * cosHalfP * cosHalfR;
+    result.w = cosHalfH * cosHalfP * cosHalfR + sinHalfH * sinHalfP * sinHalfR;
     return result;
   }
 

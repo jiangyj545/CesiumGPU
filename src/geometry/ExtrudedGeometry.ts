@@ -34,6 +34,14 @@ export interface ExtrudedGeometryOptions {
    * 供后续分割 pass（F3）按楼栋切分顶点属性使用。
    */
   semanticId?: number;
+  /**
+   * 压扁世界放置（默认 false = 未压扁 WGS84 系，fromDegreesNormalized）。
+   * true 时底/顶环与 up 走引擎地表同款线性压扁映射（单位球方向 ×(1+h/a)，
+   * y/z × ρ）——与 Globe/影像瓦片同一表面。城市要贴影像地面时必须开：
+   * 两系表面在中纬度差 ~13km（2026-09-30 实测光谷 30.5°N 差 13.2km），
+   * 默认系城市悬在影像上空即「白膜飘在空中」。
+   */
+  flattened?: boolean;
 }
 
 /**
@@ -93,6 +101,20 @@ export class ExtrudedGeometry {
     const baseM = options.baseHeightM ?? 0;
     const topM = baseM + Math.max(0, options.heightM);
     const extrude = options.heightM > 0;
+    // 放置映射:默认未压扁 WGS84(fromDegreesNormalized);flattened 时走引擎
+    // 地表同款线性压扁(与 Globe/影像瓦片共面)。ENU 投影(求 winding)两系通用。
+    const RHO = 6356752.3142 / 6378137.0;
+    const pt = (lonDeg: number, latDeg: number, hM: number): Cartesian3 => {
+      if (!options.flattened) return Cartesian3.fromDegreesNormalized(lonDeg, latDeg, hM);
+      const lon = (lonDeg * Math.PI) / 180, lat = (latDeg * Math.PI) / 180;
+      const s = 1.0 + hM / 6378137.0;
+      const cosLat = Math.cos(lat);
+      return new Cartesian3(
+        cosLat * Math.cos(lon) * s,
+        cosLat * Math.sin(lon) * RHO * s,
+        Math.sin(lat) * RHO * s,
+      );
+    };
 
     // ENU 投影（footprint 尺度 << 地球半径，质心经纬度均值即足够）
     let lonSum = 0, latSum = 0;
@@ -123,13 +145,13 @@ export class ExtrudedGeometry {
     const top: Cartesian3[] = new Array(n);
     for (let i = 0; i < n; i++) {
       const p = ring[i];
-      bottom[i] = Cartesian3.fromDegreesNormalized(p.lon, p.lat, baseM);
-      top[i] = Cartesian3.fromDegreesNormalized(p.lon, p.lat, topM);
+      bottom[i] = pt(p.lon, p.lat, baseM);
+      top[i] = pt(p.lon, p.lat, topM);
     }
 
     // up：顶面法向 / 侧面外向基准（质心径向）
     const up = Cartesian3.normalize(
-      Cartesian3.fromDegreesNormalized(lonSum / n, latSum / n, 0),
+      pt(lonSum / n, latSum / n, 0),
       new Cartesian3(),
     );
 

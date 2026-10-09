@@ -141,3 +141,45 @@ polygon: {
 - [ADR 0004 - 地形 Provider 双格式方案](../decisions/0004-terrain-providers.md)：格式对比、小端变体解码器背景、数据源 URL
 - [空间量测（Analysis）](./analysis.md)：`Measure` 距离/面积/高度计算
 - [交互三件套（Interaction）](./interaction.md)：`DrawHandler` 球面绘制
+
+## P1 新增：认证 headers 与 sampleTerrainMostDetailed
+
+### provider headers（P1-F）
+
+`TerrariumProvider` / `LocalQuantizedMeshProvider` / `HttpTerrainProviderBase` 子类的 options 增加 `headers?: Record<string, string>`，随每个瓦片请求发送——对齐 Cesium `new Resource({ url, headers: { Authorization: 'Bearer …' } })` 的用法（构造 provider 时传即可，无需 Resource 类）。
+
+### sampleTerrainMostDetailed / sampleTerrain（P1-H）
+
+```typescript
+import { sampleTerrainMostDetailed, Cartographic } from './src/index';
+
+const positions = [Cartographic.fromDegrees(116.4, 39.9)];
+const sampled = await sampleTerrainMostDetailed(terrainLayer, positions);
+console.log(sampled[0].height); // 米；无覆盖瓦片 → 0（椭球短路）
+```
+
+语义对齐 Cesium：对 positions 的包络矩形按 provider 最高层 `ensureRegion` 预载，逐点 `sampleHeight` 回填；返回**新数组**（入参不改写）；`sampleTerrain(layer, positions, level)` 可钉定层级。
+
+`viewer.terrainLayer`（P2）：Viewer 只读访问器直连当前地形层，移植时无需适配：
+
+```typescript
+const sampled = await sampleTerrainMostDetailed(viewer.terrainLayer!, positions);
+```
+
+## P2-8：LERC 地形（ArcGIS World Elevation Terrain3D）
+
+```typescript
+const provider = new LercTerrainProvider({
+  // url 默认 https://elevation3d.arcgis.com/arcgis/rest/services/
+  //        WorldElevation3D/Terrain3D/ImageServer/tile/{z}/{y}/{x}（y/x 顺序）
+  maximumLevel: 15,
+  // headers: { Authorization: 'Bearer …' }, // 私有服务（P1-F）
+});
+viewer.globe.setTerrainProvider(provider);
+```
+
+- **解码** `decodeLerc1`：LERC1（"CntZImage"）——头 + 掩码 RLE 位图 + 块编码（constant-0 / constant-offset / bitstuffed），位填充 MSB-first 按小端 u32 字消费、尾字无效字节左移对齐（移植自 Esri lerc.js Apache-2.0，见 LercDecoder.ts 头注）。无效像素（掩码洞）取 0。
+- **适配**：与 TerrariumProvider 同一模式（webmercator 瓦片 → `triangulateHeightGrid` 规则网格三角化 → 归一化 ECEF）。
+- **测试**：测试专用最小编码器 `encodeLerc1TestTile`（常值/梯度/掩码洞三档）闭环解码断言（`tests/terrain/lercDecoder.spec.ts`），provider 层断言 URL 模板（y/x 顺序）/headers 透传/网格语义（`lercTerrainProvider.spec.ts`）——不 mock 解码器。
+- 在线源失败（离线/防火墙）时走既有失败缓存路径：单瓦片失败不炸树，整层静默降级为椭球（示例 100 有降级说明）。
+- LERC 移植来源与许可：Esri lerc.js（npm `lerc` 2.0.0，Apache-2.0，Copyright 2015-2018 Esri）；CesiumJS 1.135 同源打包。

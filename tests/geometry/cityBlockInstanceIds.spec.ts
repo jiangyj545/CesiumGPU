@@ -34,8 +34,10 @@ describe('CityBlockBuilder F12 实例 id', () => {
 
     const unique = new Set(chunk.instanceIds);
     expect(unique.size).toBe(2);
-    expect(unique.has(1)).toBe(true);
-    expect(unique.has(2)).toBe(true);
+    // 进程级共享分配器：id 连续但不承诺从 1 起（与 tileset 批次空间互斥，
+    // 见 picking/InstanceIdPool.ts / tests/picking/instanceIdSpace.spec.ts）。
+    const ids = [...unique];
+    expect(Math.max(...ids) - Math.min(...ids)).toBe(1);
     // id 全为正整数（建筑序号）
     for (let i = 0; i < vc; i++) {
       expect(Number.isInteger(chunk.instanceIds[i])).toBe(true);
@@ -66,10 +68,11 @@ describe('CityBlockBuilder F12 实例 id', () => {
     expect(chunks.length).toBeGreaterThanOrEqual(2);
     const all: number[] = [];
     for (const c of chunks) all.push(...c.instanceIds);
-    // 逐顶点值可重复（同一楼内恒定），但不同楼的 id 值域 = {1,2,3} 互不串块
-    expect(new Set(all)).toEqual(new Set([1, 2, 3]));
-    expect(Math.min(...all)).toBe(1);
-    expect(Math.max(...all)).toBe(3);
+    // 逐顶点值可重复（同一楼内恒定），不同楼的 id 互不串块：3 个连续值
+    //（进程级分配器，不承诺从 1 起）。
+    const idSet = new Set(all);
+    expect(idSet.size).toBe(3);
+    expect(Math.max(...all) - Math.min(...all)).toBe(2);
   });
 
   it('id 上限防护：MAX_INSTANCE_ID = 0x7FFFFF（23-bit，bit23 留作实例标记位）', () => {

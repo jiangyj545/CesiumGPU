@@ -152,6 +152,9 @@ window.EXAMPLES_CONFIG = {
         { name: '体积圆柱', fileName: '69_volumeCylinder.html' },
         { name: '建筑特效', fileName: '70_bulidingEffect.html' },
         { name: 'FFT 海洋仿真', fileName: '96_oceanFFT.html' },
+        { name: '流动箭头线', fileName: '98_flowarrow.html' },
+        { name: '雾染色 / 闪电', fileName: '99_weatherfx.html' },
+        { name: 'LERC 地形 (ArcGIS)', fileName: '100_lercTerrain.html' },
       ],
     },
     {

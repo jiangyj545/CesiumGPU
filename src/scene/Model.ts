@@ -15,7 +15,12 @@ export interface ModelFromGltfOptions {
    * The scene in which the model will be rendered.
    * Needed to access the WebGPU context and register primitives.
    */
-  scene: Scene;
+  /**
+   * Scene (or scene-shaped host) in which the model is rendered. `Scene`
+   * and `EntityVisualizer`'s host interface both satisfy this structurally,
+   * letting the entity visualizer load models without a hard Scene import.
+   */
+  scene: Scene | ModelSceneHost;
   /**
    * World-space transform matrix applied to the whole model.
    * Defaults to the identity matrix.
@@ -103,7 +108,7 @@ export class Model {
    */
   private _nodeMatrices: Float32Array[] = [];
 
-  private _scene: Scene;
+  private _scene: Scene | ModelSceneHost;
   private _context: Context;
   private _isReady = false;
   private _scale: number;
@@ -111,7 +116,7 @@ export class Model {
   // ── Constructor (private – use fromGltfAsync) ──────────────────────────────
 
   private constructor(
-    scene: Scene,
+    scene: Scene | ModelSceneHost,
     context: Context,
     show: boolean,
     modelMatrix: Matrix4,
@@ -286,6 +291,16 @@ export class Model {
     return Matrix4.multiply(result, Matrix4.fromArray(nodeMatrix), Matrix4.identity());
   }
 
+}
+
+/**
+ * Structural subset of {@link Scene} that `Model` needs: primitive routing.
+ * Satisfied by `Scene` and by `EntityVisualizer`'s host interface.
+ */
+export interface ModelSceneHost {
+  readonly primitives: { remove(primitive: Primitive): unknown };
+  addPrimitive(primitive: Primitive): void;
+  addTransparentPrimitive(primitive: Primitive): void;
 }
 
 export default Model;

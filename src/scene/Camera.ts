@@ -5,6 +5,8 @@ import { Cartographic } from '../math/Cartographic';
 import { EasingFunction } from '../math/EasingFunction';
 import { Measure } from '../analysis/Measure';
 import { CameraFlightPath } from './CameraFlightPath';
+import { BoundingSphere } from './BoundingSphere';
+import { HeadingPitchRange } from './HeadingPitchRange';
 
 /**
  * Minimal structural contract the camera needs from the globe for
@@ -346,6 +348,7 @@ export class Camera {
    */
   private _pickSurfaceCentre(): Cartesian3 | null {
     const dir = Cartesian3.normalize(this.direction, new Cartesian3());
+
     const b = 2.0 * Cartesian3.dot(this.position, dir);
     const r2 = Cartesian3.magnitudeSquared(this.position);
     let tMin = Infinity;
@@ -366,6 +369,136 @@ export class Camera {
       this.position.y + dir.y * tMin,
       this.position.z + dir.z * tMin,
     );
+  }
+
+  /**
+   * Position the camera looking at `target` from the offset described by a
+   * {@link HeadingPitchRange} (Cesium `Camera.lookAt(target, offset)`).
+   *
+   * The camera is placed in the local east-north-up frame at `target`:
+   * pitch −90° puts it directly above the target looking straight down,
+   * pitch 0° places it on the local horizon, and heading rotates the
+   * placement clockwise from north. `target` is ECEF in **metres** (e.g.
+   * `Cartesian3.fromDegrees(...)`), `offset.range` is in metres.
+   *
+   * Passing `undefined` (some call sites unlock with `lookAt(undefined)`)
+   * is a no-op. Unlike Cesium this camera is not transform-locked after the
+   * call — orbit / zoom continue to work directly.
+   */
+  lookAt(target: Cartesian3 | undefined, offset: HeadingPitchRange): void {
+    if (!target || !offset) return;
+    const placement = Camera.lookAtPlacement(target, offset);
+    this.position.x = placement.position.x;
+    this.position.y = placement.position.y;
+    this.position.z = placement.position.z;
+    this._applyOrientation(placement.heading, placement.pitch, 0);
+  }
+
+  /**
+   * Cesium compatibility unlock. The engine camera never holds a locked
+   * transform, so `lookAtTransform(Matrix4.IDENTITY)` is a no-op that call
+   * sites use after releasing a `trackedEntity`. Non-identity transforms are
+   * rejected — use {@link Camera.lookAt} with an explicit target instead.
+   */
+  lookAtTransform(matrix: Matrix4): void {
+    for (let i = 0; i < 16; i++) {
+      if (Math.abs(matrix.values[i] - Matrix4.IDENTITY.values[i]) > 1e-12) {
+        throw new Error(
+          'Camera.lookAtTransform: only Matrix4.IDENTITY is supported (unlock); use lookAt(target, offset) instead'
+        );
+      }
+    }
+  }
+
+  /**
+   * Fly the camera so the given bounding sphere fills the view (Cesium
+   * `flyToBoundingSphere`). `boundingSphere.center` is normalised ECEF,
+   * `radius` metres. The offset defaults to heading 0 / pitch −90° / range
+   * `2.5 × radius` (a comfortable framing of the sphere).
+   */
+  flyToBoundingSphere(
+    boundingSphere: BoundingSphere,
+    options?: { offset?: HeadingPitchRange; duration?: number }
+  ): void {
+    const offset = options?.offset;
+    const hpr = new HeadingPitchRange(
+      offset?.heading ?? 0,
+      offset?.pitch ?? -Math.PI / 2,
+      offset?.range ?? Math.max(boundingSphere.radius * 2.5, 1)
+    );
+    const targetMetres = Cartesian3.multiplyByScalar(
+      boundingSphere.center,
+      Camera.EARTH_SCALE,
+      new Cartesian3()
+    );
+    const placement = Camera.lookAtPlacement(targetMetres, hpr);
+    this.flyTo({
+      destination: Cartesian3.multiplyByScalar(placement.position, Camera.EARTH_SCALE, new Cartesian3()),
+      orientation: { heading: placement.heading, pitch: placement.pitch, roll: 0 },
+      duration: options?.duration ?? 1.5,
+    });
+  }
+
+  /**
+   * Compute the camera placement for `lookAt(target, offset)`:
+   * world position (normalised ECEF) plus the resulting view heading /
+   * pitch. Exposed as a pure static so `flyToBoundingSphere` can reuse the
+   * exact same geometry.
+   *
+   * Camera placement: elevation θ = pitch + π/2 above the local horizon as
+   * seen from the target; the view then looks straight back at the target,
+   * which makes the *view* pitch equal the offset pitch and the view heading
+   * equal offset heading + π.
+   */
+  static lookAtPlacement(
+    targetMetres: Cartesian3,
+    offset: HeadingPitchRange
+  ): { position: Cartesian3; heading: number; pitch: number } {
+    const invS = 1.0 / Camera.EARTH_SCALE;
+    const target = new Cartesian3(targetMetres.x * invS, targetMetres.y * invS, targetMetres.z * invS);
+    const up = Cartesian3.normalize(target, new Cartesian3());
+    const east = new Cartesian3();
+    const north = new Cartesian3();
+    Camera._eastNorthUp(up, east, north);
+
+    // Horizontal placement direction: heading clockwise from north.
+    const cosH = Math.cos(offset.heading);
+    const sinH = Math.sin(offset.heading);
+    const hd = new Cartesian3(
+      north.x * cosH + east.x * sinH,
+      north.y * cosH + east.y * sinH,
+      north.z * cosH + east.z * sinH
+    );
+    const theta = offset.pitch + Math.PI / 2; // elevation of camera above horizon
+    const cosT = Math.cos(theta);
+    const sinT = Math.sin(theta);
+    const offsetDir = new Cartesian3(
+      up.x * cosT + hd.x * sinT,
+      up.y * cosT + hd.y * sinT,
+      up.z * cosT + hd.z * sinT
+    );
+    const range = Math.max(offset.range, 1) * invS;
+    return {
+      position: new Cartesian3(
+        target.x + offsetDir.x * range,
+        target.y + offsetDir.y * range,
+        target.z + offsetDir.z * range
+      ),
+      heading: offset.heading + Math.PI,
+      pitch: offset.pitch,
+    };
+  }
+
+  /**
+   * Translate the camera position by a world-space delta, keeping the
+   * orientation. Used by the tracked-entity follow logic to move the camera
+   * in lockstep with its target.
+   */
+  translate(delta: Cartesian3): void {
+    this.position.x += delta.x;
+    this.position.y += delta.y;
+    this.position.z += delta.z;
+    this._viewDirty = true;
   }
 
   /**

@@ -4,6 +4,17 @@ import { GBufferPass } from './GBufferPass';
 import type { IPass } from './IPass';
 import { Color } from '../../math/Color';
 import { EntityCollection } from '../../dataSource/EntityCollection';
+import { resolveProperty } from '../../dataSource/CallbackProperty';
+import {
+  LabelStyle,
+  HorizontalOrigin,
+  VerticalOrigin,
+  billboardScreenOffset,
+  depthTestDisabled,
+  applyHeightReference,
+  type TerrainHeightSampler,
+} from '../../dataSource/BillboardStyle';
+import { Cartesian3 } from '../../math/Cartesian3';
 import { OVERLAY_SHADER } from '../../shaders/OverlayShader';
 
 /** Maximum number of billboards (points + labels) drawn per frame. */
@@ -34,6 +45,11 @@ const RETIRE_GRACE_FRAMES = 3;
  * 1e-4 ≈ a few hundred metres of surface offset at globe viewing distances.
  */
 const DEPTH_BIAS = 1e-4;
+/** 8 向描边偏移单位向量（× outlineWidth 像素）。 */
+const OUTLINE_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [1, 0], [-1, 0], [0, 1], [0, -1],
+  [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071],
+];
 
 interface LabelEntry {
   texture: GPUTexture;
@@ -69,6 +85,8 @@ export class OverlayPass implements IPass {
 
   private _context: Context;
   private _entities: EntityCollection;
+  /** Terrain height sampler for entity HeightReference (P2-4); null = none. */
+  private _terrainSampler: TerrainHeightSampler | null = null;
   private _gbufferPass: GBufferPass;
   private _format: GPUTextureFormat;
 
@@ -118,12 +136,15 @@ export class OverlayPass implements IPass {
     context: Context,
     entities: EntityCollection,
     gbufferPass: GBufferPass,
-    format: GPUTextureFormat
+    format: GPUTextureFormat,
+    /** Terrain height sampler for entity HeightReference (P2-4); nullable. */
+    terrainSampler?: TerrainHeightSampler | null
   ) {
     this._context     = context;
     this._entities    = entities;
     this._gbufferPass = gbufferPass;
     this._format      = format;
+    this._terrainSampler = terrainSampler ?? null;
   }
 
   /**
@@ -238,11 +259,15 @@ export class OverlayPass implements IPass {
     const vp = camera.viewProjectionMatrix.values;
 
     for (const entity of this._entities.values) {
-      if (!entity.show || !entity.position) continue;
+      if (!entity.show) continue;
+      // Dynamic position Property (CallbackProperty, ...): sampled per frame,
+      // then re-scaled for CLAMP/RELATIVE_TO_GROUND height references (P2-4).
+      const raw = resolveProperty(entity.position);
+      if (!raw) continue;
+      const p = applyHeightReference(raw, entity.heightReference, this._terrainSampler);
 
       // Anchor projection: world → clip → pixels (column-major mat4; NDC y
       // flips to top-left-origin screen y).
-      const p  = entity.position;
       const x  = p.x, y = p.y, z = p.z;
       const cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
       if (cw <= 1e-6) continue; // behind the camera (w <= 0)
@@ -253,11 +278,30 @@ export class OverlayPass implements IPass {
       const px = (sx * 0.5 + 0.5) * this._width;
       const py = (0.5 - sy * 0.5) * this._height;
       const depth = sz;
+      // Camera distance in metres (DDC / disableDepthTestDistance 判定).
+      const distanceMetres = Cartesian3.distance(camera.position, p) * 6378137.0;
 
       const point = entity.point;
-      if (point && point.pixelSize && point.pixelSize > 0) {
+      if (
+        point &&
+        point.pixelSize &&
+        point.pixelSize > 0 &&
+        (point.distanceDisplayCondition?.isVisible(distanceMetres) ?? true)
+      ) {
         const bg = this._getBindGroup(this._whiteTexture!);
-        if (bg && this._appendQuad(px, py, point.pixelSize, point.color ?? Color.WHITE, depth)) {
+        // P2-4 anchors (default CENTER/CENTER → 零偏移，行为不变) +
+        // pixelOffset 逐像素偏移叠加 + 深度穿视。
+        const { dx, dy } = billboardScreenOffset(
+          point.horizontalOrigin ?? HorizontalOrigin.CENTER,
+          point.verticalOrigin ?? VerticalOrigin.CENTER,
+          point.pixelSize,
+          point.pixelSize,
+          resolveProperty(point.pixelOffset)
+        );
+        const quadDepth = depthTestDisabled(point.disableDepthTestDistance, distanceMetres)
+          ? 0 // depth 属性 0 → 场景深度永不可能更近 → 片元永不裁弃
+          : depth;
+        if (bg && this._appendQuad(px + dx, py + dy, point.pixelSize, point.color ?? Color.WHITE, quadDepth)) {
           if (pointSegment && pointSegment.firstVertex + pointSegment.vertexCount === (this._quadCount - 1) * VERTICES_PER_QUAD) {
             pointSegment.vertexCount += VERTICES_PER_QUAD;
           } else {
@@ -273,16 +317,71 @@ export class OverlayPass implements IPass {
       }
 
       const label = entity.label;
-      if (label && label.text && this._quadCount < MAX_QUADS) {
-        const entry = this._getOrCreateLabel(label.text);
+      if (
+        label &&
+        this._quadCount < MAX_QUADS &&
+        (label.distanceDisplayCondition?.isVisible(distanceMetres) ?? true)
+      ) {
+        const labelText = resolveProperty(label.text);
+        if (!labelText) continue;
+        const style = label.style ?? LabelStyle.FILL;
+        const entry = this._getOrCreateLabel(labelText, style);
         const bg    = this._getBindGroup(entry.texture);
-        if (bg && this._appendSizedQuad(
-          px - entry.width / 2,
-          py - LABEL_LIFT_PX - entry.height,
+        if (!bg) continue;
+
+        // P2-4 锚点：显式 origin 时以 (px,py) 为锚做九宫偏移（+
+        // pixelOffset）；未指定时保留旧行为（点上方 + LABEL_LIFT_PX），
+        // pixelOffset 仍叠加。
+        const pixelOffset = resolveProperty(label.pixelOffset);
+        const explicit =
+          label.horizontalOrigin !== undefined || label.verticalOrigin !== undefined;
+        const { dx, dy } = explicit
+          ? billboardScreenOffset(
+              label.horizontalOrigin ?? HorizontalOrigin.CENTER,
+              label.verticalOrigin ?? VerticalOrigin.CENTER,
+              entry.width,
+              entry.height,
+              pixelOffset
+            )
+          : { dx: pixelOffset?.x ?? 0, dy: -(LABEL_LIFT_PX + entry.height / 2) + (pixelOffset?.y ?? 0) };
+        const cx = px + dx;
+        const cy = py + dy;
+        const quadDepth = depthTestDisabled(label.disableDepthTestDistance, distanceMetres)
+          ? 0
+          : depth;
+
+        // 描边（OUTLINE / FILL_AND_OUTLINE）：8 向偏移重绘字形剪影。
+        const outlineWidth = label.outlineWidth ?? 2;
+        const outlineColor = label.outlineColor ?? Color.BLACK;
+        if (style !== LabelStyle.FILL && this._quadCount < MAX_QUADS) {
+          for (const [ox, oy] of OUTLINE_OFFSETS) {
+            if (this._quadCount >= MAX_QUADS) break;
+            if (this._appendSizedQuad(
+              cx - entry.width / 2 + ox * outlineWidth,
+              cy - entry.height / 2 + oy * outlineWidth,
+              entry.width,
+              entry.height,
+              outlineColor,
+              quadDepth
+            )) {
+              this._segments.push({
+                pipeline: this._pipelineLabel!,
+                bindGroup: bg,
+                firstVertex: (this._quadCount - 1) * VERTICES_PER_QUAD,
+                vertexCount: VERTICES_PER_QUAD,
+              });
+            }
+          }
+        }
+
+        // 填充（FILL / FILL_AND_OUTLINE；纯 OUTLINE 用描边色单次平铺）。
+        if (this._quadCount < MAX_QUADS && this._appendSizedQuad(
+          cx - entry.width / 2,
+          cy - entry.height / 2,
           entry.width,
           entry.height,
-          label.fillColor ?? Color.WHITE,
-          depth
+          style === LabelStyle.OUTLINE ? outlineColor : label.fillColor ?? Color.WHITE,
+          quadDepth
         )) {
           // Each label texture owns its segment (own bind group).
           this._segments.push({
@@ -537,15 +636,15 @@ export class OverlayPass implements IPass {
   }
 
   /** Bake `text` into a GPU texture (Canvas2D), LRU-capped at 128 entries. */
-  private _getOrCreateLabel(text: string): LabelEntry {
-    const existing = this._labelCache.get(text);
+  private _getOrCreateLabel(text: string, style: LabelStyle = LabelStyle.FILL): LabelEntry {
+    const cacheKey = `${text}\u0000${style}`;
+    const existing = this._labelCache.get(cacheKey);
     if (existing) {
       // LRU touch: re-insert to move to the most-recently-used end.
-      this._labelCache.delete(text);
-      this._labelCache.set(text, existing);
+      this._labelCache.delete(cacheKey);
+      this._labelCache.set(cacheKey, existing);
       return existing;
     }
-
     if (!this._labelCanvas) this._labelCanvas = document.createElement('canvas');
     const canvas = this._labelCanvas;
     const ctx2d  = canvas.getContext('2d');
@@ -567,13 +666,21 @@ export class OverlayPass implements IPass {
       ctx2d.textAlign = 'center';
       ctx2d.textBaseline = 'middle';
       ctx2d.lineJoin  = 'round';
-      // Dark outline for contrast against bright imagery, then white fill
-      // (the entity fill colour is applied as the shader tint).
-      ctx2d.strokeStyle = 'rgba(0, 0, 0, 0.85)';
-      ctx2d.lineWidth   = 4;
-      ctx2d.strokeText(text, width / 2, height / 2);
-      ctx2d.fillStyle   = '#ffffff';
-      ctx2d.fillText(text, width / 2, height / 2);
+      if (style === LabelStyle.OUTLINE) {
+        // 纯描边样式：白色描边（tint 上 outlineColor），不画填充——偏移
+        // 平铺时字形剪影即描边体。
+        ctx2d.strokeStyle = '#ffffff';
+        ctx2d.lineWidth   = 4;
+        ctx2d.strokeText(text, width / 2, height / 2);
+      } else {
+        // Dark outline for contrast against bright imagery, then white fill
+        // (the entity fill colour is applied as the shader tint).
+        ctx2d.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+        ctx2d.lineWidth   = 4;
+        ctx2d.strokeText(text, width / 2, height / 2);
+        ctx2d.fillStyle   = '#ffffff';
+        ctx2d.fillText(text, width / 2, height / 2);
+      }
     }
 
     const device  = this._context.device;
@@ -590,7 +697,7 @@ export class OverlayPass implements IPass {
     );
 
     const entry: LabelEntry = { texture, width, height };
-    this._labelCache.set(text, entry);
+    this._labelCache.set(cacheKey, entry);
 
     // LRU eviction. Destroying is deferred by RETIRE_GRACE_FRAMES: a texture
     // can still be referenced by the previous frame's in-flight submit, and

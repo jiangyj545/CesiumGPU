@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 99：雾染色 / 闪电 FogEffect · LightningEffect - CesiumGPU</title>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer) {
+      // ── FogEffect：距离 + 高度衰减雾 + 场景染色（weather-fog.js 等价） ──
+      const fog = new engine.FogEffect(viewer.context, {
+        density: 0.45,          // 0..1
+        heightFalloff: 0.12,    // 1/km 逆温衰减
+        tintColor: [0.78, 0.82, 0.88, 1.0],
+        skyTint: 0.35,
+      });
+      fog.updateCamera(viewer.camera);
+      // 像素距离 / 海拔来自 G-Buffer worldPos（未绑定时全屏按 skyTint 淡染）。
+      fog.setScenePosView(() => viewer.scene.gbufferPass
+        ? viewer.scene.gbufferPass.textures.worldPosView
+        : null);
+      viewer.scene.effects.add(fog);
+
+      const lightning = new engine.LightningEffect(viewer.context, {
+        intensity: 0.8,
+        color: [0.85, 0.9, 1.0],
+        meanIntervalSec: 6,     // 平均 6s 一闪（0 = 仅手动）
+        doubleStrikeChance: 0.3,
+      });
+      viewer.scene.effects.add(lightning);
+      // 特效包络由 preRender 驱动（60fps 假设下 step 1/60s）。
+      viewer.preRender = () => lightning.step(1 / 60);
+
+      const panel = document.createElement('div');
+      panel.style.cssText = 'position:absolute;top:12px;right:12px;z-index:9000;padding:12px 14px;' +
+        'background:rgba(10,18,30,.85);border:1px solid rgba(120,180,255,.25);border-radius:8px;color:#d8e8ff;font-size:12px;';
+      const label = document.createElement('div');
+      label.textContent = '雾密度: 0.45';
+      label.style.marginBottom = '6px';
+      const range = document.createElement('input');
+      range.type = 'range'; range.min = '0'; range.max = '1'; range.step = '0.05'; range.value = '0.45';
+      range.style.width = '160px';
+      range.addEventListener('input', () => {
+        fog.setDensity(Number(range.value));
+        label.textContent = `雾密度: ${Number(range.value).toFixed(2)}`;
+      });
+      const strikeBtn = document.createElement('button');
+      strikeBtn.textContent = '⚡ strike()';
+      strikeBtn.style.cssText = 'display:block;margin-top:8px;padding:4px 12px;cursor:pointer;' +
+        'background:rgba(40,80,140,.55);border:1px solid rgba(120,180,255,.35);border-radius:5px;color:#cfe4ff;';
+      strikeBtn.addEventListener('click', () => lightning.strike());
+      panel.append(label, range, strikeBtn);
+      document.body.appendChild(panel);
+
+      DemoUtils.toast('雾 + 闪电已挂载：拖动视角观察距离/高度雾；每 ~6s 自动闪电');
+    }
+
+    const { viewer } = await DemoUtils.startup({
+      engine,
+      view: [105, 36, 8_000_000],
+      title: '99 FogEffect / LightningEffect',
+    });
+    await demo(viewer);
+    DemoUtils.showCode(demo, '示例源码');
+  </script>
+</body>
+</html>

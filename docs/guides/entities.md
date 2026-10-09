@@ -28,6 +28,7 @@ GeoJSON 文件 ──load──▶ GeoJsonDataSource ──▶ EntityCollection�
 5. [GeoJSON 加载](#5-geojson-加载)
 6. [EntityVisualizer 渲染路径](#6-entityvisualizer-渲染路径)
 7. [性能与最佳实践](#7-性能与最佳实践)
+8. [动态 Property（CallbackProperty）与 model / path（P0）](#8-动态-propertycallbackproperty与-model--path-p0)
 
 ---
 
@@ -340,3 +341,108 @@ export interface EntityVisualizerHost {
 - [交互三件套](./interaction.md) — 拾取 Entity 生成的图元
 - [引擎架构](./architecture.md) — G-Buffer / WBOIT / Overlay 在整条管线中的位置
 - [API 参考](../api/index.html) — `Entity` / `EntityCollection` / `GeoJsonDataSource` 完整签名
+
+## 8. 动态 Property（CallbackProperty）与 model / path（P0）
+
+### CallbackProperty：逐帧取值的字段
+
+`position` / `orientation` / `polyline.positions` / `label.text` 均接受**纯值或任何带 `getValue` 的 Property**（`resolveProperty` 统一解析）：
+
+```typescript
+import { CallbackProperty, Entity } from './src/index';
+
+const position = new CallbackProperty((time) => nextDronePosition(time));
+const label = new CallbackProperty(() => `高度 ${alt().toFixed(0)} m`);
+
+viewer.scene.entities.add(new Entity({
+  position,                                  // 每帧轮询
+  orientation: Transforms.headingPitchRollQuaternion(pos, h, p, r),
+  point: { pixelSize: 8 },
+  label: { text: label },
+}));
+```
+
+渲染路径：`Scene.render` 每帧调用 `EntityVisualizer.update(time)` 轮询非常量 Property——polyline 几何按采样变化重建；point / label 由 `OverlayPass` 直接消费解析值；`Camera` 侧由 `EntityTracker` / `SceneTransforms` 自行解析。`isConstant: true` 可让消费方跳过重复采样。
+
+### Entity.model（glTF 模型）
+
+`model: { uri, scale?, minimumPixelSize? }`：`Model.fromGltfAsync` 只加载一次，之后每帧按 `position` + `orientation` 重算世界矩阵（`composeEntityModelMatrix` = ENU × 四元数 × Y-up 修正 × scale，复用 `Model.modelMatrix` 的既有惯例）。`minimumPixelSize`（CSS px）按相机距离放大模型保证最小屏幕尺寸。
+
+### Entity.path（轨迹线）
+
+`path: { leadTime?, trailTime?, width?, color?, resolution? }`：过去位置进 `PathHistory` 环形缓冲并按 `trailTime` 裁剪；`leadTime` 秒的未来位置由动态 position Property 在 `now + t` 采样（`sampleLeadPositions`）；整体渲成半透明 polyline（默认黄色 2 px）。采样/裁剪均为纯函数/纯类，node 可测（`tests/scene/entityPath.spec.ts`）。
+
+### Entity.cylinder（P1：机头锥 / 圆柱）
+
+```typescript
+import { Entity, HeadingPitchRoll, Transforms, Cartesian3 } from './src/index';
+
+const pos = Cartesian3.fromDegrees(116.4, 39.9, 120); // 米制 ECEF → 归一化后使用
+viewer.scene.entities.add(new Entity({
+  position,
+  orientation: Transforms.headingPitchRollQuaternion(pos, HeadingPitchRoll.fromRadians(heading, pitch, roll)),
+  cylinder: { length: 2000, topRadius: 0, bottomRadius: 300, color: Color.CYAN }, // 机头方向锥
+}));
+```
+
+- 轴 = 实体局部 +Z（`composeEntityFrameMatrix`，无 glTF Y-up 修正）；identity 朝向 = 直立圆柱，`topRadius: 0` = 锥尖。
+- `length / topRadius / bottomRadius` 均可接 CallbackProperty：签名（`CylinderGeometry.signature`）变化才重建几何，position/orientation 每帧只更新矩阵。
+- `Transforms.headingPitchRollQuaternion` 现接受 `(origin, HeadingPitchRoll)` 对象或 `(origin, heading, pitch, roll)` 数字两种形式；`Quaternion.fromHeadingPitchRoll` 已对齐 Cesium 符号约定（heading 俯视顺时针、负 pitch 把局部 +Z 倒向 +X/东）。
+
+## 9. 标注细节（P2-4：样式 / 锚点 / 可见性 / 贴地）
+
+```typescript
+import {
+  Entity, LabelStyle, HorizontalOrigin, VerticalOrigin,
+  DistanceDisplayCondition, HeightReference, Color,
+} from './src/index';
+
+viewer.scene.entities.add(new Entity({
+  position,
+  heightReference: HeightReference.CLAMP_TO_GROUND,      // 贴地（RELATIVE_TO_GROUND = 相对地）
+  point: {
+    pixelSize: 8,
+    verticalOrigin: VerticalOrigin.BOTTOM,
+    distanceDisplayCondition: new DistanceDisplayCondition(0, 50_000), // 50 km 内显示
+    disableDepthTestDistance: Number.POSITIVE_INFINITY,  // 穿深始终可见
+  },
+  label: {
+    text: '无人机-01',
+    style: LabelStyle.FILL_AND_OUTLINE,                  // FILL / OUTLINE / 组合
+    outlineColor: Color.BLACK, outlineWidth: 2,
+    horizontalOrigin: HorizontalOrigin.LEFT,
+  },
+  polyline: { positions, disableDepthTestDistance: 5_000 }, // 线穿深可见
+}));
+```
+
+- **LabelStyle / 描边**：OUTLINE 烘焙白描边字形 + 8 向偏移平铺（`outlineWidth` 像素），FILL_AND_OUTLINE 先描边后填充，tint 着色（OverlayPass）。
+- **pixelOffset**：`pixelOffset?: Cartesian2`（point/label，可接 Property）逐像素偏移，与九宫锚点叠加（`billboardScreenOffset`）。
+- **锚点**：`billboardAnchorOffset(h, v, w, h)` 九宫偏移（LEFT/CENTER/RIGHT × BASELINE/BOTTOM/CENTER/TOP）；label 未显式指定时保留旧行为（点上方 + lift）。
+- **DistanceDisplayCondition**：near/far 双闭区间（米），每帧按相机距离判定，超窗不渲染。point/label（OverlayPass）与 **polyline/path/cylinder**（EntityVisualizer 逐帧 prim.show 门控，可接 CallbackProperty）均支持。
+- **disableDepthTestDistance**：米；距离内忽略深度遮挡（billboard 走 OverlayPass 深度 0 通道，polyline 走 TransparentPass `depthCompare:'always'` 管线）；`Infinity` = 始终可见——`Entity.showPointOnTop` 的泛化。
+- **HeightReference**：entity 级 `applyHeightReference`（径向重定标，压扁系 surfaceRadius），CLAMP_TO_GROUND = 地形高，RELATIVE_TO_GROUND = 当前海拔 + 地形高；无地形层时回退椭球（h=0）。billboard（OverlayPass）与几何（EntityVisualizer）共用同一实现。
+
+### FlowArrow 流动箭头线（P2-6）
+
+`polyline.material = { type: 'flow', ... }`（对齐 hexapod flightManager / waypointEditor 的航线可视化）：
+
+```typescript
+viewer.scene.entities.add(new Entity({
+  polyline: {
+    positions: route, // 静态或 CallbackProperty 动态
+    width: 8,
+    material: {
+      type: 'flow',
+      color: [0.1, 0.45, 0.85, 0.35],     // 半透明底线
+      arrowColor: [0.35, 0.95, 1.0, 0.95], // 箭头
+      speed: 0.35,                          // 周期/秒
+      gap: 24,                              // 每单位弧长箭头数
+    },
+  },
+}));
+```
+
+- **几何**：顶点携带累计弧长（`buildFlowArrowGeometry`，[x,y,z,arc,v] 布局）；相位 `fract(arc·gap − t·speed)` 在 GPU 上滚动——时间驱动零几何重算，箭头朝向恒指 s 增大方向（相位只依赖标量弧长，天然不随段方向翻转）。
+- **形状**：渐亮尾 + 三角头（常数与 hexapod FLOW_ARROW_SHADER 同值）。
+- **渲染**：EntityVisualizer 检测 `material.type === 'flow'`，改挂 `FlowArrowPolyline` IPass（EffectManager）；动态 positions 引用变化即重建几何（version 计数 → P2-5 按需渲染脏源）。特效挂载期间 requestRenderMode 自动持续渲染。

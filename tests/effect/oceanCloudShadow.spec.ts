@@ -269,9 +269,10 @@ describe('T4 OCEAN_FFT_RENDER_SHADER 云影源串', () => {
 
   it('fs_main：云影因子水下恒 1；天光反射与太阳高光项同乘 cloudF', () => {
     expect(s).toContain('letcloudF=select(cloudShadowFactor(input.worldPos),1.0,uw)');
-    // L5 源串断言的前缀子串仍须保留（回归保护）
-    expect(s).toContain('+skyRad*fresnel*0.9*shadowF*cloudF');
-    expect(s).toContain('vec3<f32>(spec)*mix(vec3<f32>(1.0),sunTint,flagSpecTint)*shadowF*cloudF');
+    // 2026-10-06 视觉迭代 Round6 V2：反射/高光项乘入 bandCalm（近场群谷压镜像
+    // 反射与太阳耀光），前缀子串随公式更新（回归保护）
+    expect(s).toContain('+skyRad*fresnel*0.9*bandCalm*shadowF*cloudF');
+    expect(s).toContain('vec3<f32>(spec)*mix(vec3<f32>(1.0),sunTint,flagSpecTint)*bandCalm*shadowF*cloudF');
   });
 
   it('intensity<=0 短路恒 1（模块单一来源）', () => {

@@ -164,16 +164,44 @@
     });
     /** SSE 帧位姿 ENU → 绝对经纬高 */
     const enuToLonLatAlt = (e, n, u) => ({ ...enuToLonLat(e, n), alt: ORIGIN.alt + u });
-    // 真 WGS84 椭球表面矢长（归一化）——97 页相机走 setView 的 x/y/z 分支（fromDegrees 米制
-    // ×1/EARTH_SCALE），与城市/传感器链同属"未压扁 WGS84 系"（引擎 ca30189 双约定并存）。
-    // 引擎 Camera.surfaceRadius 是 Globe 压扁系公式，对未压扁坐标低估 ~13km（2026-09-29 实锤：
-    // fromDegrees(120m) 被算成 13325m）——页面侧必须用未压扁椭球公式。数值法：沿单位方向求
-    // 椭球 x²/a²+y²/a²+z²/b²=1 的 t 倍，a=1 归一化。
-    const surfR = (p) => {
-      const rho = 6356752.314245 / 6378137;
-      const r = Math.hypot(p.x, p.y, p.z) || 1;
-      const ux = p.x / r, uy = p.y / r, uz = p.z / r;
-      return 1 / Math.sqrt(ux * ux + uy * uy + (uz * uz) / (rho * rho));
+    // ── 压扁世界（CesiumGPU 核心地表约定）──────────────────────────────
+    // 2026-09-30「白膜飘在空中」根因：城市原走 fromDegreesNormalized（未压扁
+    // WGS84 系），比 Globe/影像瓦片的压扁地表高 13.2km（30.5°N 实测）。本页
+    // 城市/相机/机标/轨迹全部迁入压扁世界（CityBlockBuilder flattenedWorld +
+    // {lon,lat,height} setView 目的地 + flatFromEcef），与影像共面贴地。
+    const FLAT_RHO = 6356752.314245 / 6378137;
+    /** 大地经纬高（度/米）→ 压扁世界归一化 ECEF（与引擎地表同映射）。 */
+    const flatFromLonLat = (lonDeg, latDeg, hM) => {
+      const lon = lonDeg * Math.PI / 180, lat = latDeg * Math.PI / 180;
+      const s = 1 + hM / R_EARTH;
+      return new engine.Cartesian3(
+        Math.cos(lat) * Math.cos(lon) * s,
+        Math.cos(lat) * Math.sin(lon) * FLAT_RHO * s,
+        Math.sin(lat) * FLAT_RHO * s);
+    };
+    /** SSE pos_ecef（真 WGS84 ECEF 米）→ 压扁世界归一化 ECEF。 */
+    const flatFromEcef = (x, y, z) => {
+      const c = engine.Cartographic.fromCartesian(new engine.Cartesian3(x, y, z));
+      return flatFromLonLat(c.longitude * 180 / Math.PI, c.latitude * 180 / Math.PI,
+        c.height * R_EARTH);
+    };
+    /** 相机（压扁系）离地高度（米）——压扁世界高度是乘法语义(|p| = r_surf·(1+h/a)),
+     *  径向差会恒差 ~0.3%-0.9%(300m 读 299.1)→ FLOOR_H 300 判据恒真 → 监控器
+     *  每 200ms setView 与用户输入打架(2026-09-30 实锤:右键缩放期相机方向
+     *  5Hz 摆动=「白膜抖动」)。除法回读与 setView height 精确互逆。 */
+    const camH = (p) =>
+      (Math.hypot(p.x, p.y, p.z) / engine.Camera.surfaceRadius(p) - 1) * 6378137;
+    /** 相机（压扁系）→ 经纬度（度）：线性压扁的解析逆（y/z 先还原再 atan2）。 */
+    const camLL = (p) => ({
+      lon: Math.atan2(p.y / FLAT_RHO, p.x) * 180 / Math.PI,
+      lat: Math.atan2(p.z / FLAT_RHO, Math.hypot(p.x, p.y / FLAT_RHO)) * 180 / Math.PI,
+    });
+    /** ORIGIN 处两系地表径向差（米）：DemoUtils 的 fromDegrees 视角(未压扁系)
+     *  补偿用——减去它即"压扁地表 + N 米"。 */
+    const flatDropM = () => {
+      const e = engine.Cartesian3.fromDegrees(ORIGIN.lon, ORIGIN.lat, 0);
+      const p = new engine.Cartesian3(e.x / R_EARTH, e.y / R_EARTH, e.z / R_EARTH);
+      return (engine.Camera.wgs84Radius(p) - engine.Camera.surfaceRadius(p)) * R_EARTH;
     };
 
     function setOriginFromSpec(spec) {
@@ -210,6 +238,7 @@
     const trajPts = {};                  // vid → [{c: Cartesian3}] 已飞轨迹采样
     const seenEvKeys = new Set();        // 事件去重（near_miss 两机对称挂帧）
     const evCounts = {};
+    const vehModels = new Map();         // id → Model（就绪）| null（加载中）| false（失败回退 BOX）——GLB 机标状态，demo() 内填充，__DASH.glb 诊断源
     let sseMsgCount = 0, sseState = 'idle';
     let camMode = 'free';                // 'free' | 'follow'——默认自由（启动即定位白膜上空，2026-09-29 用户需求）
     const MAX_TRAJ_PTS = 1500, TRAJ_MIN_STEP_M = 2;
@@ -231,8 +260,7 @@
       lastSampleEnu[vid] = [...enu];
       let arr = trajPts[vid];
       if (!arr) arr = trajPts[vid] = [];
-      arr.push({ c: new engine.Cartesian3(
-        f.pos_ecef[0] / R_EARTH, f.pos_ecef[1] / R_EARTH, f.pos_ecef[2] / R_EARTH) });
+      arr.push({ c: flatFromEcef(f.pos_ecef[0], f.pos_ecef[1], f.pos_ecef[2]) });
       if (arr.length > MAX_TRAJ_PTS) arr.shift();
     }
     window.__DASH = {
@@ -249,7 +277,15 @@
       // 相机诊断（贴地保护 FLOOR_H 联动）：hM=椭球离地高度(米)
       get cam() {
         const p = viewer && viewer.camera && viewer.camera.position;
-        return p ? { hM: +((Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137).toFixed(1) } : null;
+        if (!p) return null;
+        const d = viewer.camera.direction;
+        const { lon, lat } = camLL(p);
+        return {
+          hM: +camH(p).toFixed(1),
+          lon: +lon.toFixed(6),
+          lat: +lat.toFixed(6),
+          dir: [+(d.x).toFixed(3), +(d.y).toFixed(3), +(d.z).toFixed(3)],
+        };
       },
       get vehicles() {
         const o = {};
@@ -265,6 +301,16 @@
           };
         }
         return o;
+      },
+      // GLB 机标诊断（冒烟/verify 断言源）：ready/failed/loading 计数 + 就绪模型子图元数
+      get glb() {
+        let ready = 0, failed = 0, loading = 0; const prims = [];
+        for (const m of vehModels.values()) {
+          if (m && m.isReady) { ready++; prims.push(m.primitiveCount); }
+          else if (m === false) failed++;
+          else if (m === null) loading++;
+        }
+        return { ready, failed, loading, prims };
       },
     };
 
@@ -489,7 +535,7 @@
         // 拉远高于 CEIL_H 拦（12.8 万 km 无底洞）。free 模式由下方监控兜底。
         const p = viewer && viewer.camera && viewer.camera.position;
         if (!p) return;
-        const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
+        const hM = camH(p);
         if (e.deltaY < 0) {
           if (hM < FLOOR_H) { e.stopPropagation(); e.preventDefault(); }
         } else if (hM > CEIL_H) {
@@ -502,44 +548,97 @@
       // 拖动后视野保持——兜底层（根因已修：2026-09-29 引擎 Viewer 左键拖动灵敏度从
       // r·0.0003 rad/px〔恒 ≈1913 m/px 与高度无关，300m 低空拖 12 步白膜出画〕改为
       // Camera.orbitSensitivity 离地高度贴指公式，实测 600px 大幅拖动 hM 恒 300±0.5、
-      // 白膜仍在画）。mouseup 后 0.6~3s 检查窗内：高度>2500m 或离白膜中心水平漂移>1500m
-      // → 拉回白膜俯瞰——正常灵敏度下不再触发，仅防异常路径。
-      let lastDragEnd = 0;
+      // 白膜仍在画）。输入（mouseup/wheel）静止 0.6~3s 检查窗内：高度>2500m 或水平
+      // 漂移>1500m → 拉回白膜俯瞰；漂移>400m 且城市落到相机背后 → 原地转向城市。
+      let lastDragEnd = 0, lastWheelEnd = 0, lastHeldInput = 0;
+      // 手势进行中挂起恢复:按住拖拽/缩放时监控器不再 setView(否则与用户输入
+      // 5Hz 打架=「白膜抖动」,2026-09-30 实锤)。引擎 zoom minR 钳制(+128m)
+      // 保证手势期间不穿地。手势判定用事件自带 buttons/deltaY——计数器方案在
+      // 真浏览器"拖出窗口释放"丢 mouseup 时永久卡死(监控挂起=白膜消失没人管,
+      // 用户实锤;headless 必达 mouseup 复现不了),buttons 逐事件权威、自愈。
+      document.addEventListener('mousemove', (e) => {
+        if (e.buttons) lastHeldInput = performance.now();
+      }, true);
       document.addEventListener('mouseup', () => { lastDragEnd = performance.now(); }, true);
+      document.addEventListener('wheel', () => {
+        lastWheelEnd = performance.now();
+        lastHeldInput = performance.now();
+      }, { capture: true, passive: true });
       setInterval(() => {
         if (camMode !== 'free') return;
+        if (performance.now() - lastHeldInput < 500) return;   // 手势活跃期(500ms 内有按住移动/滚轮)挂起
         const c = viewer && viewer.camera, p = c && c.position;
         if (!p) return;
-        const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
-        const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
-        const lat = Math.atan2(p.z, Math.sqrt(p.x * p.x + p.y * p.y)) * 180 / Math.PI;
+        const hM = camH(p);
+        // 大地经纬度回读（atan2 地心纬度喂回 fromDegrees 每轮南移 ~15km——2026-09-30 根因）
+        const { lon, lat } = camLL(p);
         const dHoriz = Math.hypot((lon - ORIGIN.lon) * 111320 * Math.cos(ORIGIN.lat * Math.PI / 180),
                                   (lat - ORIGIN.lat) * 110540);
         if (hM < FLOOR_H) {
+          // 抬回 FLOOR_H,航向保留用户当前朝向:恢复只管高度/俯仰,不再重定航向
+          // (dHoriz>30 航向分支曾在 30m 边界来回翻=抖动残余,2026-09-30 实锤);
+          // 城市落到背后由输入静止后的 cityBehind 窗口统一转向。
+          const dir = viewer.camera.direction;
+          const lonR = lon * Math.PI / 180, latR = lat * Math.PI / 180;
+          const hdg = Math.atan2(
+            -dir.x * Math.sin(lonR) + dir.y * Math.cos(lonR),
+            -dir.x * Math.sin(latR) * Math.cos(lonR)
+              - dir.y * Math.sin(latR) * Math.sin(lonR) + dir.z * Math.cos(latR));
           c.setView({
-            destination: engineApi.Cartesian3.fromDegrees(lon, lat, FLOOR_H),
-            orientation: { heading: 0, pitch: -45 * Math.PI / 180, roll: 0 },
+            destination: { lon, lat, height: FLOOR_H },   // 压扁系目的地(与城市/影像同世界)
+            orientation: { heading: hdg, pitch: -60 * Math.PI / 180, roll: 0 },
           });
         } else if (hM > CEIL_H) {
-          // 拉远超限顶回全景构图（12.8 万 km 无底洞 → 2km 俯瞰白膜全景）
+          // 拉远超限顶回全景构图（12.8 万 km 无底洞 → 2km 俯瞰白膜全景，
+          // 直接定位 ORIGIN——缩放锚点漂移后的 lon/lat 不保证城市在画）
           c.setView({
-            destination: engineApi.Cartesian3.fromDegrees(lon, lat, 2000),
+            destination: { lon: ORIGIN.lon, lat: ORIGIN.lat, height: 2000 },
             orientation: { heading: 0, pitch: -60 * Math.PI / 180, roll: 0 },
           });
-        } else if (lastDragEnd > 0) {
-          const sinceDrag = performance.now() - lastDragEnd;
-          if (sinceDrag > 600 && sinceDrag < 3000 && (hM > 2500 || dHoriz > 1500)) {
+        } else {
+          // 城市出画判据 = 真实视锥投影(2026-09-30 实锤:单次 1200px 左拖后相机
+          // 城市东侧 475m 朝北看,城市横向出画——"背后点积"与 dHoriz>1500 双双
+          // 漏判)。城市中心(顶高 40m)投 NDC,含纯侧向/纯下方出画。
+          const cityP = flatFromLonLat(ORIGIN.lon, ORIGIN.lat, ORIGIN.alt + 40);
+          const m = c.viewProjectionMatrix.values;
+          const cx = m[0]*cityP.x + m[4]*cityP.y + m[8]*cityP.z + m[12];
+          const cy = m[1]*cityP.x + m[5]*cityP.y + m[9]*cityP.z + m[13];
+          const cw = m[3]*cityP.x + m[7]*cityP.y + m[11]*cityP.z + m[15];
+          const cityOffscreen = !(cw > 0 && Math.abs(cx / cw) < 1.15 && Math.abs(cy / cw) < 1.15);
+          // 输入静止 0.6~3s 检查窗:大偏移/过高拉回 ORIGIN(一次性,防抖)。
+          const lastInputEnd = Math.max(lastDragEnd, lastWheelEnd);
+          const sinceInput = performance.now() - lastInputEnd;
+          if (lastInputEnd > 0 && sinceInput >= 600 && sinceInput < 3000) {
+            if (hM > 2500 || dHoriz > 1500) {
+              c.setView({
+                destination: { lon: ORIGIN.lon, lat: ORIGIN.lat, height: 300 },
+                orientation: { heading: 0, pitch: -60 * Math.PI / 180, roll: 0 },
+              });
+              lastDragEnd = 0; lastWheelEnd = 0; // 已拉回，清标志防重复触发
+              return;
+            }
+          } else if (sinceInput >= 3000) {
+            lastDragEnd = 0; lastWheelEnd = 0; // 检查窗过期
+          }
+          // 出画重瞄 = 持续式(手势静默即查):窗口错过/监控曾挂起也能自愈。
+          // 城市在画时不动作,出画才原地转向(不动位置,只调航向/俯仰)。
+          if (cityOffscreen && dHoriz > 200) {
+            const dE = (ORIGIN.lon - lon) * 111320 * Math.cos(ORIGIN.lat * Math.PI / 180);
+            const dN = (ORIGIN.lat - lat) * 110540;
+            // 俯仰按需压到城市略低于视心（-85° ~ -35° 夹逼）
+            const needPitch = -Math.atan2(hM, Math.max(dHoriz, 1));
+            const pitch = Math.max(-85 * Math.PI / 180,
+                          Math.min(-35 * Math.PI / 180, needPitch - 5 * Math.PI / 180));
             c.setView({
-              destination: engineApi.Cartesian3.fromDegrees(ORIGIN.lon, ORIGIN.lat, 300),
-              orientation: { heading: 0, pitch: -60 * Math.PI / 180, roll: 0 },
+              destination: { lon, lat, height: hM },
+              orientation: { heading: Math.atan2(dE, dN), pitch, roll: 0 },
             });
-            lastDragEnd = 0; // 已拉回，清标志防重复触发
-          } else if (sinceDrag >= 3000) lastDragEnd = 0; // 检查窗过期
+          }
         }
       }, 200);
 
       // 1) 程序化小城市（90 页同款 50×40 网格；CITY_OFF 已按 spec origin 对准航线）
-      const builder = new CityBlockBuilder();
+      const builder = new CityBlockBuilder({ flattenedWorld: true });   // 贴影像地面(压扁世界)
       let seedState = 42;
       const rand = () => {
         seedState = (seedState * 1664525 + 1013904223) >>> 0;
@@ -598,6 +697,84 @@
         vehPrims.set(id, prim);
       }
 
+      // 2b) GLB 无人机模型（替换 BOX 观感）：每机一个 Model 实例，随帧出现惰性创建。
+      //     43MB 异步加载不阻塞页面——加载期 BOX 照常显示，就绪才切换；失败落
+      //     console.warn 并永久回退 BOX（不白屏/卡死）。Model 渐进 addPrimitive 走
+      //     35 页同款路径（渲染循环中安全；上文"渲染前入场"警告针对 instanceIds
+      //     拾取分支，不适用此处）。
+      const SCALE_M = 20;                    // 模型观感尺寸（米，原始 0.73m；free 300m 俯瞰/follow 90m 跟拍量级，可调）
+      const GLB_URL = '/models/CesiumDrone.glb';
+      // GLB 几何包围盒中心（模型系，实测 accessor min/max）：节点原点贴近脚架底部，
+      // 不回中则整机在定位点上方偏 ~0.22 模型单位 ≈ 6m（20m 尺度），跟拍视锥明显脱靶
+      const GLB_CENTER = [0.166, 0.221, -0.0095];
+      // glTF Y-up → 引擎 Z-up（绕 X +90°，35 页同款）再回中：模型系 →「前向 +X /
+      // 上 +Z / 质心在原点」系。机头判定见 vehModelMatrix 注释；若截图实测朝向差
+      // 90°/180°，在此再乘 fromRotationZ(±π/2 / π) 一步修正。
+      const glbLocalFix = engineApi.Matrix4.multiply(
+        engineApi.Matrix4.fromRotationX(Math.PI / 2),
+        engineApi.Matrix4.fromTranslation(new engineApi.Cartesian3(
+          -GLB_CENTER[0], -GLB_CENTER[1], -GLB_CENTER[2])),
+        new engineApi.Matrix4());
+      function loadVehModel(id) {
+        vehModels.set(id, null);             // 先占位：加载期内 tick 走 BOX 分支，不重复发起
+        engineApi.Model.fromGltfAsync({
+          url: GLB_URL,
+          scene: viewer.scene,
+          // 缩放不走此参数（Round2 实证该路径下模型不可见），改由 vehModelMatrix
+          // 把 SCALE_M/R_EARTH 烘进 modelMatrix 3×3（见其内注释）。
+        }).then((model) => {
+          vehModels.set(id, model);
+          // 就绪即挂当前位姿（不等下一拍）：避免恒等矩阵在地图原点裸露一拍
+          const f = vehiclesLatest[id];
+          if (f && Array.isArray(f.pos_ecef)) {
+            model.modelMatrix = vehModelMatrix(f);
+            model.applyModelMatrix();
+          }
+        }).catch((err) => {
+          vehModels.set(id, false);          // 失败定格：本机永久回退 BOX，不再重试
+          console.warn('[97] GLB 无人机模型加载失败，本机回退 BOX 机标:',
+            (err && err.message) || err);
+        });
+      }
+      /** SSE 帧 → GLB 位姿矩阵（压扁世界归一化 ECEF）：
+       *  平移（压扁 ECEF）× 压扁系 ENU 基 × 四元数姿态 × 局部修正。
+       *  f.quat [w,x,y,z] 为 ENU 系机体姿态，前向 = quat·[1,0,0]（follow 相机同款
+       *  取法）；本 GLB 经 Y-up 修正后前向 +X，与仿真「前向 +X」约定一致，无需额
+       *  外前向补偿。quat 缺失时退化恒等姿态（平飞悬停观感）。
+       *  【Round2 根因修复】不能走 Transforms.eastNorthUpToFixedFrame：其平移列 =
+       *  输入点 ÷ EARTH_RADIUS（源码「normalise to engine units」，期望米制 ECEF），
+       *  喂 flatFromEcef 的归一化压扁点（|p|≈1）被再除 6378137 → 平移 ~1.5e-7，
+       *  模型缩在地图原点尘埃级（Round1 ready=644 图元、七张截图不可见实锤）。
+       *  且本页世界是压扁系（y/z×FLAT_RHO），ENU 基也要过压扁映射 F(x,y,z)=
+       *  (x,ρy,ρz)：East 不变（z=0）；North（经线切向）/Up（径向）的 y/z 分量 ×ρ，
+       *  与 flatFromLonLat 球参数化自洽；经纬度与 flatFromEcef 同源（geodetic）。 */
+      function vehModelMatrix(f) {
+        const cart = engineApi.Cartographic.fromCartesian(new engineApi.Cartesian3(
+          f.pos_ecef[0], f.pos_ecef[1], f.pos_ecef[2]));
+        const sLon = Math.sin(cart.longitude), cLon = Math.cos(cart.longitude);
+        const sLat = Math.sin(cart.latitude), cLat = Math.cos(cart.latitude);
+        const t = flatFromEcef(f.pos_ecef[0], f.pos_ecef[1], f.pos_ecef[2]);
+        const enu = new engineApi.Matrix4();
+        const v = enu.values;                       // column-major（Transforms 同布局）
+        v[0] = -sLon;        v[1] = cLon;                    v[2] = 0;          // East
+        v[4] = -sLat * cLon; v[5] = -FLAT_RHO * sLat * sLon; v[6] = FLAT_RHO * cLat; // North
+        v[8] = cLat * cLon;  v[9] = FLAT_RHO * cLat * sLon;  v[10] = FLAT_RHO * sLat; // Up
+        v[12] = t.x; v[13] = t.y; v[14] = t.z; v[15] = 1;
+        /* 缩放烘入 3×3（与 Model._combinedMatrix 同语义）：Round2 隔离实测，
+           「矩阵缩放」渲染可见，而 Model 构造 scale 参数路径下同位姿模型不可
+           见（follow/固定锚点两档对照），故改走矩阵缩放，不依赖 scale 建造参数。 */
+        const sv = SCALE_M / R_EARTH;
+        v[0] *= sv; v[1] *= sv; v[2] *= sv;
+        v[4] *= sv; v[5] *= sv; v[6] *= sv;
+        v[8] *= sv; v[9] *= sv; v[10] *= sv;
+        const q = (Array.isArray(f.quat) && f.quat.length === 4) ? f.quat : [0, 0, 0, 1];
+        const rq = engineApi.Matrix4.fromQuaternion(
+          new engineApi.Quaternion(q[1], q[2], q[3], q[0]));   // [w,x,y,z] → (x,y,z,w)
+        return engineApi.Matrix4.multiply(enu,
+          engineApi.Matrix4.multiply(rq, glbLocalFix, new engineApi.Matrix4()),
+          new engineApi.Matrix4());
+      }
+
       // 3) 轨迹线：每机一条 entity polyline 占位；真实顶点由顶层
       //    rebuildTrajEntities 周期重建（51 页同款 remove+add）；采样在顶层
       //    sampleTraj（connectSse frame handler 顶层引用——放 demo 内每帧
@@ -608,8 +785,8 @@
           name: 'traj' + id,
           polyline: {
             positions: [
-              engineApi.Cartesian3.fromDegrees(ORIGIN.lon, ORIGIN.lat, ORIGIN.alt),
-              engineApi.Cartesian3.fromDegrees(ORIGIN.lon, ORIGIN.lat, ORIGIN.alt + 1),
+              flatFromLonLat(ORIGIN.lon, ORIGIN.lat, ORIGIN.alt),
+              flatFromLonLat(ORIGIN.lon, ORIGIN.lat, ORIGIN.alt + 1),
             ],
             width: id === 0 ? 3 : 2,
             color: id === 0 ? new engineApi.Color(0.2, 0.85, 1.0, 0.75)
@@ -620,13 +797,23 @@
         trajEntities.push({ entity });
       }
 
-      // 4) 机标位姿更新（200ms 低频，同 90 页 wingman 模式）
+      // 4) 机标位姿更新（200ms 低频，同 90 页 wingman 模式）。GLB 就绪即接管显示
+      //    （BOX 隐藏），未就绪/失败继续 BOX 兜底。GLB 姿态见 vehModelMatrix；
+      //    缩放已通过 Model 的 scale 建造参数烘入，矩阵只管平移+姿态。
       setInterval(() => {
         for (const [id, prim] of vehPrims) {
           const f = vehiclesLatest[id];
           if (!f || !Array.isArray(f.pos_ecef)) { prim.show = false; continue; }
-          const t = engineApi.Matrix4.fromTranslation(new engineApi.Cartesian3(
-            f.pos_ecef[0] / R_EARTH, f.pos_ecef[1] / R_EARTH, f.pos_ecef[2] / R_EARTH));
+          if (vehModels.get(id) === undefined) loadVehModel(id);   // 首帧惰性发起 43MB 加载
+          const model = vehModels.get(id);
+          if (model && model.isReady) {
+            model.modelMatrix = vehModelMatrix(f);
+            model.applyModelMatrix();   // modelMatrix 改后须显式刷新子图元矩阵（Model 约定）
+            prim.show = false;          // 切换：GLB 接管，藏 BOX
+            continue;
+          }
+          const t = engineApi.Matrix4.fromTranslation(
+            flatFromEcef(f.pos_ecef[0], f.pos_ecef[1], f.pos_ecef[2]));
           const s = engineApi.Matrix4.fromUniformScale(BOX_M / R_EARTH);
           prim.modelMatrix = engineApi.Matrix4.multiply(t, s, new engineApi.Matrix4());
           prim.show = true;
@@ -635,8 +822,8 @@
 
       // 5) 相机：跟随长机斜视追踪（可切自由）。位置 = 长机后方 90m / 上方 55m，
       //    pitch ≈ -32°；heading 对齐机头水平方位（quat·[1,0,0] ENU → atan2(e,n)）。
-      //    setView 必须走米制 fromDegrees 分支（90 页 febba8d 坑：{lon,lat} 分支
-      //    贴 Globe 压扁世界，视锥偏离城市 ~11km）。
+      //    setView 走 {lon,lat,height} 压扁分支——城市/影像同世界（2026-09-30 迁移；
+      //    原 fromDegrees 米制分支属未压扁系，比压扁地表高 13.2km）。
       setInterval(() => {
         if (camMode !== 'follow' || !Object.values(vehiclesLatest)[0]) return;
         const f = Object.values(vehiclesLatest)[0];
@@ -648,7 +835,7 @@
         const BACK_M = 90, UP_M = 55;
         const cam = enuToLonLatAlt(e - hdE * BACK_M, n - hdN * BACK_M, u + UP_M);
         viewer.camera.setView({
-          destination: engineApi.Cartesian3.fromDegrees(cam.lon, cam.lat, cam.alt),
+          destination: { lon: cam.lon, lat: cam.lat, height: cam.alt },
           orientation: {
             heading: Math.atan2(hdE, hdN),
             pitch: -Math.atan2(UP_M, BACK_M),   // 视线压向长机
@@ -669,13 +856,15 @@
           // 低于 300m 时抬到 300m 并压 -45° 俯视，保证白膜始终在画。
           const c = viewer && viewer.camera, p = c && c.position;
           if (p) {
-            const hM = (Math.hypot(p.x, p.y, p.z) - surfR(p)) * 6378137;
+            const hM = camH(p);
             if (hM < 300) {
-              const lon = Math.atan2(p.y, p.x) * 180 / Math.PI;
-              const lat = Math.atan2(p.z, Math.sqrt(p.x * p.x + p.y * p.y)) * 180 / Math.PI;
+              const { lon, lat } = camLL(p);   // 压扁系经纬回读
+              // 朝向白膜（同 FLOOR_H 恢复：固定朝北会把偏移后的城市甩到背后）
+              const hdg = Math.atan2((ORIGIN.lon - lon) * 111320 * Math.cos(ORIGIN.lat * Math.PI / 180),
+                                     (ORIGIN.lat - lat) * 110540);
               c.setView({
-                destination: engineApi.Cartesian3.fromDegrees(lon, lat, 300),
-                orientation: { heading: 0, pitch: -45 * Math.PI / 180, roll: 0 },
+                destination: { lon, lat, height: 300 },
+                orientation: { heading: hdg, pitch: -60 * Math.PI / 180, roll: 0 },
               });
             }
           }
@@ -728,7 +917,9 @@
       try {
         ({ viewer: v } = await DemoUtils.startup({
           engine,
-          view: [ORIGIN.lon, ORIGIN.lat + 0.0015, 1500],
+          // DemoUtils 内部走 fromDegrees（未压扁系），减去两系地表差值把开场
+          // 航拍放到压扁城市上空 1500m（城市 2026-09-30 迁入压扁世界贴影像）。
+          view: [ORIGIN.lon, ORIGIN.lat + 0.0015, 1500 - flatDropM()],
           imagery: 'gaode-sat',
           title: 'F71 · 低空指挥大屏',
         }));
@@ -746,7 +937,7 @@
           document.getElementById('btnFollow').textContent = '跟随长机: 关';
           document.getElementById('btnFree')?.classList.add('on');
           v.camera.setView({
-            destination: engine.Cartesian3.fromDegrees(ORIGIN.lon, ORIGIN.lat, 300),
+            destination: { lon: ORIGIN.lon, lat: ORIGIN.lat, height: 300 },
             orientation: { heading: 0, pitch: -60 * Math.PI / 180, roll: 0 },
           });
         } catch (e) { console.warn('[97] 初始定位失败', e && e.message); }

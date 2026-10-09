@@ -644,6 +644,14 @@ const OCEAN_CASCADES : i32 = ${CASCADES};
 const FOG_DIST : f32 = 12000.0;
 // 泡沫图案世界平铺周期（米）：中频级联量级，图案不糊也不高频闪烁
 const FOAM_TILE_M : f32 = 28.0;
+// 2026-10-09 破平铺：单层 repeat 采样在 35m 俯视下出现整片相同形状的
+// 白斑簇（视觉可识别的周期重复，被读作"水下纹理"）。改 3 层异向旋转
+// 域采样（不同倍频 + 域旋转 + 异向偏移，加权合成）打散重复形状。
+fn rot2( v : vec2<f32>, a : f32 ) -> vec2<f32> {
+  let c = cos( a );
+  let s = sin( a );
+  return vec2<f32>( v.x * c - v.y * s, v.x * s + v.y * c );
+}
 // 遮挡球半径²：必须低于海面最小模长²。海面在纬度 φ 处
 // |p|² = cos²φ + sin²φ·polarRatio² ≥ polarRatio² ≈ 0.99331（极点最小），
 // 旧值 0.998² = 0.996004 会在中高纬（|φ| ≳ 39°）把海面划进球内——相机
@@ -666,6 +674,18 @@ fn vnoise( p : vec2<f32> ) -> f32 {
     mix( hash2( i + vec2<f32>( 0.0, 1.0 ) ), hash2( i + vec2<f32>( 1.0, 1.0 ) ), u.x ),
     u.y
   );
+}
+// 3 层加权泡沫图案采样：坐标先加 choppiness 水平位移（图案钉在变形后
+// 波面上随浪移动，而非钉在网格平面）；2/3 层再做 vnoise 域扭曲（打破
+// 各层自身周期性——旋转+倍频只能打散形状对齐，域扭曲才彻底去平铺）。
+fn foamPattern( advXZ : vec2<f32> ) -> vec4<f32> {
+  let k = 1.0 / FOAM_TILE_M;
+  let w1 = advXZ + vec2<f32>( vnoise( advXZ * 0.05 ), vnoise( advXZ * 0.05 + vec2<f32>( 17.3, 9.1 ) ) ) * 5.0;
+  let w2 = advXZ + vec2<f32>( vnoise( advXZ * 0.031 + vec2<f32>( 4.7, 8.2 ) ), vnoise( advXZ * 0.031 + vec2<f32>( 25.1, 3.3 ) ) ) * 7.0;
+  let p1 = textureSampleLevel( foamTex, smp, rot2( advXZ, 0.757 ) * k, 0.0 );
+  let p2 = textureSampleLevel( foamTex, smp, rot2( w1 + vec2<f32>( 13.7, 5.1 ), -0.532 ) * ( k * 0.61 ), 0.0 );
+  let p3 = textureSampleLevel( foamTex, smp, rot2( w2 + vec2<f32>( -7.3, 11.9 ), 1.169 ) * ( k * 1.47 ), 0.0 );
+  return p1 * 0.55 + p2 * 0.30 + p3 * 0.15;
 }
 
 // L5 大气采样函数（AtmosphereSkyShader 同源拼接：透射 LUT / skyView 反射）。
@@ -691,6 +711,7 @@ struct VSOut {
   @location(2) screenUV : vec2<f32>,  // 折射采样场景颜色历史用（NDC → [0,1]）
   @location(3) waveH : f32,           // L4-A 波面高（米，前 3 级联 disp.y + 船迹），岸线水深用
   @location(4) breakW : f32,          // T4 破碎权重（smoothstep(bandFar, bandNear, 水深)）
+  @location(5) dispXZ : vec2<f32>,    // 破平铺：choppiness 水平位移（米），泡沫图案随波坐标
 }
 
 @vertex
@@ -750,6 +771,7 @@ fn vs_main( input : VSIn ) -> VSOut {
   out.planeXZ = input.planeXZ;
   out.screenUV = ( clip.xy / max( clip.w, 1e-6 ) ) * 0.5 + 0.5;
   out.waveH = disp.y;
+  out.dispXZ = disp.xz;
   out.breakW = breakW;
   return out;
 }
@@ -833,7 +855,16 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let hv = normalize( viewDir + sunDir );
   let ndh = max( dot( nLit, hv ), 0.0 );
   let rough = clamp( 1.0 + divg * 0.35, 0.6, 1.6 );
-  var spec = ( pow( ndh, 500.0 / rough ) * 2.8 + pow( ndh, 48.0 / rough ) * 0.38 ) * ( 0.25 + fresnel );
+  // Round3 镜面抗混叠（水下仰视远区高光带「离散方形色块 + 可数色阶」
+  // 根因，检查员原生裁剪实锤）：pow(ndh,500) 锐瓣在远场屏幕足迹
+  //（stepMPix 米/像素）接近 glitter 波长（~0.3-2m）时欠采样——亮点塌成
+  // 1-3px 硬边小方块、亮度走可数色阶。足迹加宽（标准 specular AA）：
+  // 指数随足迹降（lobe 变宽摊到多像素）、锐瓣峰值按 1/widen 稀释（太阳
+  // 能量摊到更宽 lobe，能量近似守恒）。stepMPix ≤ 0.1m（≈200m 内）
+  // widen=1，近中场逐字节零回归；水上/水下同规则（远场 glitter 同源）。
+  let widen = min( max( 1.0 + ( stepMPix - 0.025 ) * 8.0, 1.0 ), 12.0 );
+  var spec = ( pow( ndh, 500.0 / ( rough * widen ) ) * ( 2.8 / sqrt( widen ) )
+             + pow( ndh, 48.0 / ( rough * sqrt( widen ) ) ) * 0.38 ) * ( 0.25 + fresnel );
   spec = select( spec, spec * 0.35, uw );
 
   // CSSM 阴影因子（L3）：太阳直射贡献（太阳高光 + 天光反射）同乘，软边船影；
@@ -875,7 +906,9 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     // 噪声调制 0.75+0.5fN → 0.45+0.55fN（低基高调）——碎浪线细碎断续
     let surf = smoothstep( 5.0, 1.2, depth );
     jacW = 1.0 - 0.5 * surf;
-    shoreCov = surf * renderParams.shoreParams.y * ( 0.45 + 0.55 * fN );
+    // 2026-10-06 Round5（前景 carpet 白基线实锤 whitePct 85%/dark 0%）：噪声底
+    // 0.45→0.15——fN 谷处白沫真正熄灭，带内纹理不再托亮全域
+    shoreCov = surf * renderParams.shoreParams.y * ( 0.15 + 0.85 * fN );
     edgeFade = smoothstep( 0.0, 0.05, depth );
   }
 
@@ -888,31 +921,98 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   }
   shoreCov = shoreCov + laceCov;
 
-  let covTotal = foam * jacW + shoreCov + wakeFoam;
+  // 大尺度破碎波带（2026-10-06 检查差距4）：foam 场本身无大空间尺度结构、
+  // fN 噪声（0.59/0.19 m 周期）只到米级 → 白沫呈均匀细碎小斑。涌浪以群
+  // 推进，真实白沫聚在群峰带成片破碎、群谷仅零星：低频平面噪声
+  // （vnoise ×0.02 ≈ 50 m 周期）+ 当前波高联合门控 foam。2026-10-06
+  // Round3 检查差距2（前景 ~80% 近地毯、带间隙不可辨）：阶跃对比加大——
+  // 群谷 0.40→0.10、过渡带 (-0.55,0.55)→(-0.20,0.40) 收窄：群峰带全量
+  // 白沫、群谷近乎露底（深色水面 ≥30%），~50 m 周期离散破碎带可辨。
+  // covTotal 与 foamMask 同吃（A3 图案阈值分支经 coverage 同步生效，带状
+  // 结构保留）。船迹 wakeFoam 不经门控（连续性要求）。
+  // 2026-10-06 Round4（阶跃两轮仍 bandPeaks=0 的归因实锤）：前景左下地毯的
+  // 主导项是 shoreCov（贴岸破碎带 surf 在浅水区全开、不经 swellBand）——
+  // uw-diag-r4 开关隔离 + 前景 crop 实锤左下碎斑地毯。
+  // 2026-10-06 Round5（0.25 谷底保底仍 carpet：前景 crop whitePct 85.4/dark
+  // 0.0/teal 14.6 实锤）：三处彻底去底噪仍无带。R5-probe（swellBand 直接
+  // 上屏可视化）实锤根因：vnoise 单瓣（50m/36m 周期）大于前景 ~30m 视域，
+  // 前景 swellBand 恒≈1——门控退化为常数 1，调底噪/阈值全部无效。
+  // Round5 v3（最终案）：岸带改确定性 20m 正弦条带（沿岸平行、噪声扰动
+  // 相位致条带不规则、随 ocean.time 以 ~1.1 m/s 漂移模拟群波推进），条带
+  // 占空比 ~50%、谷值真正到 0.02；6-30m 水深过渡回 Round4 原式
+  // （shoreDepth 场外=1000 → 全权回原式，中远场零回归）。
+  let bandOffshore = 0.10 + 0.90 * smoothstep( -0.20, 0.40,
+    input.waveH * 0.65 + vnoise( input.planeXZ * 0.02 ) * 1.6 - 0.8 );
+  let grating = 0.5 + 0.5 * sin( dot( input.planeXZ, vec2<f32>( 0.28, 0.96 ) ) * 0.314
+    + vnoise( input.planeXZ * 0.035 ) * 2.2 + ocean.time * 0.35 );
+  let bandShore = 0.02 + 0.98 * smoothstep( 0.42, 0.85,
+    grating * ( 0.55 + 0.45 * clamp( input.waveH * 1.6 + 0.5, 0.0, 1.0 ) ) );
+  // Round5 v4：grating 主导域 6-30m→15-45m——probe4 实锤前景浅带（surf 全开
+  // 的 <6m 区）曾被 bandOffshore 混回（smoothstep(6,30) 在 8-15m 已大权重），
+  // 条带出不来；15m 内纯 grating、45m 外纯原式。
+  var swellBand = mix( bandShore, bandOffshore, smoothstep( 15.0, 45.0, shoreDepth ) );
+  // Round6 V4（四项改动上屏但前景零变化的归因实锤：前景左下在 seabed 场外
+  // ——沙洲场心在相机西南 ~760m、场外哨兵 seabedH=-1000 → shoreDepth≈1000
+  // → swellBand=bandOffshore，且该分支低频噪声单瓣（50m 周期）大于近场
+  // ~30m 视域 → swellBand 前景常数化 0.4-0.8 无谷，bandCalm/wakeBand/foam
+  // 门全部失去调制对象——R5 注释「前景 swellBand 恒≈1」的场外成因补全）。
+  // 修复：近场（30-110m 渐变）叠确定性 grating 条带（与 bandShore 同参数
+  // 无缝衔接），谷 0.02 让 bandCalm/wakeBand/foam 门在前景重新生效；110m
+  // 外=swellBand 原式零回归（中景沙洲条带语义不动）。
+  let nearW2 = 1.0 - smoothstep( 30.0, 110.0, distM );
+  let bandNear = 0.02 + 0.98 * smoothstep( 0.42, 0.85,
+    grating * ( 0.55 + 0.45 * clamp( input.waveH * 1.6 + 0.5, 0.0, 1.0 ) ) );
+  swellBand = mix( bandNear, swellBand, 1.0 - nearW2 );
+  let shoreBand = shoreCov * swellBand;
+
+  // 2026-10-06 Round6（前景白毯真凶实锤，推翻 R4/R5 的 shoreCov 归因——
+  // 开关因果链：关 wakeToggle 前景 crop white200 23-28%→0.3% 清零；关
+  // shoreFoam/swash/swashSim/wetSand/spray/breakSpray/peel/sss 八项均不降
+  // 16-28% 随机波动；35s→100s 时间序列白毯随船 wake 尾迹推进铺满——圆周
+  // 航行反复扫过前景，G 通道泡沫 τ≈1.7s 衰减但 crest/wash 持续 refill）：
+  // wakeFoam 由「不经门控」改为贴 swellBand 群相位门窄带化（wakeBand 峰带
+  // 全保留、谷压 15%——与 foam/jacW 同门同带），前景深水波谷露青绿水体。
+  // swellBand 本身不动 → 中景已达标条带语义零回归（wake 只被调制，只降
+  // 不升）；VS 侧 wake R 波高位移保留（真实船迹波形语义，只增波纹不增白）。
+  let wakeBand = 0.15 + 0.85 * swellBand;
+  let covTotal = foam * jacW * swellBand + shoreBand + wakeFoam * wakeBand;
   let coverage = clamp( covTotal, 0.0, 1.0 );
 
-  var foamMask = clamp( foam * jacW * ( 0.45 + 1.1 * fN ), 0.0, 1.0 ) + shoreCov;
+  var foamMask = clamp( foam * jacW * swellBand * ( 0.45 + 1.1 * fN ), 0.0, 1.0 ) + shoreBand + wakeFoam * wakeBand;
   foamMask = clamp( foamMask, 0.0, 1.0 );
   var fineGlow = 0.0;
   var albedoJit = 1.0;
   if ( renderParams.flags.x > 0.5 ) {
     // A3 阈值方案：coverage 驱动阈值 t，R 密度场 smoothstep 软边；
-    // G 细泡亮度 0.3-0.5、B 斑驳反照率 ±10%、A 条纹 ±0.1 偏置
-    let p = textureSampleLevel( foamTex, smp, input.planeXZ * ( 1.0 / FOAM_TILE_M ), 0.0 );
-    let t = 1.0 - coverage * 0.85;
+    // G 细泡亮度 0.3-0.5、B 斑驳反照率 ±10%、A 条纹 ±0.1 偏置。
+    // 2026-10-09：①3 层旋转域采样破平铺（见 foamPattern）；②采样坐标加
+    // dispXZ（随波）；③阈值 0.85→0.70 覆盖回落（平静海面白斑大幅减少）。
+    let advXZ = input.planeXZ + input.dispXZ * 0.85;
+    let p = foamPattern( advXZ );
+    let t = 1.0 - coverage * 0.70;
     foamMask = clamp( smoothstep( t - 0.04, t + 0.04, p.r ) + ( p.a - 0.5 ) * 0.2, 0.0, 1.0 );
     fineGlow = p.g * coverage;
     albedoJit = 1.0 + ( p.b - 0.5 ) * 0.2;
   }
 
-  // 水色：近岸青绿 → 远海深蓝（距离混合，2026-09-30 差距7：旧式
+  // 水色：近岸清透青蓝 → 远海深蓝（距离混合，2026-09-30 差距7：旧式
   // mix(deep, shallow, dist) 方向反了——近处死蓝、远处泛青）；水下切换
-  // 透射青绿（透光增强）；浅水碧绿：沙洲上方瞬时水深 0-7m 增亮偏绿
-  let shallow = vec3<f32>( 0.10, 0.32, 0.30 );
+  // 透射蓝绿。
+  // 2026-10-06 检查差距3（海面列均值 rgb≈[103,119,114]，R≈G 浑浊灰绿）：
+  // 旧 shallow [0.10,0.32,0.30] / lime [0.17,0.46,0.38] / uwWater
+  // [0.10,0.46,0.42] 三块色板全 G≥B（绿主导），叠 SSS 绿斑与天空反射后
+  // 整体灰绿。晴天深蓝要求 R 显著低于 G/B 且 B≥G——三板重标为 B 主导，
+  // lime 碧绿→碧青、浅水权重 0.68→0.55（保浅水辨识度、去绿罩）。
+  let shallow = vec3<f32>( 0.05, 0.18, 0.26 );
   var baseCol = mix( shallow, renderParams.deepColor.rgb, smoothstep( 150.0, 5000.0, distM ) );
-  let lime = vec3<f32>( 0.17, 0.46, 0.38 );
-  baseCol = mix( baseCol, lime, smoothstep( 8.0, 1.0, shoreDepth ) * 0.68 );
-  let uwWater = vec3<f32>( 0.10, 0.46, 0.42 );
+  let lime = vec3<f32>( 0.09, 0.30, 0.38 );
+  // Round6 V3（前景 dark90=0 的第二根因：lime 浅水混色域 8-1m 把前景 2-5m
+  // 沙洲全域抬亮到 L≈100-115——Lime 本身 L≈105，无论反射怎么压都过不了
+  // L<90；off-wake 对照 dark90 仍 0.2% 实锤基色贡献）。混色域收窄到真水线
+  // 2.2-0.5m（waterline 泛绿只在极浅），权重 0.55→0.45；中景沙洲外缘水深
+  // >2.2m 区域零回归（原本就不该 lime，青蓝 shallow 基色还原）。
+  baseCol = mix( baseCol, lime, smoothstep( 2.2, 0.5, shoreDepth ) * 0.45 );
+  let uwWater = vec3<f32>( 0.05, 0.24, 0.34 );
   let waterTint = select( baseCol, uwWater, uw );
 
   // ── L5 物大气视觉：逐像素天空反射（T1）/ 太阳高光染色（T2）/ SSS（T3）──
@@ -939,9 +1039,20 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
       renderParams.underwater.y );
   }
 
+  // 2026-10-06 Round5 v2（iso2 全源关断实锤：六泡沫源全关后前景仍 white 46%/
+  // dark 0%——残留亮源是天空云镜像反射 + 太阳镜面耀光柱，非泡沫）：群谷未破
+  // 碎水面压近场镜像与耀光（近岸破碎带外侧波面糙度打碎镜像反射），谷处露出
+  // 深色青绿水体。nearW 限制 40-120m 过渡、120m 外全还原（中远场零回归）。
+  let nearW = 1.0 - smoothstep( 40.0, 120.0, distM );
+  // Round6 V2（wake off 对照实锤：前景 dark90 仍 0.2%/white160 52.9%——白毯
+  // 主体是近场掠射 fresnel≈1 的天空反射：swellBand 谷 bandCalm=0.235 时残留
+  // skyRad*0.9*0.235 恰把前景拖过 L90，泡沫清零也无深色区）。近场谷压深
+  // 0.78→0.92（bandCalm 谷 0.235→0.08，反射 ≈0.05、水体 L≈73<90）；峰带
+  // 全量不动（条带白亮节奏保留）；40-120m 过渡带同门渐变、120m 外零回归。
+  let bandCalm = 1.0 - 0.92 * nearW * ( 1.0 - swellBand );
   var col = waterTint * ( 0.88 + 0.12 * clamp( 1.0 - divg * 0.5, 0.0, 1.0 ) ) * albedoJit
-    + skyRad * fresnel * 0.9 * shadowF * cloudF
-    + vec3<f32>( spec ) * mix( vec3<f32>( 1.0 ), sunTint, flagSpecTint ) * shadowF * cloudF;
+    + skyRad * fresnel * 0.9 * bandCalm * shadowF * cloudF
+    + vec3<f32>( spec ) * mix( vec3<f32>( 1.0 ), sunTint, flagSpecTint ) * bandCalm * shadowF * cloudF;
 
   // T3 波峰 SSS 透光：波面高×逆光×掠射的青绿透射，随太阳透射色偏移；
   // 波峰自遮蔽微降。RP[22]（underwater.z）总强度 0 = 关。
@@ -951,7 +1062,8 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     let back = clamp( dot( viewDir, - sunDir ) * 0.5 + 0.5, 0.0, 1.0 ); // 逆光因子
     let sssW = H * ( 0.35 + 0.65 * pow( 1.0 - ndv, 2.0 ) )
              * ( 0.25 + 0.75 * back * back ) * upY * renderParams.underwater.z * shadowF;
-    col += vec3<f32>( 0.06, 0.42, 0.34 ) * sssW * sunTint;
+    // 2026-10-06 差距3：透射色 [0.06,0.42,0.34] 绿斑 → 偏青蓝
+    col += vec3<f32>( 0.05, 0.30, 0.38 ) * sssW * sunTint;
     col = mix( col, col * ( 1.0 - 0.25 * H ), 0.5 );
   }
 
@@ -963,7 +1075,21 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     let ruv = clamp( input.screenUV + roff, vec2<f32>( 0.001 ), vec2<f32>( 0.999 ) );
     let under = textureSampleLevel( sceneHistTex, clampSmp, ruv, 0.0 ).rgb;
     let underCol = under * vec3<f32>( 0.60, 0.85, 0.90 ); // 水色吸收
-    let refrW = clamp( ( 1.0 - fresnel ) * 0.75, 0.0, 0.60 );
+    // 2026-10-06 Round6 V5（前景白毯末段实锤：L5 逐项隔离 refractor 是唯一
+    // 大跌项——关折射前景 white140 87.9%→28.6%。病理：refrW=(1-fresnel)*0.75
+    // 在前景掠射 fresnel≈0.6 时仍透射 0.30，而 under 采样的是屏幕空间历史帧
+    // ——掠射视线到不了海床、采到的是天空亮色 L≈130-170，混 30% 把前景整片
+    // 拖过 L140。修复：(1-f)² 更陡的视角衰减（掠射 0.30→0.12、俯视不受损）
+    // × 水深门（透见的是海床，shoreDepth>6m 渐灭、场外哨兵 1000 归零——
+    // 深水/场外本无底可见，浅滩沙洲 <6m 折射语义全保留、中景零回归）。
+    // 2026-10-08 水上网纹收敛：水深门 6→30m 收窄到 4.5→8m——历史帧含
+    // CausticsFloor 叠画（上一帧合成色），旧窗口把 tile 深底外环（-7m，
+    // shoreDepth≈7-9）也按 ~0.3-0.9 权重混进水色，网纹经屏幕空间偏移平抹
+    // 过波面、且 tile 边界两侧折射权重 1↔0 形成深水色阶缝。新窗口与
+    // floor 见底域（≤6m，见 OceanCausticsShader visK）对齐：浅滩透底语义
+    // 全保留，深水/场外（哨兵 1000）恒零。
+    let refrW = clamp( ( 1.0 - fresnel ) * ( 1.0 - fresnel ) * 0.75, 0.0, 0.60 )
+      * ( 1.0 - smoothstep( 4.5, 8.0, shoreDepth ) );
     col = mix( col, underCol + vec3<f32>( spec ), refrW );
   }
 
@@ -1005,7 +1131,14 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // ≈1，水下仰视是一堵不透明水墙（2026-09-29 用户"水下不透明"实测）。
   // 透出的背景是先画的天空 pass（水下相机向上射线的天空辐射）。
   if ( uw ) {
-    let snell = smoothstep( 0.60, 0.74, ndv );
+    // Round3 仰视远区亮带「离散方形色块 + 可数色阶」修复：固定 0.60-0.74
+    // smoothstep 门在远场（屏幕足迹≈波周期，ndv 逐像素在门两侧跳变）把
+    // 透明天空/全反射暗带二值化——亮暗条纹沿波纹方向、硬边锯齿小方块、
+    // 亮度可数色阶（检查员原生裁剪实锤）。门宽随屏幕足迹（stepMPix 米/
+    // 像素）加宽：掠射波面统计上本就软过渡；近场足迹小，0.07 半宽还原
+    // 原 0.60-0.74 窗缘锐度（逐字节零回归）。
+    let gateW = clamp( 0.07 + stepMPix * 1.2, 0.07, 0.42 );
+    let snell = smoothstep( 0.67 - gateW, 0.67 + gateW, ndv );
     // 2026-09-30 用户"水下天空效果不对"：旧版窗内填 CPU 平色 skyColor×1.1
     // ——无渐变无日盘，一堵假色墙。绑定物大气（flagSky）时改为真实折射：
     // 视线过水-气界面（水→空气 eta=1.33，TIR 区 refract 归零、snell 门同步
@@ -1041,6 +1174,7 @@ struct PeelVSOut {
   @location(1) planeXZ : vec2<f32>,   // 泡沫密度图案采样（与主 FS 同一 A3 图案源）
   @location(2) curlW : f32,           // 卷唇权重（roll 归一，FS 白沫密度/alpha 门）
   @location(3) nTongue : vec3<f32>,   // 卷曲面法线（up 绕波峰轴转 roll）
+  @location(4) dispXZ : vec2<f32>,    // 与主 FS 同款：泡沫图案随波采样坐标
 }
 
 @vertex
@@ -1105,6 +1239,7 @@ fn peel_vs( input : VSIn ) -> PeelVSOut {
   out.worldPos = input.ecef + dispVec;
   out.planeXZ = input.planeXZ;
   out.curlW = clamp( roll * 1.4, 0.0, 1.0 );
+  out.dispXZ = disp.xz;
   // 卷曲面法线：up 绕波峰轴转 roll → 舌面翻卷后背面朝后上（roll→π/2 时
   // 法线水平指回观察者，即经典卷唇内壁）
   out.nTongue = normalize( ocean.upDir * cos( roll ) - advEcef * sin( roll ) );
@@ -1148,7 +1283,7 @@ fn peel_fs( input : PeelVSOut ) -> @location(0) vec4<f32> {
   let fN = vnoise( input.planeXZ * 1.7 ) * 0.6 + vnoise( input.planeXZ * 5.3 ) * 0.4;
   var dens = 0.9 + 0.1 * fN;
   if ( renderParams.flags.x > 0.5 ) {
-    let p = textureSampleLevel( foamTex, smp, input.planeXZ * ( 1.0 / FOAM_TILE_M ), 0.0 );
+    let p = foamPattern( input.planeXZ + input.dispXZ * 0.85 );
     dens = clamp( p.r + p.g * 0.3 * input.curlW, 0.35, 1.0 );
   }
   var col = mix( vec3<f32>( 0.9, 0.94, 0.97 ),

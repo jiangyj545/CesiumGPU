@@ -102,6 +102,11 @@ export class TerrainLayer {
     };
   }
 
+  /** P2-5：已缓存网格数（按需渲染指纹——地形瓦片到达即变化）。 */
+  get meshCount(): number {
+    return this._meshes.size;
+  }
+
   /** Tiles selected for rendering by the last {@link update}. */
   get renderTiles(): readonly TerrainRenderTile[] {
     return this._renderTiles;

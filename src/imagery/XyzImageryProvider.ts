@@ -10,6 +10,8 @@ export interface XyzImageryProviderOptions {
   maximumLevel?: number;
   /** Native tile size in pixels. Default: 256 */
   tileSize?: number;
+  /** Auth headers sent with every tile request (P1-F，如 Authorization: Bearer）。 */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -24,12 +26,14 @@ export class XyzImageryProvider implements ImageryProvider {
   readonly maximumLevel: number;
   readonly tileSize: number;
   readonly subdomains: readonly string[];
+  readonly headers: Record<string, string> | undefined;
 
   constructor(options: XyzImageryProviderOptions) {
     this.url          = options.url;
     this.subdomains   = options.subdomains ?? [];
     this.maximumLevel = options.maximumLevel ?? 18;
     this.tileSize     = options.tileSize ?? 256;
+    this.headers      = options.headers;
   }
 
   /** Built-in Open Street Map raster tile preset. */
@@ -83,7 +87,10 @@ export class XyzImageryProvider implements ImageryProvider {
    */
   async requestTile(key: TileKey): Promise<ImageBitmap | null> {
     try {
-      const response = await fetch(this.resolveUrl(key), { mode: 'cors' });
+      const response = await fetch(this.resolveUrl(key), {
+        mode: 'cors',
+        headers: this.headers,
+      });
       if (!response.ok) {
         console.warn(
           `XyzImageryProvider: tile ${key.key} HTTP ${response.status}`

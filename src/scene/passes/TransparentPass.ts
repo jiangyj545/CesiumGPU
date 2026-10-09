@@ -36,6 +36,8 @@ export class TransparentPass implements IPass {
   private _revealView: GPUTextureView | null = null;
 
   private _accumPipeline:     GPURenderPipeline | null = null;
+  /** Same layout, depthCompare 'always' — P2-4 穿深可见透明图元。 */
+  private _accumPipelineAlways: GPURenderPipeline | null = null;
   private _compositePipeline: GPURenderPipeline | null = null;
 
   private _compositeBindGroup: GPUBindGroup | null = null;
@@ -227,8 +229,15 @@ export class TransparentPass implements IPass {
       },
     });
 
-    pass.setPipeline(this._accumPipeline!);
+    let pipeline: GPURenderPipeline | null = null;
     for (const prim of transparents) {
+      // P2-4：alwaysPassDepth 图元走「深度恒过」管线（同布局，bind group 兼容）。
+      const target = prim.alwaysPassDepth ? this._accumPipelineAlways : this._accumPipeline;
+      if (!target) continue;
+      if (pipeline !== target) {
+        pass.setPipeline(target);
+        pipeline = target;
+      }
       prim.drawTransparent(pass);
     }
     pass.end();
@@ -301,7 +310,7 @@ export class TransparentPass implements IPass {
       ],
     });
 
-    this._accumPipeline = device.createRenderPipeline({
+    const descriptor: GPURenderPipelineDescriptor = {
       label:  'TransparentAccumPipeline',
       layout: device.createPipelineLayout({ bindGroupLayouts: [this._cameraBindGroupLayout, modelBGL] }),
       vertex: {
@@ -341,6 +350,13 @@ export class TransparentPass implements IPass {
       },
       primitive:    { topology: 'triangle-list', cullMode: 'back' },
       depthStencil: { format: this._depthFormat, depthWriteEnabled: false, depthCompare: 'less' },
+    };
+
+    this._accumPipeline = device.createRenderPipeline(descriptor);
+    this._accumPipelineAlways = device.createRenderPipeline({
+      ...descriptor,
+      label: 'TransparentAccumPipelineAlways',
+      depthStencil: { format: this._depthFormat, depthWriteEnabled: false, depthCompare: 'always' },
     });
   }
 

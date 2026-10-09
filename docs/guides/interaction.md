@@ -20,6 +20,7 @@ CesiumGPU 的交互体系由三个模块组成，各司其职：
 4. [三件套组合实战](#4-三件套组合实战)
 5. [与相机输入的共存](#5-与相机输入的共存)
 6. [常见问题](#6-常见问题)
+7. [SceneTransforms：世界坐标 → 屏幕像素（P0）](#7-scenetransforms世界坐标--屏幕像素-p0)
 
 ---
 
@@ -324,3 +325,53 @@ startRectButton.addEventListener('click', () => draw.start('rectangle'));
 - [量测分析](./analysis.md) — DrawHandler + Measure 的面积/距离量测
 - [Entity 数据模型](./entities.md) — DrawHandler 产出的 Entity 去了哪里
 - [API 参考](../api/index.html)
+
+## 7. SceneTransforms：世界坐标 → 屏幕像素（P0）
+
+对齐 Cesium 的两个入口（`src/scene/SceneTransforms.ts`）：
+
+```typescript
+import { SceneTransforms, Cartesian3 } from './src/index';
+
+// 归一化 ECEF → CSS 像素（自动除 DPR；相机后方返回 undefined）
+const p = SceneTransforms.worldToWindowCoordinates(viewer.scene, worldPos);
+
+// 米制 ECEF 或 { lon, lat, height } → CSS 像素（内部归一化后委托前者）
+const q = SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, entityPosMeters);
+```
+
+- 结果为 **CSS 像素**（左上原点、y 向下），与 `ScreenSpaceEventHandler` 同一坐标系；设备缓冲 ÷ DPR 的换算读自 `scene.context.canvas`。
+- 相机后方（w ≤ 0）或超出近/远裁剪面返回 `undefined`。
+- `{ lon, lat, height }` 字面量走 `Camera.resolveDestination` 的压扁世界约定。
+- 测试见 `tests/scene/sceneTransforms.spec.ts`（已知相机位姿投影数值 / 相机后方 / DPR 缩放）。
+
+### 3DTiles feature 挑拣（P1-E）
+
+b3dm 瓦片带 `_BATCHID` 时，`scene.pick` 的 `PickResult` 新增 **`feature`** 字段（`Cesium3DTileFeature`）：
+
+```typescript
+viewer.onPick = (result) => {
+  const feature = result?.feature;
+  if (feature instanceof Cesium3DTileFeature) {
+    console.log(feature.batchId, feature.getProperty('name'), feature.getProperty('height'));
+  }
+};
+```
+
+- 链路：GltfLoader 解析 `_BATCHID` 逐顶点属性 → `TilesetPrimitive` 偏移进全局 instance id 空间（`buildTileInstanceIds`，PickPass 既有 0x800000 实例位机制）→ PickPass 读回后经 `tilesetPickRegistry` 还原 `{batchId, primitive}`。
+- batchTable（JSON 数组 + 二进制列）由 `B3dmDecoder.parseBatchTable` 展开，`feature.getProperty(name)` / `hasProperty` / `getPropertyNames` 访问；`feature.tileset` 可用于 duck-typing（对齐 building-picker.js）。
+- 无 `_BATCHID` 的瓦片降级为 tile 级 feature（`batchId === undefined`，`getProperty` 恒 `undefined`）。
+
+**编码空间**：实例拾取 id（`0x800000 | id`，低 23 位）由进程级共享分配器发放（`picking/InstanceIdPool.ts`）——F12 白模建筑（`CityBlockBuilder`）与 b3dm 批次（`TilesetPickRegistry`）区间互不相交，同一实例 id 永远只属于一个生产方，楼栋拾取不会被误标为瓦片 feature（回归见 `tests/picking/instanceIdSpace.spec.ts`）。
+
+### requestRenderMode 按需渲染（P2-5）
+
+```typescript
+const viewer = new Viewer('container', {
+  requestRenderMode: true,
+  maximumRenderTimeChange: Number.POSITIVE_INFINITY, // 默认：静止永不补渲（对齐 hexapod）
+});
+viewer.scene.requestRender(); // 显式触发一帧
+```
+
+静止场景跳过 `Scene.render()`（省 CPU）。脏源自动触发渲染：相机指纹（拖拽/飞行/滚轮）、场景内容指纹（图元与实体增删、影像/地形瓦片到达、特效挂载）、动态 Property 实体（CallbackProperty 逐帧判定为持续变化——`EntityVisualizer.consumeChange` 脏标记）、resize、显式 `requestRender()`；`maximumRenderTimeChange` 秒静止后自动补渲一帧。核心逻辑在纯类 `RenderScheduler`（node 可测，`tests/core/renderScheduler.spec.ts`）。

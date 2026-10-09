@@ -56,6 +56,12 @@ export class Primitive {
   private static _nextPickId = 1;
 
   show: boolean = true;
+  /**
+   * Draw with depth testing disabled (P2-4 `disableDepthTestDistance`):
+   * translucent primitives render through geometry. Read each frame by the
+   * TransparentPass pipeline switch (`depthCompare: 'always'`).
+   */
+  alwaysPassDepth = false;
   modelMatrix: Matrix4;
 
   private readonly _pickId: number;

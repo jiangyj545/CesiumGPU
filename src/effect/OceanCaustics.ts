@@ -48,11 +48,47 @@ interface GenLayerUnit {
 
 /** 每纬度度数对应米数（小范围线性换算，与 OceanFFTWater 一致）。 */
 const METERS_PER_DEG = 111320;
-/** 焦散纹理边长（texel）。400m 覆盖 → ~20cm/texel，可分辨米级焦散网。 */
-const CAUSTICS_RES = 2048;
+/**
+ * 焦散纹理边长（texel）。2026-10-08 Round2 2048→4096：水下机位距沙面 2-4m
+ * 时 texel 放大 40-80×，2048（0.244m/texel）成 10-40px 双线性软块（原生
+ * 分辨率裁剪+视觉模型实锤）；采样端反锐化掩模（CausticsFloor FS）只能收
+ * 边缘、无法凭空合成 sub-texel 网脊（实测 3/10）。4096 → 0.122m/texel。
+ * 显存 2048²rgba16float=32MB → 4096²=128MB（+96MB）：rgba16float 是唯一
+ * 可混合浮点格式（4 层加性溅射必需），桌面 WebGPU 目标可接受；单次分配、
+ * destroy() 释放。分辨率是本效果画质硬瓶颈，此为本轮检查差距1的主修复。
+ */
+const CAUSTICS_RES = 4096;
 /** 细/宽级联索引（tidewater fine=级联数-1、broad=再上一层）。 */
 const FINE_CASCADE = 3;
 const BROAD_CASCADE = 2;
+/**
+ * 焦散纹理 mip 级数（level 0/1/2）。Round3 放大自适应 LOD 采样端需要：
+ * 生成网格 quad 0.51m ≈ 4.2 texel 的固有 sub-quad 台阶在近场放大 20-80×
+ * 时暴露成碎亮条；CausticsFloor 按 λ=log2(mag) 升到 mip1/2（mip2 texel
+ * 0.49m ≈ quad 尺度 = 4× 盒滤恰好平均 quad 级残差）。每帧生成 pass 后
+ * 在同一 encoder 上 blit 两级（双线性降采样），显存 +128/4+128/16≈42MB。
+ */
+const CAUSTICS_MIPS = 3;
+
+/** mip blit：全屏三角采样上一级写下一级（MipmapGenerator 同款渲染式降采样）。 */
+const CAUSTICS_MIP_BLIT_WGSL = /* wgsl */`
+struct VSO { @builtin(position) pos : vec4f, @location(0) uv : vec2f };
+@vertex
+fn vs_main( @builtin(vertex_index) vi : u32 ) -> VSO {
+  var pts = array<vec2f, 3>( vec2f( -1.0, -1.0 ), vec2f( 3.0, -1.0 ), vec2f( -1.0, 3.0 ) );
+  let p = pts[ vi ];
+  var o : VSO;
+  o.pos = vec4f( p, 0.0, 1.0 );
+  o.uv = vec2f( ( p.x + 1.0 ) * 0.5, 1.0 - ( p.y + 1.0 ) * 0.5 );
+  return o;
+}
+@group(0) @binding(0) var srcTex : texture_2d<f32>;
+@group(0) @binding(1) var srcSmp : sampler;
+@fragment
+fn fs_main( i : VSO ) -> @location(0) vec4f {
+  return textureSample( srcTex, srcSmp, i.uv );
+}
+`;
 
 /**
  * OceanCaustics - 海面焦散生成 pass（移植 tidewater Caustics.js——光子溅射
@@ -100,9 +136,16 @@ export class OceanCaustics implements IPass {
   private readonly _paramsF32 = new Float32Array(CAUSTICS_PARAMS_UBO_BYTES / 4);
   private _target: GPUTexture | null = null;
   private _targetView: GPUTextureView | null = null;
+  /** 生成 pass 附件视图（仅 level 0——多 mip 纹理的附件视图必须单 mip）。 */
+  private _level0View: GPUTextureView | null = null;
+  /** mip blit 管线 + 逐级 bind group（level1←0、level2←1）。 */
+  private _mipPipeline: GPURenderPipeline | null = null;
+  private readonly _mipBindGroups: GPUBindGroup[] = [];
   private _sampler: GPUSampler | null = null;
   private _bgl: GPUBindGroupLayout | null = null;
   private _bindGroup: GPUBindGroup | null = null;
+  /** grid 边长 → 共享索引缓冲（fine 两层/宽两层各自同 grid，防 25MB×2 重复）。 */
+  private readonly _indexBuffers = new Map<number, GPUBuffer>();
   private _boundDeriv: GPUTextureView | null = null;
   private readonly _layers: GenLayerUnit[] = [];
   /** 初始化失败闸：一次 console.error 后禁用，防每帧刷屏（OceanFFTWater 同款）。 */
@@ -191,16 +234,25 @@ export class OceanCaustics implements IPass {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
 
-      // rgba16float 渲染附件 + 采样；HDR 加性混合允许 I > 1 的聚焦峰值
+      // rgba16float 渲染附件 + 采样；HDR 加性混合允许 I > 1 的聚焦峰值。
+      // Round3 mipLevelCount 1→3：采样端放大自适应 LOD 需 mip1/2（见
+      // CAUSTICS_MIPS 注释），每帧 execute 末尾同 encoder blit 补齐。
       this._target ??= device.createTexture({
         label: 'OceanCausticsTexture',
         size: { width: CAUSTICS_RES, height: CAUSTICS_RES },
+        mipLevelCount: CAUSTICS_MIPS,
         format: 'rgba16float',
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
       });
       this._targetView ??= this._target.createView({
         label: 'OceanCausticsTextureView',
         dimension: '2d',
+      });
+      this._level0View ??= this._target.createView({
+        label: 'OceanCausticsTexture.Level0',
+        dimension: '2d',
+        baseMipLevel: 0,
+        mipLevelCount: 1,
       });
 
       this._sampler ??= device.createSampler({
@@ -237,8 +289,8 @@ export class OceanCaustics implements IPass {
 
       if (this._layers.length === 0) {
         const specs = [
-          { code: OCEAN_CAUSTICS_GEN_FINE_SHALLOW, grid: 512 },
-          { code: OCEAN_CAUSTICS_GEN_FINE_DEEP, grid: 512 },
+          { code: OCEAN_CAUSTICS_GEN_FINE_SHALLOW, grid: 1024 },
+          { code: OCEAN_CAUSTICS_GEN_FINE_DEEP, grid: 1024 },
           { code: OCEAN_CAUSTICS_GEN_BROAD_SHALLOW, grid: 128 },
           { code: OCEAN_CAUSTICS_GEN_BROAD_DEEP, grid: 128 },
         ];
@@ -264,7 +316,49 @@ export class OceanCaustics implements IPass {
             },
             primitive: { topology: 'triangle-list', cullMode: 'none' },
           });
-          this._layers.push({ pipeline, ...this._buildIndexBuffer(s.grid) });
+          // 同 grid 层共享索引缓冲（fine 1024²×6×4B=25MB ×2 层不共享则 50MB）
+          const indexBuffer = this._indexBuffers.get(s.grid) ?? this._buildIndexBuffer(s.grid).indexBuffer;
+          this._indexBuffers.set(s.grid, indexBuffer);
+          this._layers.push({ pipeline, indexBuffer, indexCount: s.grid * s.grid * 6 });
+        }
+      }
+
+      // Round3 mip blit 资源：全屏三角降采样管线 + 每级 bind group（level L
+      // 采样 L-1 写 L）。与 MipmapGenerator 同款技术，但编排在 execute 的
+      // 同一 encoder 上（生成 pass 与 blit 的依赖在同队列内保序，无独立
+      // submit 的跨帧时序问题）。
+      if (!this._mipPipeline) {
+        const module = this._context.createShaderModule(CAUSTICS_MIP_BLIT_WGSL, 'OceanCausticsMipBlit');
+        const mipBgl = device.createBindGroupLayout({
+          label: 'OceanCausticsMipBlitBGL',
+          entries: [
+            { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+          ],
+        });
+        this._mipPipeline = device.createRenderPipeline({
+          label: 'OceanCausticsMipBlitPipeline',
+          layout: device.createPipelineLayout({ bindGroupLayouts: [mipBgl] }),
+          vertex: { module, entryPoint: 'vs_main' },
+          fragment: { module, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
+          primitive: { topology: 'triangle-list' },
+        });
+        for (let level = 1; level < CAUSTICS_MIPS; level++) {
+          this._mipBindGroups.push(device.createBindGroup({
+            layout: this._mipPipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: this._target!.createView({
+                  label: `OceanCausticsTexture.MipSrc${level - 1}`,
+                  dimension: '2d',
+                  baseMipLevel: level - 1,
+                  mipLevelCount: 1,
+                }),
+              },
+              { binding: 1, resource: this._sampler! },
+            ],
+          }));
         }
       }
     } catch (e) {
@@ -286,7 +380,8 @@ export class OceanCaustics implements IPass {
     const fft = this._fft;
     const deriv = fft?.derivativeTexture ?? null;
     const sizes = fft?.cascadeSizes;
-    if (!deriv || !sizes || sizes.length < 4 || !this._targetView
+    if (!deriv || !sizes || sizes.length < 4 || !this._targetView || !this._level0View
+      || !this._mipPipeline || this._mipBindGroups.length < CAUSTICS_MIPS - 1
       || !this._bgl || !this._paramsUBO || this._layers.length === 0) {
       return;
     }
@@ -322,7 +417,8 @@ export class OceanCaustics implements IPass {
       label: this.label,
       colorAttachments: [
         {
-          view: this._targetView,
+          // 多 mip 纹理的附件必须单 mip 视图（全链视图采样用）
+          view: this._level0View!,
           loadOp: 'clear',
           storeOp: 'store',
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
@@ -336,23 +432,54 @@ export class OceanCaustics implements IPass {
       pass.drawIndexed(layer.indexCount);
     }
     pass.end();
+
+    // Round3：同 encoder 顺位 blit mip1/2（同队列保序——生成写 L0 → blit
+    // L0→L1 → blit L1→L2，pass 间自动插屏障）。
+    for (let level = 1; level < CAUSTICS_MIPS; level++) {
+      const dst = encoder.beginRenderPass({
+        label: `${this.label}.Mip${level}`,
+        colorAttachments: [
+          {
+            view: this._target!.createView({
+              label: `OceanCausticsTexture.MipDst${level}`,
+              dimension: '2d',
+              baseMipLevel: level,
+              mipLevelCount: 1,
+            }),
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          },
+        ],
+      });
+      dst.setPipeline(this._mipPipeline!);
+      dst.setBindGroup(0, this._mipBindGroups[level - 1]);
+      const dim = Math.max(1, CAUSTICS_RES >> level);
+      dst.setViewport(0, 0, dim, dim, 0, 1);
+      dst.draw(3);
+      dst.end();
+    }
   }
 
   /** 释放全部 GPU 资源；调用后本 pass 不可再用。 */
   destroy(): void {
     this._paramsUBO?.destroy();
     this._target?.destroy();
-    for (const layer of this._layers) {
-      layer.indexBuffer.destroy();
+    for (const buffer of this._indexBuffers.values()) {
+      buffer.destroy();
     }
     this._paramsUBO = null;
     this._target = null;
     this._targetView = null;
+    this._level0View = null;
+    this._mipPipeline = null;
+    this._mipBindGroups.length = 0;
     this._sampler = null;
     this._bgl = null;
     this._bindGroup = null;
     this._boundDeriv = null;
     this._layers.length = 0;
+    this._indexBuffers.clear();
   }
 
   // ── 内部 ─────────────────────────────────────────────────────────────────

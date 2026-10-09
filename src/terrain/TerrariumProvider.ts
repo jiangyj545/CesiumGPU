@@ -33,6 +33,8 @@ export interface TerrariumProviderOptions {
   url?: string;
   /** Highest available level. Default: 15 */
   maximumLevel?: number;
+  /** Auth headers for every tile request (P1-F，如 Authorization: Bearer）。 */
+  headers?: Record<string, string>;
 }
 
 const DEFAULT_URL =
@@ -44,6 +46,7 @@ export class TerrariumProvider extends HttpTerrainProviderBase {
       url: options.url ?? DEFAULT_URL,
       tilingScheme: 'webmercator',
       maximumLevel: options.maximumLevel ?? 15,
+      headers: options.headers,
     });
   }
 
@@ -100,7 +103,7 @@ export class TerrariumProvider extends HttpTerrainProviderBase {
  * points form triangle pairs; heights fold into the normalised ECEF radius.
  * No NoData skipping: oceans carry negative heights and are kept.
  */
-function triangulateHeightGrid(
+export function triangulateHeightGrid(
   heights: Float32Array,
   grid: number,
   z: number,

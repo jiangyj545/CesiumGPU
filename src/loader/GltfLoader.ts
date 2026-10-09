@@ -146,6 +146,12 @@ export interface ParsedMeshPrimitive {
   material: ParsedMaterial;
   /** Column-major 4×4 world-space transform for this primitive within the GLTF model. */
   nodeMatrix: Float32Array;
+  /**
+   * Per-vertex `_BATCHID` (3D Tiles b3dm), aligned with `vertices`
+   * (remapped through the flat-normal unweld when it runs). Absent when the
+   * mesh carries no batch attribute.
+   */
+  batchIds?: Uint32Array;
 }
 
 /** The full result of parsing a GLTF/GLB file. */
@@ -506,15 +512,33 @@ export class GltfLoader {
     // Read normal accessor (optional – generate flat normals if absent)
     const normIdx = prim.attributes.NORMAL;
     let normals: Float32Array;
+    let unwelded = false;
     if (normIdx !== undefined) {
       normals = GltfLoader._readFloatAccessor(json, buffers, normIdx, 3);
     } else if (prim.indices !== undefined) {
       // Indexed triangles are defined by index triples: un-weld the vertices
       // and assign each triangle its own flat face normal.
+      unwelded = true;
       ({ positions, normals, uvs, indices } = GltfLoader._generateFlatNormalsIndexed(positions, uvs, indices));
     } else {
       // Non-indexed: consecutive vertex triples form triangles.
       normals = GltfLoader._generateFlatNormals(positions);
+    }
+
+    // 3D Tiles _BATCHID (optional): per-vertex batch indices, remapped to the
+    // final vertex layout (the flat-normal unweld reorders vertices by index).
+    const batchIdx = prim.attributes._BATCHID ?? prim.attributes._BATCH_ID;
+    let batchIds: Uint32Array | undefined;
+    if (batchIdx !== undefined) {
+      const raw = GltfLoader._readFloatAccessor(json, buffers, batchIdx, 1);
+      const source = new Uint32Array(raw.length);
+      for (let i = 0; i < raw.length; i++) source[i] = Math.round(raw[i]);
+      if (unwelded) {
+        batchIds = new Uint32Array(indices.length);
+        for (let i = 0; i < indices.length; i++) batchIds[i] = source[indices[i]];
+      } else {
+        batchIds = source;
+      }
     }
 
     // Build interleaved buffer: [pos(3), norm(3), uv(2)] × vertexCount
@@ -535,7 +559,7 @@ export class GltfLoader {
     // Material
     const material = GltfLoader._parseMaterial(json, images, ktx2Sources, prim.material);
 
-    return { vertices, indices, material };
+    return { vertices, indices, material, batchIds };
   }
 
   // ── Accessor reading ─────────────────────────────────────────────────────────

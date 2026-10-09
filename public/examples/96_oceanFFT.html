@@ -17,11 +17,18 @@
       font-size:12px;color:#9db4d0;cursor:pointer;user-select:none;}
     .cg-panel .checkline input{cursor:pointer;}
     .cg-panel .checks{display:grid;grid-template-columns:1fr 1fr;gap:2px 14px;}
+    /* 默认收起态：面板缩成一行按钮（2026-10-06 检查差距1：面板展开遮水上
+       60-70%/水下 50% 画面） */
+    .cg-panel.collapsed{min-width:0;max-width:180px;padding:6px 10px;}
+    #panelToggle{width:100%;padding:5px 0;cursor:pointer;background:rgba(18,57,92,.6);
+      color:#8ee6ff;border:1px solid rgba(120,180,255,.4);border-radius:6px;font-size:13px;}
   </style>
 </head>
 <body>
   <div id="cesiumContainer"></div>
-  <div class="cg-panel">
+  <div class="cg-panel collapsed" id="ctlPanel">
+    <button id="panelToggle" type="button">▸ 展开控制面板</button>
+    <div id="panelBody" style="display:none;">
     <h1>96 FFT 海洋 · L4（五件套 + 阴影 + 水下 + 沙洲场）</h1>
     <p class="desc">FFT 谱海面 + <b>L2 五件套</b>（物理大气 / 沙洲焦散 / 程序泡沫 /
       船迹波场 / 水面折射）+ <b>L3</b>：CSSM 级联船体阴影（海面 PCF 软边接收，
@@ -37,8 +44,9 @@
     <input id="windDir" type="range" min="0" max="360" step="5" value="20" />
     <label>choppiness 卷浪度 <b id="choppinessVal">0.90</b></label>
     <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="1.15" />
-    <label>foamBias 白沫阈值 <b id="foamBiasVal">0.52</b></label>
-    <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.52" />
+    <!-- 2026-10-09 覆盖回落：0.54→0.62（配合图案阈值 0.85→0.70，平静海面白斑大幅减少） -->
+    <label>foamBias 白沫阈值 <b id="foamBiasVal">0.62</b></label>
+    <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.62" />
     <label>时间尺度 <b id="timeScaleVal">1.6</b>×</label>
     <input id="timeScale" type="range" min="0" max="3" step="0.1" value="1.6" />
     <label>船速 <b id="boatSpeedVal">6.0</b> m/s（0 = 停船）</label>
@@ -69,19 +77,37 @@
     </div>
     <button id="diveBtn" style="margin-top:10px;width:100%;padding:6px 0;cursor:pointer;
       background:#12395c;color:#8ee6ff;border:1px solid rgba(120,180,255,.4);border-radius:6px;
-      font-size:13px;">潜水（海面下 3 m）</button>
+      font-size:13px;">上浮（恢复水上机位）</button>
+    </div><!-- /panelBody -->
   </div>
   <script src="./js/demo-utils.js"></script>
   <script type="module">
     import * as engine from '/src/index.ts';
 
+    // 控制面板默认收起（2026-10-06 检查差距1）：按钮切 #panelBody 显隐。
+    // QA 钩子（ck()/checkbox 赋值）只操作 DOM 属性，折叠态下依然有效。
+    {
+      const panel = document.getElementById('ctlPanel');
+      const body = document.getElementById('panelBody');
+      const toggle = document.getElementById('panelToggle');
+      toggle.addEventListener('click', () => {
+        const collapsed = panel.classList.toggle('collapsed');
+        body.style.display = collapsed ? 'none' : '';
+        toggle.textContent = collapsed ? '▸ 展开控制面板' : '▾ 收起控制面板';
+      });
+    }
+
     async function demo(viewer, engine) {
       // ── 0. 常量：海域中心 / 太阳方向 / 米度换算 ──────────────────────
       const CEN_LON = 121.65, CEN_LAT = 31.15;
-      // 低角度斜射太阳（本地 NNE、仰角 ~28.5°）：高光 glitter 路径进画 +
+      // 低角度斜射太阳（本地 NNE、仰角 ~20°）：高光 glitter 路径进画 +
       // SSS 逆光成立（正午陡太阳下镜面反射不在反射几何内，高光全灭）。
-      // ECEF = N*0.72 + E*0.28 + U*0.42 @ (121.65E, 31.15N) 归一化。
-      const SUN = [-0.264, -0.179, 0.948];
+      // 2026-10-06 Round3 检查差距1：仰角 28.5°→20°——pitch -9° 视野顶缘
+      // +21°，旧值盘心出画 7.5° 且盘外 glow 半宽仅 ~2° 全衰减（太阳区 3x
+      // 裁剪实锤无盘无晕）；20° 盘心贴顶缘 1° 入画，径向亮核/光晕可辨。
+      // 基向 N*0.72 + E*0.28 + U*0.42 @ (121.65E, 31.15N)，U 分量降至
+      // sin20° 后归一化（方位 21° 不变，仅压仰角）。
+      const SUN = [-0.206, -0.316, 0.926];
       const METERS_PER_DEG = 111320;
       const R_EARTH = engine.Cartesian3.EARTH_RADIUS; // 6378137
       const context = viewer.scene.context;
@@ -103,7 +129,10 @@
       const sky = new engine.AtmosphereSky(context, {
         sunDirection: SUN,
         starIntensity: 0,          // 白昼场景关星星
-        sunDiskIntensity: 1.7,     // 太阳盘+Mie 光晕（tidewater 观感 1.5-2）
+        sunDiskIntensity: 2.0,     // 太阳盘+Mie 光晕（Round3 检查差距1：
+                                   // 1.7→2.0，顶缘入画的盘+晕更醒目）
+        mieG: 0.85,                // Round3 检查差距1：默认 0.8→0.85，前向
+                                   // Mie 相函数更尖，贴盘亮核聚拢可辨
         mieScale: 0.6,             // 干净晴天低气溶胶：前向眩光减弱，主角视角
                                    //（朝太阳 ~20°）的天空从灰白回蓝（默认 1 偏霾）
         rayleighScale: 1.1,        // 瑞利略增 → 中高仰角蓝更深
@@ -236,18 +265,34 @@
       //      → spray(船首喷雾粒子，GBuffer 深度测试) → uwFog(全屏罩)
       const uwFog = new engine.UnderwaterFog(context, {
         intensity: 0.85,
-        waterColor: [0.06, 0.34, 0.31],  // 青绿透光（tidewater 潜水观感）
-        particleDensity: 0.2,            // 0.9→0.32 仍偏高（检查 agent），再降到 0.2：稀疏悬浮颗粒
+        waterColor: [0.035, 0.19, 0.30], // 晴日透蓝（2026-10-06 检查差距3：旧
+                                         // 青绿 [0.06,0.34,0.31] G>B 水体染灰绿；
+                                         // Round4 微提亮偏蓝——远处 Beer 雾混入后
+                                         // "近清澈→远渐蓝"，不再暗青黑）
+        particleDensity: 0.28,           // 0.9→0.32→0.2（Round3 检查差距4：
+                                         // 0.2 全隐没，回调 0.28 至隐约可见）
         seabedDepthM: 5,                 // 水下俯视参考海床深（沙洲周边 4-6 m）
       });
-      uwFog.setSunShaftIntensity(0.45); // Track G：水下太阳光柱（潜水观感）
-                                         // 1.6 过强：角向辐条 sin(ang·9) 在俯视构图里
-                                         // 铺满全屏成放射星芒（视觉模型实锤），压到微弱漏光
+      uwFog.setSunShaftIntensity(1.3); // Track G：体积焦散光柱（tidewater
+                                         // Underwater.js _shaftCode 同法：视线
+                                         // march 采真焦散纹理，束状随波浪摆动；
+                                         // Round 2 LDR 域标定 K=14 后 1.3）
       // 距离衰减雾（水下应该是透明的）：G-Buffer worldPos 重建水下路径长，
       // 近处海床/沙洲/焦散透出、远处渐蓝（未绑定为均匀俯仰近似）
       uwFog.setScenePosView(() => viewer.scene.gbufferPass
         ? viewer.scene.gbufferPass.textures.worldPosView
         : null);
+      // 体积焦散光柱源：OceanCaustics 纹理 + 沙洲 ENU 基（march 局部系原点）
+      uwFog.bindCaustics({
+        view: () => caustics.causticsTexture,
+        coverMeters: caustics.coverMeters,
+        centerEcef: [breakCenter[0], breakCenter[1], breakCenter[2]],
+        eastEcef:  [sbEnu.east[0],  sbEnu.east[1],  sbEnu.east[2]],
+        upEcef:    [sbEnu.up[0],    sbEnu.up[1],    sbEnu.up[2]],
+        northEcef: [sbEnu.north[0], sbEnu.north[1], sbEnu.north[2]],
+        shallowDepthM: caustics.shallowDepthMeters,
+        deepDepthM: caustics.deepDepthMeters,
+      });
       const spray = new engine.BowSpray(context, { maxParticles: 2048, scene: viewer.scene });
       // L5/T4 岸线破碎波喷雾：发射带 = 沙洲岸线（吸附源取 ocean 的海床/位移视图）
       const breakSpray = new engine.BreakSpray(context, {
@@ -456,14 +501,21 @@
         const [lon, lat, height] = ecefToLonLatHeight([pos.x, pos.y, pos.z]);
         if (on) {
           savedAbove = { lon, lat, height };
+          // 2026-10-06 Round4 检查差距1（焦散网 p90/p10 1.5 不动、两轮改 cNet
+          // 无效）根因实锤：旧潜水构图原地上潜 + pitch+15° 上仰看水面——uw-diag-r4
+          // 开关隔离实测关掉 caustics+floor 两层中央区均值仅差 6/255，即焦散网
+          // 根本不在此构图的画面主体内。潜水改为飞到沙洲 tile 南缘上方水下 3 m、
+          // -25° 俯视沙面：焦散网（CausticsFloor 500m tile）满画幅，网纹直接
+          // 进中央 40% 评测区；上浮仍回 savedAbove 水上机位。
           viewer.camera.flyTo({
-            destination: { lon, lat, height: -3 },   // 海面下 3 m（保持经纬）
-            orientation: { heading: 0, pitch: 15 * Math.PI / 180 }, // 上仰看水面
+            destination: { lon: sbLon, lat: sbLat - 0.0022, height: -3 },
+            orientation: { heading: 0, pitch: -25 * Math.PI / 180 }, // 俯视沙面焦散网
           });
         } else if (savedAbove) {
           viewer.camera.flyTo({
             destination: { lon: savedAbove.lon, lat: savedAbove.lat, height: savedAbove.height },
-            orientation: { heading: 0, pitch: -10 * Math.PI / 180 }, // -25° 太俯：天空出不了画
+            // 与开机构图一致：朝太阳方位 21°、-9° 俯角（天空带入画）
+            orientation: { heading: 21 * Math.PI / 180, pitch: -9 * Math.PI / 180 },
           });
         }
         const btn = document.getElementById('diveBtn');
@@ -562,7 +614,7 @@
         floor.setSwash(e.target.checked ? 0.85 : 0);
       });
       document.getElementById('sunShaftToggle').addEventListener('change', (e) => {
-        uwFog.setSunShaftIntensity(e.target.checked ? 1.2 : 0);
+        uwFog.setSunShaftIntensity(e.target.checked ? 1.3 : 0);
       });
       // T-P/W/V/A 开关：卷唇破碎 / 卷云层 / 冲刷模拟 / 大气透视
       document.getElementById('peelToggle').addEventListener('change', (e) => {
@@ -613,7 +665,7 @@
         },
         setGodRays(b) { viewer.scene.postProcess.godRays.enabled = b; ck('godRaysToggle', b); },
         setSwash(b) { floor.setSwash(b ? 0.85 : 0); ck('swashToggle', b); },
-        setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 0.45 : 0); ck('sunShaftToggle', b); },
+        setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 1.3 : 0); ck('sunShaftToggle', b); },
         // ── T-P/W/V/A 探针扩展：卷唇破碎 / 卷云层 / 冲刷模拟 / 大气透视 ──
         setPeel(b) { ocean.setPeelWave(b ? PEEL : null); ck('peelToggle', b); },
         setCirrus(b) { clouds.setCirrus({ enable: b, coverage: 0.42, density: 0.55 }); ck('cirrusToggle', b); },
@@ -645,30 +697,25 @@
         },
       };
 
-      // ── 12. 初始视角（2026-09-30 用户"想看水底效果，向下俯视"）：水下
-      // 俯视沙洲——机位在沙洲东北 ~200 m 浅水上方、海面下 1.5 m、俯角
-      // 55° 朝西南看：入画即见海床沙面 + 焦散光斑 + 岸线湿沙 + 露出水
-      // 面的沙洲尖顶，水体青绿罩色随水深渐浓（近清远蓝）。潜水按钮切回
-      // 贴水 7 m 机位（savedAbove 已备好，uwMode=true 与入水事实一致），
-      // tick() 模长判定自动驱动 uwFog/海面双面视角。
-      savedAbove = { lon: CEN_LON, lat: CEN_LAT - 0.0011, height: 7 };
+      // ── 12. 初始视角（设计基线：加载即水下俯视沙洲焦散网）──────────────
+      // Round3 一致性修复：某轮实现把初始机位改成水上开机构图，检查员需点
+      // 两次 diveBtn 才入水（uwMode 初值与构图反转的回归）。修回基线——
+      // uwMode=true + 直接飞水下 3m 俯视沙面（与 setDive(true) 同一构图），
+      // 按钮初始即「上浮」；savedAbove 仍为水上开机构图（上浮回去、再下潜
+      // 往返一致）。水上构图参数保留备查：中心南侧 150m、高 14m、朝太阳
+      // 方位 21°、pitch -9°（天空带 ~35% + 散云 + 船与 wake 入画）。
+      savedAbove = {
+        lon: CEN_LON,
+        lat: CEN_LAT - 150 / METERS_PER_DEG,
+        height: 14,
+      };
       uwMode = true;
-      const btnInit = document.getElementById('diveBtn');
-      if (btnInit) btnInit.textContent = '上浮（恢复水上机位）';
       viewer.camera.flyTo({
-        destination: {
-          // 沙洲中心东北 245 m 对角（173m 东 + 173m 北——旧版两轴各 245
-          // 实为 346m 对角：超出 250m 海拔场，脚下无沙面，-35° 俯角里
-          // 整片沙洲只在画面顶部 0.5-2° 细带，水下所见只剩雾+假焦散斑）。
-          // floor/caustics 网格 500m（对齐海拔场全域）：相机 -2.5 m（低于
-          // 波谷 ~-2 m 防波面切锥）距脚下沙面 ~4.2 m，-28° 俯角下画幅从
-          // 近沙 5 m 铺到前方沙洲尖顶 ~245 m，近清远雾透视展开
-          lon: sbLon + 173 / (METERS_PER_DEG * Math.cos(CEN_LAT * Math.PI / 180)),
-          lat: sbLat + 173 / METERS_PER_DEG,
-          height: -2.5,
-        },
-        orientation: { heading: 225 * Math.PI / 180, pitch: -28 * Math.PI / 180 },
+        destination: { lon: sbLon, lat: sbLat - 0.0022, height: -3 },
+        orientation: { heading: 0, pitch: -25 * Math.PI / 180 }, // 俯视沙面焦散网
       });
+      const diveBtn0 = document.getElementById('diveBtn');
+      if (diveBtn0) diveBtn0.textContent = '上浮（恢复水上机位）';
     }
 
     // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────

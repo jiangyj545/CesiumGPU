@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>示例 100：LERC 地形（ArcGIS World Elevation Terrain3D） - CesiumGPU</title>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <script src="./js/demo-utils.js"></script>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    async function demo(viewer) {
+      // ── LercTerrainProvider：ArcGIS World Elevation（Terrain3D / LERC1） ──
+      // 在线源（elevation3d.arcgis.com，免 token）。加载失败（离线 / 防火墙）
+      // 时地形层静默降级为椭球——示例仍可用，面板提示降级。
+      const provider = new engine.LercTerrainProvider({
+        maximumLevel: 12, // 展示层深（15 为服务上限，浅层更省流量）
+        // headers: { Authorization: 'Bearer …' },  // 私有服务认证（P1-F）
+      });
+      viewer.globe.setTerrainProvider(provider);
+      DemoUtils.toast('LERC 地形已挂载（失败自动降级为椭球）');
+    }
+
+    const { viewer } = await DemoUtils.startup({
+      engine,
+      view: [105, 36, 6_000_000],
+      title: '100 LERC 地形 (ArcGIS Terrain3D)',
+    });
+    await demo(viewer);
+    DemoUtils.showCode(demo, '示例源码');
+  </script>
+</body>
+</html>

@@ -133,3 +133,114 @@ export function parseRtcCenter(buffer: ArrayBuffer): RtcCenter | null {
   }
   return null;
 }
+
+/** 展开后的批次表：属性名 → 每批次值数组。 */
+export type ExpandedBatchTable = Record<string, unknown[]>;
+
+/**
+ * 解析并展开 batch table（P1-E feature 挑拣）：
+ *
+ * - JSON 数组属性 → 原样取列；
+ * - 二进制属性 `{byteOffset, type, componentType}` → 从 batchTableBinary
+ *   按分量类型读出 batchCount 个值（SCALAR→number、VECN→number[]、
+ *   STRING→UTF-8 字符串，对齐 b3dm spec 的二进制批次表编码）；
+ * - `batchCount = 0` / JSON 解析失败 / 无表 → null（tile 级降级）。
+ *
+ * @param buffer   完整 b3dm ArrayBuffer
+ * @param batchCount BATCH_LENGTH（0 或缺失时返回 null）
+ */
+export function parseBatchTable(
+  buffer: ArrayBuffer,
+  batchCount: number
+): ExpandedBatchTable | null {
+  if (!Number.isFinite(batchCount) || batchCount <= 0) return null;
+  const view = new DataView(buffer);
+  const jsonLength = view.getUint32(16, true);
+  const binLength  = view.getUint32(20, true);
+  if (jsonLength === 0) return null;
+
+  const jsonStart = HEADER_LENGTH + view.getUint32(8, true) + view.getUint32(12, true);
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(
+      new TextDecoder().decode(new Uint8Array(buffer, jsonStart, jsonLength)).trim()
+    ) as Record<string, unknown>;
+  } catch (error) {
+    console.error('B3dmDecoder: batch table JSON parse failed', error);
+    return null;
+  }
+
+  const bin = binLength > 0 ? new DataView(buffer, jsonStart + jsonLength, binLength) : null;
+  const table: ExpandedBatchTable = {};
+  for (const [name, value] of Object.entries(json)) {
+    if (Array.isArray(value)) {
+      table[name] = value;
+      continue;
+    }
+    if (value && typeof value === 'object' && bin) {
+      const column = readBinaryBatchProperty(value as Record<string, unknown>, bin, batchCount);
+      if (column) table[name] = column;
+    }
+  }
+  return table;
+}
+
+const COMPONENT_BYTES: Record<number, number> = {
+  5120: 1, // BYTE
+  5121: 1, // UNSIGNED_BYTE
+  5122: 2, // SHORT
+  5123: 2, // UNSIGNED_SHORT
+  5125: 4, // UNSIGNED_INT
+  5126: 4, // FLOAT
+};
+
+const TYPE_COUNT: Record<string, number> = {
+  SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4,
+};
+
+/** 读一个二进制批次属性列为 batchCount 个 JS 值；非法定义返回 null。 */
+function readBinaryBatchProperty(
+  def: Record<string, unknown>,
+  bin: DataView,
+  batchCount: number
+): unknown[] | null {
+  const byteOffset = Number(def.byteOffset);
+  const type = typeof def.type === 'string' ? def.type : 'SCALAR';
+  const componentType = def.componentType === undefined ? 5126 : Number(def.componentType);
+  if (!Number.isFinite(byteOffset) || !(componentType in COMPONENT_BYTES)) return null;
+  if (type === 'STRING') {
+    // 字符串列：每批一段 NUL 结尾 UTF-8（spec 允许定长/变长，取 NUL 终止读法）
+    const out: string[] = [];
+    for (let b = 0; b < batchCount; b++) {
+      let end = byteOffset;
+      while (end < bin.byteLength && bin.getUint8(end) !== 0) end++;
+      out.push(new TextDecoder().decode(new Uint8Array(bin.buffer, bin.byteOffset + byteOffset, end - byteOffset)));
+    }
+    return out;
+  }
+  const components = TYPE_COUNT[type];
+  if (!components) return null;
+  const bytes = COMPONENT_BYTES[componentType];
+  const out: unknown[] = [];
+  for (let b = 0; b < batchCount; b++) {
+    const values: number[] = [];
+    for (let c = 0; c < components; c++) {
+      const o = byteOffset + (b * components + c) * bytes;
+      if (o + bytes > bin.byteLength) return null; // 越界：整列丢弃
+      values.push(readComponent(bin, o, componentType));
+    }
+    out.push(components === 1 ? values[0] : values);
+  }
+  return out;
+}
+
+function readComponent(bin: DataView, offset: number, componentType: number): number {
+  switch (componentType) {
+    case 5120: return bin.getInt8(offset);
+    case 5121: return bin.getUint8(offset);
+    case 5122: return bin.getInt16(offset, true);
+    case 5123: return bin.getUint16(offset, true);
+    case 5125: return bin.getUint32(offset, true);
+    default:   return bin.getFloat32(offset, true);
+  }
+}

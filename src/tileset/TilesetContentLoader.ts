@@ -76,6 +76,8 @@ export type TileUrlDecorator = (url: string) => string;
 export interface LoadTilesetOptions {
   /** 所有请求 URL（含 tileset.json 本身）在解析后统一经过此钩子。 */
   urlDecorator?: TileUrlDecorator;
+  /** 附加到 tileset.json（及后续 content）请求的 HTTP 头（P1-F 认证）。 */
+  headers?: Record<string, string>;
 }
 
 // ── tileset.json 原始结构（只声明调度层消费的字段）─────────────────────────
@@ -117,7 +119,7 @@ export async function fetchTilesetJson(
   options?: LoadTilesetOptions
 ): Promise<{ json: RawTileset; finalUrl: string }> {
   const finalUrl = options?.urlDecorator ? options.urlDecorator(url) : url;
-  const buffer = await fetchArrayBuffer(finalUrl);
+  const buffer = await fetchArrayBuffer(finalUrl, options?.headers ? { init: { headers: options.headers } } : undefined);
   const text = new TextDecoder().decode(buffer);
   const json = JSON.parse(text) as RawTileset;
   if (!json || typeof json !== 'object' || !json.root) {

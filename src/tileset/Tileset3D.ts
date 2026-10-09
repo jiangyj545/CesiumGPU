@@ -47,6 +47,10 @@ import { TilesetTileCache } from './TilesetTileCache';
 import type { TileCacheEntry } from './TilesetTileCache';
 import { loadTileContent } from './TilesetPrimitive';
 import type { BuiltTileContent, TileContentLoader } from './TilesetPrimitive';
+import {
+  Cesium3DTileFeature,
+  tilesetPickRegistry,
+} from './Cesium3DTileFeature';
 
 /** 失败瓦片的重试窗口（限流 429 不是"瓦片不存在"，窗口过后可重试）。 */
 const FAILED_RETRY_MS = 30_000;
@@ -70,6 +74,8 @@ export interface Tileset3DOptions {
   requestConcurrency?: number;
   /** 每请求 URL 加工钩子（Google key 注入）。 */
   urlDecorator?: TileUrlDecorator;
+  /** 附加到 tileset.json 与 content 请求的 HTTP 头（P1-F 认证）。 */
+  headers?: Record<string, string>;
   /**
    * 测试缝：替换 content 加载（集成测试注入假 Primitive，不触网）。
    * 生产代码勿传。
@@ -136,6 +142,7 @@ export class Tileset3D {
   private readonly _maximumLevel: number;
   private readonly _requestConcurrency: number;
   private readonly _urlDecorator?: TileUrlDecorator;
+  private readonly _headers: Record<string, string> | undefined;
   private readonly _loadContent: TileContentLoader;
 
   private readonly _cache: TilesetTileCache;
@@ -162,6 +169,7 @@ export class Tileset3D {
     this._maximumLevel       = options.maximumLevel ?? Number.POSITIVE_INFINITY;
     this._requestConcurrency = Math.max(1, options.requestConcurrency ?? 8);
     this._urlDecorator       = options.urlDecorator;
+    this._headers            = options.headers;
     this._loadContent        = options._contentLoader ?? loadTileContent;
     this._cache              = new TilesetTileCache({ capacity: options.cacheCapacity ?? 64 });
   }
@@ -220,6 +228,7 @@ export class Tileset3D {
   private async _loadRoot(): Promise<void> {
     const { json, finalUrl } = await fetchTilesetJson(this._url, {
       urlDecorator: this._urlDecorator,
+      headers: this._headers,
     });
     // content uri 的相对基准 = 加工后的 tileset.json URL
     const rootNode = parseTileset(json, finalUrl, { urlDecorator: this._urlDecorator });
@@ -332,7 +341,8 @@ export class Tileset3D {
     const context = (this._scene as unknown as { _context: Context })._context;
 
     const task = (async () => {
-      const built = await this._loadContent(context, content, node.transform);
+      const built = await this._loadContent(context, content, node.transform,
+        this._headers ? { init: { headers: this._headers } } : undefined);
       if (this._destroyed) {
         this._disposeBuilt(built); // 在途期间被销毁：直接释放，不上屏
         return;
@@ -344,6 +354,23 @@ export class Tileset3D {
         else this._scene.addPrimitive(primitive);
       }
       this._cache.insert(key, node, built.primitives, this._frame);
+      // P1-E：向拾取注册表登记 primitive → feature（批次级或 tile 级降级）
+      if (built.batch && built.batch.count > 0) {
+        const feature = new Cesium3DTileFeature(this, undefined, built.batch.table);
+        for (const primitive of built.primitives) {
+          tilesetPickRegistry.registerInstanceRange(
+            primitive,
+            built.batch.base,
+            built.batch.count,
+            feature
+          );
+        }
+      } else {
+        const tileFeature = new Cesium3DTileFeature(this, undefined, null);
+        for (const primitive of built.primitives) {
+          tilesetPickRegistry.registerTilePrimitive(primitive, tileFeature);
+        }
+      }
     })();
 
     this._inflight.set(key, task);
@@ -425,12 +452,16 @@ export class Tileset3D {
   /** 从场景卸载并销毁一个 content 的全部 GPU 资源。 */
   private _removeEntry(entry: TileCacheEntry): void {
     for (const primitive of entry.primitives) {
+      tilesetPickRegistry.unregister(primitive);
       this._scene.primitives.remove(primitive); // 内部调用 primitive.destroy()
     }
   }
 
   private _disposeBuilt(built: BuiltTileContent): void {
-    for (const primitive of built.primitives) primitive.destroy();
+    for (const primitive of built.primitives) {
+      tilesetPickRegistry.unregister(primitive);
+      primitive.destroy();
+    }
     for (const texture of built.textures) texture.destroy();
   }
 

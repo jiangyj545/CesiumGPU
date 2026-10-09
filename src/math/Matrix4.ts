@@ -76,6 +76,25 @@ export class Matrix4 {
     return result;
   }
 
+  /**
+   * Build a rotation matrix from a unit quaternion (column-major layout,
+   * standard conversion — matches `Quaternion` rotations in the ENU frames).
+   */
+  static fromQuaternion(q: { x: number; y: number; z: number; w: number }, result?: Matrix4): Matrix4 {
+    if (!result) result = new Matrix4();
+    const { x, y, z, w } = q;
+    const x2 = x + x, y2 = y + y, z2 = z + z;
+    const xx = x * x2, xy = x * y2, xz = x * z2;
+    const yy = y * y2, yz = y * z2, zz = z * z2;
+    const wx = w * x2, wy = w * y2, wz = w * z2;
+    const v = result.values;
+    v[0] = 1 - (yy + zz); v[1] = xy + wz;         v[2] = xz - wy;         v[3] = 0;
+    v[4] = xy - wz;         v[5] = 1 - (xx + zz); v[6] = yz + wx;         v[7] = 0;
+    v[8] = xz + wy;         v[9] = yz - wx;       v[10] = 1 - (xx + yy);  v[11] = 0;
+    v[12] = 0;              v[13] = 0;            v[14] = 0;              v[15] = 1;
+    return result;
+  }
+
   static fromUniformScale(scale: number, result?: Matrix4): Matrix4 {
     return Matrix4.fromScale(new Cartesian3(scale, scale, scale), result);
   }

@@ -1,5 +1,7 @@
 import { Cartesian3 } from './Cartesian3';
 import { Matrix4 } from './Matrix4';
+import { Quaternion } from './Quaternion';
+import { HeadingPitchRoll } from './HeadingPitchRoll';
 
 /**
  * Transforms – Cesium-compatible coordinate-frame transforms.
@@ -100,6 +102,58 @@ export class Transforms {
     v[15] = 1.0;
 
     return result;
+  }
+
+  /**
+   * Orientation quaternion for a heading / pitch / roll triple expressed in
+   * the **local ENU frame** at `origin` (ECEF metres, e.g.
+   * `Cartesian3.fromDegrees(...)`). Mirrors Cesium's
+   * `Transforms.headingPitchRollQuaternion(origin, hpr)`.
+   *
+   * Semantics match `Orientation` on the camera: heading 0 = north
+   * (clockwise toward east), pitch 0 = level (negative = nose down), roll
+   * around the forward axis. Assign to `Entity.orientation` and combine with
+   * {@link Transforms.eastNorthUpToFixedFrame} for model placement:
+   *
+   * ```typescript
+   * const orientation = Transforms.headingPitchRollQuaternion(pos, Math.PI / 2, 0, 0);
+   * entity.orientation = orientation; // model heading 90° (east)
+   * ```
+   */
+  static headingPitchRollQuaternion(
+    origin: Cartesian3,
+    hpr: HeadingPitchRoll,
+    result?: Quaternion
+  ): Quaternion;
+  static headingPitchRollQuaternion(
+    origin: Cartesian3,
+    heading: number,
+    pitch: number,
+    roll: number,
+    result?: Quaternion
+  ): Quaternion;
+  static headingPitchRollQuaternion(
+    origin: Cartesian3,
+    headingOrHpr: number | HeadingPitchRoll,
+    pitchOrResult?: number | Quaternion,
+    roll?: number,
+    result?: Quaternion
+  ): Quaternion {
+    void origin; // frame-independent: the quaternion is relative to local ENU
+    if (typeof headingOrHpr === 'number') {
+      return Quaternion.fromHeadingPitchRoll(
+        headingOrHpr,
+        pitchOrResult as number,
+        roll as number,
+        result
+      );
+    }
+    return Quaternion.fromHeadingPitchRoll(
+      headingOrHpr.heading,
+      headingOrHpr.pitch,
+      headingOrHpr.roll,
+      pitchOrResult as Quaternion | undefined
+    );
   }
 }
 

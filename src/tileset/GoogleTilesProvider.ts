@@ -32,6 +32,8 @@ export interface GoogleTiles3DOptions {
   cacheCapacity?: number;
   /** 并发请求上限。默认 8。 */
   requestConcurrency?: number;
+  /** 附加到全部请求的 HTTP 头（P1-F 认证，如 Authorization: Bearer）。 */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -60,6 +62,7 @@ export class GoogleTiles3D {
       maximumLevel: options?.maximumLevel,
       cacheCapacity: options?.cacheCapacity,
       requestConcurrency: options?.requestConcurrency,
+      headers: options?.headers,
       // 每请求 key 注入：已有 query 用 &，否则用 ?（Google URI 常带 session=）
       urlDecorator: (url: string) => this._injectKey(url),
     });

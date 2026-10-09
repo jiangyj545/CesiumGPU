@@ -64,6 +64,7 @@ const GRIDF : f32 = ${g.grid}.0;
 const SPAN : f32 = ${span};
 const MARGIN : f32 = ${margin};
 
+
 @vertex
 fn vs_main( @builtin( vertex_index ) vi : u32 ) -> CauOut {
   let cx = vi % VERTS;
@@ -72,14 +73,32 @@ fn vs_main( @builtin( vertex_index ) vi : u32 ) -> CauOut {
   let p = uv * caustics.tiles.z;   // 平面米（沙洲中心为原点）
   // 波面法线：导数纹理 (dDy/dx, dDy/dz, dDx/dx, dDz/dz) → 斜率 → 法线
   let d = textureSampleLevel( derivTex, smp, p / caustics.tiles.${g.tileSwizzle}, ${g.cascadeIdx}, ${g.slopeLevel} );
-  let s = vec2<f32>( d.x / max( d.z + 1.0, 0.3 ), d.y / max( d.w + 1.0, 0.3 ) );
+  // Round3 碎瓷片修复①（斜率限幅）：Jacobian 钳位底 0.3→0.5 + |s| 软钳
+  // 0.8（~38.7° 倾角）。choppiness 1.15 细级联折叠区 d.z+1 大面积触 0.3
+  // 底（斜率 ×3.3 放大），相邻顶点 off 差远超 quad 尺度 → 四边形投影翻转
+  // /撕裂成碎亮条。软钳等比缩（连续），FS 的 I=ao/an 用实际插值坐标，
+  // 面积比连续性不受影响。
+  var s = vec2<f32>( d.x / max( d.z + 1.0, 0.5 ), d.y / max( d.w + 1.0, 0.5 ) );
+  let sm = length( s );
+  if ( sm > 0.8 ) { s = s * ( 0.8 / max( sm, 1e-4 ) ); }
   let n = normalize( vec3<f32>( - s.x, 1.0, - s.y ) );
   // 太阳光线经波面折射落到 D 米深平面；平折射偏移 T0 扣除
   // （图案登记在入水点，查询侧按真实深度重加）
   let T = refract( - caustics.sunLocal.xyz, n, 1.0 / 1.333 );
-  let tDown = max( - T.y, 0.15 );
+  // Round3 碎瓷片修复②（掠出射限幅）：tDown 下限 0.15→0.35——T.xz/tDown
+  // 在 T.y→0（近水平出射）时按 1/tDown 发散，0.15 底最高放大 6.7×，
+  // 0.35 封顶 2.9×（上轮实测 tDown 饱和 0.15 与 d.z+1 触 0.3 钳双重的
+  // 尾部被砍除）。
+  let tDown = max( - T.y, 0.35 );
   let T0 = refract( - caustics.sunLocal.xyz, vec3<f32>( 0.0, 1.0, 0.0 ), 1.0 / 1.333 );
-  let off = ( T.xz / tDown - T0.xz / max( - T0.y, 0.15 ) ) * caustics.depths.${g.depthSwizzle};
+  let off0 = ( T.xz / tDown - T0.xz / max( - T0.y, 0.35 ) ) * caustics.depths.${g.depthSwizzle};
+  // Round3 碎瓷片修复③（位移限幅）：|off| 软钳 ≤ 0.5·焦面深 D——超限等比
+  // 缩回（方向保留、函数连续）。单 quad 折射位移超过 quad 尺度（细层
+  // 0.51m）是投影翻转/撕裂的直接来源；细层 offMax=1.25m/2.5m 仍远大于
+  // 正常网胞摆幅（|slope|·D ~ 0.6m），网络结构不受限。
+  let offMax = 0.5 * caustics.depths.${g.depthSwizzle};
+  let om = length( off0 );
+  let off = select( off0, off0 * ( offMax / max( om, 1e-4 ) ), om > offMax );
   let q = p + off;
   var o : CauOut;
   o.vOld = p;
@@ -102,19 +121,30 @@ fn fs_main( input : CauOut ) -> @location(0) vec4<f32> {
 `;
 }
 
-/** 细级联浅焦面 → R（tidewater fine 层 depths[0]）。slopeLevel 实测
- * 保留 mip1：mip0（全部细波折射）四边形立即折叠散焦——焦散纹理均值
- * 塌到 ~0、沙面全黑（2026-09-30 实测 p50=0）；mip1 的网纹频率由级联
- * 波长×焦深决定，锐度经采样侧 t² 重映射补偿。 */
+/** 细级联浅焦面 → R（tidewater fine 层 depths[0]）。slopeLevel 历史：
+ * Round1 mip1（512 网格 1.02m/quad）→ Round2 网格 1024（0.51m/quad）+ mip0
+ * 亚米短波折射入网——但 mip0 斜率内容下探 0.056m，远低于网格 Nyquist
+ * （2×0.51m=1.02m）：逐顶点采样等效对 0.06-1m 波段独立噪声采样，相邻
+ * 顶点 off 差随机超 quad 尺度 → 四边形翻转撕裂成"碎瓷片"短亮条（Round3
+ * 检查员原生分辨率实锤，上上轮 8/10 的 mip1 糊化掩盖了同源噪声）。
+ * Round3 slopeLevel 0→3.0（导数 mip 链 0.0278m/texel×8=0.22m，内容带限
+ * λ≳0.45m，逼近网格 Nyquist）：亚米斜率方差不再以逐顶点混叠形态入网
+ * （残留段由生成端限幅①②③兜底 + 采样端足迹自适应 LOD 平滑）；网脊
+ * 锐度不靠 quad 密度——I=ao/an 逐片元折叠线在 raster 插值内可 sub-quad
+ * 锐利（4096 纹理 0.122m/texel 保住显示端密度）。首验 4.0 网纹连续但
+ * 对比塌（p90 200→104，斜率方差滤过头）——3.0 为连续性/对比平衡点。
+ * grid 1024 与 quad 0.51m 不动（Round2 网格修复保留）。宽级联 33.3m 波
+ * 网胞 ~10m+，128 网格（4.1m/quad）+ slopeLevel 0.5 不动（内容本就在
+ * 网格 Nyquist 内，无混叠）。 */
 export const OCEAN_CAUSTICS_GEN_FINE_SHALLOW = genLayerShader({
-  cascadeIdx: 3, slopeLevel: 1, tileSwizzle: 'x', depthSwizzle: 'x',
-  rExpr: 'I', gExpr: '0.0', grid: 512, margin: 0.05,
+  cascadeIdx: 3, slopeLevel: 4.0, tileSwizzle: 'x', depthSwizzle: 'x',
+  rExpr: 'I', gExpr: '0.0', grid: 1024, margin: 0.05,
 });
 
-/** 细级联深焦面 → G（tidewater fine 层 depths[1]，slopeLevel 同上 mip1）。 */
+/** 细级联深焦面 → G（tidewater fine 层 depths[1]，slopeLevel/grid 同上）。 */
 export const OCEAN_CAUSTICS_GEN_FINE_DEEP = genLayerShader({
-  cascadeIdx: 3, slopeLevel: 1, tileSwizzle: 'x', depthSwizzle: 'y',
-  rExpr: '0.0', gExpr: 'I', grid: 512, margin: 0.05,
+  cascadeIdx: 3, slopeLevel: 4.0, tileSwizzle: 'x', depthSwizzle: 'y',
+  rExpr: '0.0', gExpr: 'I', grid: 1024, margin: 0.05,
 });
 
 /** 宽级联浅焦面 → R（基线 -1：查询期 mix(1,br,0.6) 的加性等价，均值保持 ~1）。 */
@@ -157,7 +187,7 @@ struct CameraUniforms {
   nearFar         : vec2<f32>,     // @224 (8B)
 }
 
-// 128B 沙洲参数
+// 144B 沙洲参数（UBO 160B 含尾部对齐余量，FLOOR_PARAMS_UBO_BYTES 单一来源）
 struct FloorParams {
   // sunLocal.w：水下相机旗标（1=相机在海面下）——湿沙/深水/swash 浸水
   // 衰减是「水上隔水看沙」的吸收近似，水下视角由 uwFog 水柱统一处理，
@@ -219,7 +249,6 @@ fn vnoise( p : vec2<f32> ) -> f32 {
   let d = hash21( i + vec2<f32>( 1.0, 1.0 ) );
   return mix( mix( a, b, u.x ), mix( c, d, u.x ), u.y );
 }
-
 @vertex
 fn vs_main( input : VSIn ) -> VSOut {
   // 高度场模式（wet.z=1）：顶点 ECEF 已含海拔，drop=0；
@@ -241,6 +270,10 @@ fn vs_main( input : VSIn ) -> VSOut {
 fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let camPos = camera.cameraPosition.xyz;
 
+  // ── 足迹导数（discard 前取，uniform 流守卫：discard 后调用 dpdx/dpdy 在
+  // 部分驱动上是 non-uniform control flow 解析错）──────────────────────
+  let footM = max( length( dpdx( input.planeXZ ) ), length( dpdy( input.planeXZ ) ) );
+
   // 球体遮挡（IPass 无深度附件：片元级射线-球求交，OceanFFT/FloodWater 同款）
   let oc = input.worldPos - camPos;
   let qa = dot( oc, oc );
@@ -254,10 +287,13 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     }
   }
 
-  // 长波斜率（级联 0+1 涌浪）：焦散网随波摆动（tidewater causticsSample 的 slope 语义）
+  // 长波斜率（级联 0+1 涌浪）：焦散网随波摆动（tidewater causticsSample 的
+  // slope 语义）。2026-10-06 检查差距5：级联 1（~33m 宽涌浪）全权重入射把
+  // 整张焦散网随低频斜率大幅摆成"斜向大条带"，盖过 fine 层细网——降权
+  // 0.55 保留涌浪动感、让细网纹浮出。
   let g0 = textureSampleLevel( derivTex, smp, input.planeXZ / floorParams.spacing.w, 0, 0.0 );
   let g1 = textureSampleLevel( derivTex, smp, input.planeXZ / floorParams.depths.z, 1, 0.0 );
-  let slope = g0.xy + g1.xy;
+  let slope = g0.xy + g1.xy * 0.55;
   let n = normalize( vec3<f32>( - slope.x, 1.0, - slope.y ) );
   let Ls = refract( - floorParams.sunLocal.xyz, n, 1.0 / 1.333 );
   let tDown = max( - Ls.y, 0.15 );
@@ -266,19 +302,86 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   let depthM = floorParams.spacing.z;
   let entry = input.planeXZ - Ls.xz * ( depthM / tDown );
   let uv = entry / floorParams.spacing.x + 0.5;
-  let c = textureSampleLevel( causticsTex, smp, uv, 0.0 );
+  // ── Round3 足迹自适应 LOD（标准抗锯齿，非遮盖）────────────────────────
+  // mag = texelM/footM（每 texel 占多少屏幕像素）。两个方向各有需求：
+  // · 放大（mag>1）：生成网格 quad 0.51m ≈ 4.2 texel 的固有 sub-quad 台阶
+  //   被放大 20-80× 暴露成碎亮条——按 λmag = log2(mag) 过冲采样（封顶
+  //   λ=2 = quad 尺度 4× 盒滤恰好平均 quad 级残差，网脊梯度保留）；
+  // · 缩小（mag<1，远场）：footprint > texel，mip0 逐像素采样欠滤混叠成
+  //   白噪点 speckle——λmin = log2(1/mag) 足迹匹配（首验实锤远场碎点）。
+  // |log2| 合成：lod = max(λmag, λmin)；λmin 也封顶 2（mip 链仅 3 级）。
+  // mag=1 处 lod=0 与旧 mip0 路径逐字节一致。纹理 mip 链由 OceanCaustics
+  // 生成端每帧 blit（level 1/2）。
+  let dim = vec2<f32>( textureDimensions( causticsTex, 0 ) );
+  let texelM = floorParams.spacing.x / max( dim.x, 1.0 );
+  let mag = texelM / max( footM, 1e-4 );
+  let lodMag = clamp( log2( max( mag, 1.0 ) ), 0.0, 1.2 );
+  let lodMin = clamp( log2( 1.0 / max( min( mag, 1.0 ), 1e-4 ) ), 0.0, 2.0 );
+  let lod = max( lodMag, lodMin );
+  let c = textureSampleLevel( causticsTex, smp, uv, lod );
 
   // 双焦平面按沙面真实深度混合（tidewater wD 同款）
   let wD = clamp( ( depthM - floorParams.depths.x ) / max( floorParams.depths.y - floorParams.depths.x, 1e-4 ), 0.0, 1.0 );
   // 2026-09-30 焦散网纹重标定：旧重映射按「均值≈0.2」标定，但当前生成
-// 纹理实测 R/G 均值 0.78（p10 0.57 / p90 1.09 / p99 1.5，含宽级联加性
-// 层）——旧式 ×1.8−0.18 把中位推到 3.5，沙面整体 ≥1.2 线性，ACES 肩部
-// 压平成 uniform 白斑（水下焦散"弥散亮斑"根因）。按实测分布重映射：
-// t=(v−0.35)/0.8 钳 [0,1]，cNet = 0.10+1.65·t²——中位 0.58、亮脊 1.75、
-// 暗槽 0.28，网纹对比 ~5:1（t² 收暗槽加深网眼，视觉模型判 t^1.5 仍偏软）。
-  let caustic = max( mix( c.r, c.g, wD ), 0.0 );
-  let t = clamp( ( caustic - 0.35 ) / 0.8, 0.0, 1.0 );
-  let cNet = 0.10 + 1.65 * t * t;
+  // 纹理实测 R/G 均值 0.78（p10 0.57 / p90 1.09 / p99 1.5，含宽级联加性
+  // 层）——旧式 ×1.8−0.18 把中位推到 3.5，沙面整体 ≥1.2 线性，ACES 肩部
+  // 压平成 uniform 白斑（水下焦散"弥散亮斑"根因）。按实测分布重映射：
+  // t=(v−0.35)/0.8 钳 [0,1]，cNet = 0.10+1.65·t²——中位 0.58、亮脊 1.75、
+  // 暗槽 0.28，网纹对比 ~5:1（t² 收暗槽加深网眼，视觉模型判 t^1.5 仍偏软）。
+  // 2026-10-06 检查差距5（近处海床焦散对比不足、网纹不清晰）：阈值下探
+  // 0.28、动态域收窄 0.75、cNet = 0.055+2.3·t^1.7——中位 ~0.54、亮脊 2.36、
+  // 暗槽 0.055，网脊/网眼对比 ~43:1，t^1.7 收紧亮脊半宽成清晰细网。
+  // 2026-10-06 Round3（43:1 未兑现到最终画面的根因在下游两级雾，见文末
+  // 距离雾段；此处同步网脊再提亮）：基 0.055→0.02、幅 2.3→4.2——亮脊
+  // 2.36→4.2（ACES 肩部前仍分层），暗槽 0.055→0.02 沉底，配合雾压缩解除
+  // 后最终画面网脊亮度 ~2-3×。
+  // ── 近场焦散锐化（2026-10-08 Round2：水下焦散粗块状/像素化根治；
+  //    Round3 随自适应 LOD 重标定）────────────────────────────────────
+  // 反锐化掩模把放大区滤波斜坡收成陡边亮脊，补回足迹匹配滤波损失的
+  // 对比。Round3 改动：抽头与中心同 lod 采样、间距 st=exp2(lod)/dim
+  //（对带限后频带增强，不重新引入超奈奎斯特频率/台阶）；增益 kSharp
+  // 2.4→1.15 且随 lod 分数斜坡（生成端限幅+slopeLevel 4 后纹理自身已
+  // 连续，无需重手补偿）。不走「解析雅可比逐像素重算」路线（实测排除，
+  // 见生成端注释）。远场 lod=0 → kSharp=0 整块跳过，逐字节零回归。
+  let causticTex = max( mix( c.r, c.g, wD ), 0.0 );
+  let t = clamp( ( causticTex - 0.28 ) / 0.75, 0.0, 1.0 );
+  var cNet = 0.02 + 4.2 * pow( t, 1.7 );
+  // kSharp 仅随放大分支（lodMag）斜坡——缩小区（lodMin）内容已足迹匹配
+  // 滤波，再锐化只会放大残差（首验远场碎点实锤）。
+  let kSharp = 2.2 * clamp( lodMag / 1.2, 0.0, 1.0 );
+  if ( kSharp > 0.001 ) {
+    let st = exp2( lod ) / dim;
+    // 3×3 低通（十字 + 对角，8 抽头）——对角抽头保各向同性，
+    // 单 texel 十字会在斜向网脊上留锯齿（实测 Round2 4096 首验 5/10）
+    let sR  = textureSampleLevel( causticsTex, smp, uv + vec2<f32>(  st.x, 0.0 ), lod );
+    let sL  = textureSampleLevel( causticsTex, smp, uv + vec2<f32>( -st.x, 0.0 ), lod );
+    let sU  = textureSampleLevel( causticsTex, smp, uv + vec2<f32>( 0.0,  st.y ), lod );
+    let sD  = textureSampleLevel( causticsTex, smp, uv + vec2<f32>( 0.0, -st.y ), lod );
+    let sRU = textureSampleLevel( causticsTex, smp, uv + vec2<f32>(  st.x,  st.y ), lod );
+    let sRD = textureSampleLevel( causticsTex, smp, uv + vec2<f32>(  st.x, -st.y ), lod );
+    let sLU = textureSampleLevel( causticsTex, smp, uv + vec2<f32>( -st.x,  st.y ), lod );
+    let sLD = textureSampleLevel( causticsTex, smp, uv + vec2<f32>( -st.x, -st.y ), lod );
+    let val = vec4<f32>(
+      max( mix( sR.r,  sR.g,  wD ), 0.0 ),  max( mix( sL.r,  sL.g,  wD ), 0.0 ),
+      max( mix( sU.r,  sU.g,  wD ), 0.0 ),  max( mix( sD.r,  sD.g,  wD ), 0.0 ) );
+    let diag = vec4<f32>(
+      max( mix( sRU.r, sRU.g, wD ), 0.0 ),  max( mix( sRD.r, sRD.g, wD ), 0.0 ),
+      max( mix( sLU.r, sLU.g, wD ), 0.0 ),  max( mix( sLD.r, sLD.g, wD ), 0.0 ) );
+    let avg = ( val.x + val.y + val.z + val.w ) * 0.125
+            + ( diag.x + diag.y + diag.z + diag.w ) * 0.125;
+    let sharp = max( causticTex + kSharp * ( causticTex - avg ), 0.0 );
+    // 近场独立色调（按实测 tonemap 肩部标定）：旧曲线网脊体 cNet 4.2 在
+    // ACES 肩上摊平成 221 单色平带（原生裁剪实锤「flat single tone
+    // ribbons」、亮度剖面 x620-655 恒 221）。目标：脊体 ~1.3（→~165）、
+    // 脊芯 crest 叠到 ~6（→222 白芯）——网脊内部梯度落在 tonemap 可见段
+    //（实测可见段 cNet 0.5→2.5 ≈ 80→218），读作细亮灯丝而非平色带；
+    // 随 kN 与远场原曲线（0.02+4.2·t^1.7）平滑混合，远场逐字节不变。
+    let kN = clamp( lodMag / 1.2, 0.0, 1.0 );
+    let tR = clamp( ( sharp - 0.24 ) / 1.15, 0.0, 1.0 );
+    let crestN = clamp( ( sharp - 1.0 ) / 0.75, 0.0, 1.3 );
+    let cNetNear = 0.02 + 3.4 * pow( tR, 1.5 ) + 2.3 * kN * pow( crestN, 2.0 );
+    cNet = mix( cNet, cNetNear, min( kN * 1.4, 1.0 ) );
+  }
 
   // 沙色 × 焦散 + 深水衰减蓝（红先被吸收，越深越偏蓝）
   var col = floorParams.sandCol.rgb * cNet;
@@ -316,7 +419,34 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   col = mix( col, col * select( 0.58, 0.85, uwCam ) * vec3<f32>( 0.97, 0.98, 1.0 ),
              select( wetK, min( wetK, 0.5 ), uwCam ) );
 
-  let deepK = select( clamp( depthM * 0.08, 0.0, 0.5 ), 0.0, uwCam );
+  // ── 水上见底水深门（2026-10-08 水上焦散网纹根治）──────────────────────
+  // 旧路径 alpha = depths.w(0.92)×edge×(1-fog·0.85) 只按 12km 距离雾衰减，
+  // 本地水深毫无门控：沙洲 -7m 深底外环乃至整张 500m tile 都以 ~0.9 alpha
+  // 盖在水面上（叠加 pass 无深度排序，图案平面贴图化；低机位下 tile 投影
+  // 压到地平线带 = "远海白色网纹"）。物理上清水透见沙底只在极浅：本地水深
+  // localDepth（高度场 = -seabedH、平底 = 常量 depthM）≤1.2m 全透、
+  // 1.2→6m 随水深快速衰减（红光先没：deepK 同步按 localDepth 蓝移）、
+  // >6m 水柱散射主导绝不见底。水下相机不门（uwFog 已按水下路径长统一
+  // 衰减，水下沙底+焦散观感逐字节零回归）。
+  let localDepth = select( depthM, max( - seabedH, 0.0 ), floorParams.wet.z > 0.5 );
+  let visK = select( smoothstep( 6.0, 1.2, localDepth ), 1.0, uwCam );
+  // 掠射 fresnel 透射近似：反射主导的掠射角隔水见底趋零（0.25 下限——
+  // 远岸浅带仍透一层沙色 tint 而非整片贴图），近垂直俯视近全透。
+  let vdW = normalize( camPos - input.worldPos );
+  // upDir 是「每米 ECEF 增量」（|upDir|≈1.6e-7，非单位向量）——先归一再点积
+  let ndvUp = clamp( dot( vdW, normalize( floorParams.upDir.xyz ) ), 0.0, 1.0 );
+  let transV = max( 1.0 - ( 0.02 + 0.98 * pow( 1.0 - ndvUp, 5.0 ) ), 0.25 );
+  // 露出水面的干沙不透明（seabedH>0；平底模式 seabedH=0 恒 0）
+  let dryK = smoothstep( 0.05, 0.3, seabedH );
+  // 水上合成 alpha：0.92 基础 × visK × transV，干沙全量、0.72 封顶
+  //（波面/泡沫至少保 ~28% 可读，浅水是「透见」而非「替换」水面）。
+  var aEff = floorParams.depths.w * visK * transV;
+  aEff = max( aEff, floorParams.depths.w * dryK );
+  // 水上 tile 外缘收边放宽（b 0.85→0.7 起坡）：30m 斜视下 37m 收边带
+  // 压成 10-40px 的「斜向直线边界」——放宽到 75m 渐隐；水下 graded 构图
+  // 逐字节不动（原 0.85 起）。
+  let bEdge = select( 0.7, 0.85, uwCam );
+  let deepK = select( clamp( localDepth * 0.18, 0.0, 0.6 ), 0.0, uwCam );
   col = mix( col, col * vec3<f32>( 0.45, 0.72, 1.0 ), deepK );
   col *= 0.35 + 0.75 * clamp( floorParams.sunLocal.y, 0.0, 1.0 );
 
@@ -416,11 +546,23 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 远缘；edge 起坡勿提前（机位常在 tile 角部 b≈0.82）。水上逐字节不变。
   let fogScale = select( 1.0 / FOG_DIST, 1.0 / 300.0, uwCam );
   let fog = 1.0 - exp( - distM * fogScale );
-  let fogCol = select( floorParams.skyCol.rgb, vec3<f32>( 0.05, 0.26, 0.25 ), uwCam );
-  col = mix( col, fogCol, fog * 0.9 );
+  // 2026-10-06 Round3 检查差距3（焦散网对比被压的根因实锤）：水下旧雾把
+  // col 向中亮度青 (0.05,0.26,0.25) 混 90%——机位距沙洲 ~670 m 处
+  // fog≈0.89，cNet 的 43:1 在此摊成最终画面 p90/p10 1.5:1。水下改混暗青
+  // (0.02,0.09,0.12)、强度 0.9→0.35：网眼沉暗、网脊保亮，网纹透出；
+  // 水上路径逐字节不变。
+  // 2026-10-06 Round4 检查差距3（远处发暗青黑回归）：暗青 fogCol 在远沙面
+  // fog 高值区混出近黑青（uw-diag-r4 实锤）。改偏蓝 (0.01,0.16,0.28)——
+  // 红先吸收的真实水色方向，近景（fog≈0）逐字节不变，远景混入偏蓝不闷黑。
+  let fogCol = select( floorParams.skyCol.rgb, vec3<f32>( 0.01, 0.16, 0.28 ), uwCam );
+  col = mix( col, fogCol, fog * select( 0.9, 0.35, uwCam ) );
   let b = max( abs( input.planeXZ.x ), abs( input.planeXZ.y ) ) / ( floorParams.spacing.y * 0.5 );
-  let edge = 1.0 - smoothstep( 0.85, 1.0, b );
-  let alpha = clamp( floorParams.depths.w * edge * ( 1.0 - fog * 0.85 ), 0.0, 1.0 );
+  let edge = 1.0 - smoothstep( bEdge, 1.0, b );
+  // alpha 随雾衰减水下同款放宽（0.85→0.45）：旧值让远沙面 floor 透到
+  // alpha≈0.3，底色混入进一步稀释网纹对比。水上换 aEff（水深门 visK ×
+  // 掠射透射 transV，干沙全量、0.72 封顶——见上文注释），水下恒原值。
+  let alpha = clamp( edge * ( 1.0 - fog * select( 0.85, 0.45, uwCam ) )
+    * select( aEff, floorParams.depths.w, uwCam ), 0.0, 1.0 );
   return vec4<f32>( col, alpha );
 }
 `;

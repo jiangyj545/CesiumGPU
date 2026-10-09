@@ -3,6 +3,10 @@ node_modules/
 
 # Build output
 dist/
+dist-lib/
+
+# bun lockfile (project uses npm / package-lock.json)
+bun.lock
 
 # TypeScript cache
 *.tsbuildinfo

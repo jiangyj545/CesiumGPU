@@ -174,6 +174,10 @@ export class Scene {
   /** Screen-space entity billboards (points, labels). */
   private _overlayPass: OverlayPass | null = null;
   private _entityVisualizer: EntityVisualizer | null = null;
+  /** P2-5：动态实体推进的去重时间戳（updateDynamicEntities 幂等）。 */
+  private _lastDynamicTime = -1;
+  /** P2-5：Viewer RenderScheduler 挂接的 requestRender 钩子。 */
+  private _requestRenderHook: (() => void) | null = null;
 
   private _prepared = false;
   private _initPromise: Promise<void> | null = null;
@@ -196,8 +200,36 @@ export class Scene {
       direction:        [0.5, -0.3, -0.8],
       color:            [1.0, 0.98, 0.9],
       intensity:        1.2,
+
       ambientIntensity: 0.08,
     }));
+  }
+
+  /**
+   * P2-5 requestRenderMode：每帧一次的动态实体推进（CallbackProperty /
+   * model / path / cylinder）。幂等——同一 `nowSec` 只跑一次；`render()`
+   * 内部同帧调用不会重复采样（path 历史等按帧推进的状态不受影响）。
+   *
+   * @returns 自上次消费以来可视化层是否发生变化（按需渲染的脏源）。
+   */
+  updateDynamicEntities(nowSec: number): boolean {
+    if (nowSec === this._lastDynamicTime) return false;
+    this._lastDynamicTime = nowSec;
+    this._entityVisualizer?.update(nowSec);
+    return this._entityVisualizer?.consumeChange() ?? false;
+  }
+
+  /**
+   * 显式请求渲染下一帧（Cesium `scene.requestRender` 等价）。钩子由
+   * Viewer 的 RenderScheduler 提供；未挂接（无 Viewer 场景）时 no-op。
+   */
+  requestRender(): void {
+    this._requestRenderHook?.();
+  }
+
+  /** P2-5：Viewer 注册的 requestRender 钩子。 */
+  setRequestRenderHook(hook: (() => void) | null): void {
+    this._requestRenderHook = hook;
   }
 
   /**
@@ -283,12 +315,17 @@ export class Scene {
 
       // Entity layer: screen-space billboards + polygon/polyline bridging.
       // Created last so host pipelines are ready for any pre-added entities.
-      // 第 4 参 = _sceneColorFormat；LDR 切换经 setTargetFormat。
+      // 第 4 参 = _sceneColorFormat；LDR 切换经 setTargetFormat；第 5 参 =
+      // 地形采样（P2-4 HeightReference），terrainLayer 挂载前后均可取到。
       this._overlayPass = new OverlayPass(
         this._context,
         this.entities,
         this._gbufferPass,
-        this._sceneColorFormat
+        this._sceneColorFormat,
+        {
+          sampleHeight: (lon, lat) =>
+            this.globe.terrainLayer?.sampleHeight(lon, lat) ?? 0,
+        }
       );
       this._overlayPass.prepare();
       this._entityVisualizer = new EntityVisualizer(this._context, this.entities, this);
@@ -419,6 +456,11 @@ export class Scene {
     // ── Pass loop: gbuffer → lighting → overlay → transparent ─────────────
     const swapChainView = ctx.getCurrentTextureView();
     const time = performance.now() / 1000;
+    // Dynamic Entity properties (CallbackProperty positions / model / path):
+    // poll + advance before any pass consumes the scene state.
+    //（P2-5：经 updateDynamicEntities 幂等入口——requestRenderMode 下 Viewer
+    // 在渲染决策前先行推进并读取脏标记，渲染帧内同 time 不会双跑。）
+    this.updateDynamicEntities(time);
 
     // ── P2 后处理 target 分叉（唯一回归敏感点）─────────────────────────────
     // enabled=false：target === swapChainView，后续所有调用与旧路径完全一致；
@@ -566,8 +608,26 @@ export class Scene {
     return this._gbufferPass?.getDepthTexture() ?? null;
   }
 
+  /**
+   * CSS-pixel viewport height (falls back to the device buffer when the
+   * canvas is not laid out) — consumed by `EntityVisualizer` for
+   * `model.minimumPixelSize` scaling.
+   */
+  get viewportHeightPx(): number {
+    const canvas = this._context.canvas;
+    return canvas.clientHeight || this._height;
+  }
+
   /** The WebGPU context (null-safe only after Viewer.initialize()). */
   get context(): Context { return this._context; }
+
+  /**
+   * Terrain height sampler handed to EntityVisualizer (P2-4
+   * HeightReference); returns 0 while no terrain layer is attached.
+   */
+  get sampleTerrainHeight(): (lon: number, lat: number) => number {
+    return (lon, lat) => this.globe.terrainLayer?.sampleHeight(lon, lat) ?? 0;
+  }
 
   /**
    * 场景颜色历史视图（B1 折射数据源）。仅 postProcess.enabled 时非 null；
