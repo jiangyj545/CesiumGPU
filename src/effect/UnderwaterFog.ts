@@ -16,11 +16,8 @@ import { UNDERWATER_FOG_SHADER } from '../shaders/UnderwaterFogShader';
  *   2. 浮动颗粒/光斑 —— 两层屏幕空间 hash 点阵缓漂 + 两层正弦波纹相乘的焦散
  *      缓动（呼应 OceanCaustics 观感，独立实现、零纹理采样）；
  *   3. 边缘暗角 + 轻微色偏青 —— 水下通透感；
- *   4. 体积焦散光柱（Track G 联动，tidewater src/post/Underwater.js
- *      _shaftCode 同法）—— sunShaftIntensity > 0 且已 bindCaustics 时，
- *      FS 沿视线 20 步 march 采样 OceanCaustics 真焦散纹理，光柱随
- *      焦散网/波浪摆动（默认 0 关闭零 march 零回归），与屏幕空间
- *      god rays（PostProcessManager.godRays）叠加。
+ *   4. 水下太阳光柱 —— sunShaftIntensity > 0 时启用（Track G 联动，默认 0
+ *      关闭零回归），与屏幕空间 god rays（PostProcessManager.godRays）叠加。
  *
  * 独立性：不依赖 OceanFFT/OceanCaustics 任何符号；bind group 含相机/参数
  * UBO + G-Buffer worldPos 纹理（距离衰减雾，可选绑定）。
@@ -64,26 +61,8 @@ export interface UnderwaterFogOptions {
   seabedDepthM?: number;
 }
 
-/** 参数 UBO：9 x vec4 = 144 字节（布局见 UnderwaterFogShader 的 UWParams）。 */
-const PARAMS_BYTES = 144;
-
-/** 体积焦散光柱的焦散源描述（OceanCaustics 实例的绑定视图 + ENU 基）。 */
-export interface UnderwaterCausticsSource {
-  /** 焦散纹理 view getter（惰性——纹理在 prepare 后才存在，逐帧取最新身份）。 */
-  view: () => GPUTextureView | null;
-  /** 焦散覆盖域边长（米；<= 0 视为未绑定，光柱关闭）。 */
-  coverMeters: number;
-  /** 焦散域中心（归一化 ECEF [x,y,z]，march 局部 ENU 系原点）。 */
-  centerEcef: [number, number, number];
-  /** ENU 基（归一化 ECEF 向量）。 */
-  eastEcef: [number, number, number];
-  upEcef: [number, number, number];
-  northEcef: [number, number, number];
-  /** 浅焦面深度（米，纹理 R 通道）。 */
-  shallowDepthM: number;
-  /** 深焦面深度（米，纹理 G 通道）。 */
-  deepDepthM: number;
-}
+/** 参数 UBO：4 x vec4 = 64 字节（布局见 UnderwaterFogShader 的 UWParams）。 */
+const PARAMS_BYTES = 64;
 
 const DEFAULT_WATER_COLOR: [number, number, number] = [0.05, 0.22, 0.30];
 
@@ -123,14 +102,6 @@ export class UnderwaterFog implements IPass {
   /** 当前 BG 里绑定的场景位置 view（身份缓存，防逐帧重建 bind group）。 */
   private _boundScenePos: GPUTextureView | null = null;
   private _failed = false;
-  /** 体积焦散光柱的焦散源（null = 未绑定，光柱关闭零回归）。 */
-  private _causticsSource: UnderwaterCausticsSource | null = null;
-  /** 1×1 rgba16float 零纹理 + 过滤采样器（焦散未绑定的 BGL 占位；march 被 cover>0 uniform 门控不会读）。 */
-  private _causticsFallbackTex: GPUTexture | null = null;
-  private _causticsFallbackView: GPUTextureView | null = null;
-  private _causticsSampler: GPUSampler | null = null;
-  /** 当前 BG 里绑定的焦散 view（身份缓存，防逐帧重建 bind group）。 */
-  private _boundCaustics: GPUTextureView | null = null;
   private _destroyed = false;
   /** T5 真 HDR：场景目标格式（null = 未下发跟随 preferredFormat 旧行为）。 */
   private _targetFormat: GPUTextureFormat | null = null;
@@ -177,14 +148,6 @@ export class UnderwaterFog implements IPass {
     this._sunShaftIntensity = v;
   }
 
-  /**
-   * 绑定/解绑体积焦散光柱的焦散源（OceanCaustics 实例）。null 或
-   * coverMeters<=0 → 光柱关闭（shader 端 cCenter.w=0 uniform 门控，零 march）。
-   */
-  bindCaustics(source: UnderwaterCausticsSource | null): void {
-    this._causticsSource = source && source.coverMeters > 0 ? source : null;
-  }
-
   /** 当前水下太阳光柱强度。 */
   get sunShaftIntensity(): number {
     return this._sunShaftIntensity;
@@ -208,7 +171,6 @@ export class UnderwaterFog implements IPass {
     this._cameraUBO?.destroy();
     this._paramsUBO?.destroy();
     this._fallbackTex?.destroy();
-    this._causticsFallbackTex?.destroy();
     this._pipeline = null;
     this._bindGroup = null;
     this._bindGroupLayout = null;
@@ -216,10 +178,7 @@ export class UnderwaterFog implements IPass {
     this._paramsUBO = null;
     this._fallbackTex = null;   // prepare() 会重建全套（含 fallback）
     this._fallbackView = null;
-    this._causticsFallbackTex = null;
-    this._causticsFallbackView = null;
     this._boundScenePos = null;
-    this._boundCaustics = null;
   }
 
   /** 幂等初始化（管线 / BGL / UBO / bindGroup）。失败置 _failed 闸禁用整效果。 */
@@ -248,27 +207,7 @@ export class UnderwaterFog implements IPass {
         // textureSampleLevel，深度值无需滤波）
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } },
-        // 体积焦散光柱：真焦散纹理（rgba16float 可过滤）+ 三线性采样器
-        { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-        { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       ],
-    });
-
-    // 焦散 1×1 零纹理占位（march 被 cCenter.w>0 uniform 门控，未绑定时不会被读）
-    this._causticsFallbackTex = device.createTexture({
-      label: `${this.label}.CausticsFallback`,
-      size: [1, 1],
-      format: 'rgba16float',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-    this._causticsFallbackView = this._causticsFallbackTex.createView();
-    this._causticsSampler = device.createSampler({
-      label: `${this.label}.CausticsSampler`,
-      addressModeU: 'repeat',
-      addressModeV: 'repeat',
-      magFilter: 'linear',
-      minFilter: 'linear',
-      mipmapFilter: 'linear',
     });
 
     // 1×1 零纹理占位（采样值 0 → FS dist 巨大 → 全雾，语义安全）
@@ -324,8 +263,6 @@ export class UnderwaterFog implements IPass {
         { binding: 1, resource: { buffer: this._paramsUBO } },
         { binding: 2, resource: this._fallbackView! },
         { binding: 3, resource: this._posSampler! },
-        { binding: 4, resource: this._causticsFallbackView! },
-        { binding: 5, resource: this._causticsSampler! },
       ],
     });
   }
@@ -365,73 +302,51 @@ export class UnderwaterFog implements IPass {
     }
     this._context.writeBuffer(this._cameraUBO, 0, camData);
 
-  // ── 纹理源（场景位置 / 焦散）：getter 逐帧取最新身份，任一变更重建 BG ──
-  let hasScenePos = 0;
-  let hasCaustics = 0;
-  if (this._scenePosGetter) {
-    const view = this._scenePosGetter();
-    if (view) {
-      hasScenePos = 1;
-      if (view !== this._boundScenePos) this._rebuildBindGroup(view, this._boundCaustics);
+    // ── 场景位置纹理（距离衰减雾）：getter 逐帧取最新身份，变更重建 BG ──
+    let hasScenePos = 0;
+    if (this._scenePosGetter) {
+      const view = this._scenePosGetter();
+      if (view) {
+        hasScenePos = 1;
+        if (view !== this._boundScenePos && this._bindGroupLayout) {
+          this._bindGroup = this._context.device.createBindGroup({
+            label: `${this.label}.BG`,
+            layout: this._bindGroupLayout,
+            entries: [
+              { binding: 0, resource: { buffer: this._cameraUBO! } },
+              { binding: 1, resource: { buffer: this._paramsUBO! } },
+              { binding: 2, resource: view },
+              { binding: 3, resource: this._posSampler! },
+            ],
+          });
+          this._boundScenePos = view;
+        }
+      }
     }
-  }
-  // 体积焦散光柱：焦散源 getter 惰性求值（OceanCaustics 纹理在 prepare 后才有）
-  if (this._causticsSource) {
-    const cView = this._causticsSource.view();
-    if (cView) {
-      hasCaustics = 1;
-      if (cView !== this._boundCaustics) this._rebuildBindGroup(this._boundScenePos, cView);
-    }
-  }
 
-  // ── 参数 UBO：[time, intensity, density, hasScenePos] [w, h, seaR, seabed]
-  //              [rgb, _] [sunDir.xyz, sunShaftIntensity]
-  //              [cCenter.xyz, cover] [cEast.xyz, sunLocal.x]
-  //              [cUp.xyz, sunLocal.y] [cNorth.xyz, sunLocal.z]
-  //              [D0, D1, _, _]（体积焦散光柱，tidewater _shaftCode 布局）──
-  // seaR = 相机星下点海面球半径（归一化，Camera.surfaceRadius 压扁面公式，
-  // 与 GBuffer 几何同系）——FS 背景像素用它做射线-海面求交（水下路径长）。
-  const p = this._params;
-  p[0] = time;
-  p[1] = this._intensity;
-  p[2] = this._particleDensity;
-  p[3] = hasScenePos;
-  p[4] = this._context.drawingBufferWidth;
-  p[5] = this._context.drawingBufferHeight;
-  p[6] = cam ? Camera.surfaceRadius(cam.position) : 1.0;
-  p[7] = this._seabedDepthM; // viewport.w：水下俯视参考海床深（米，0=关）
-  p[8]  = this._waterColor[0];
-  p[9]  = this._waterColor[1];
-  p[10] = this._waterColor[2];
-  // 太阳方向（地球→太阳，归一化 ECEF；与 PostProcessManager.projectSun 同源约定）
-  const [dx, dy, dz] = SunPosition.computeSunDirection(JulianDate.now());
-  const sx = -dx, sy = -dy, sz = -dz;
-  p[12] = sx;
-  p[13] = sy;
-  p[14] = sz;
-  p[15] = this._sunShaftIntensity;
-  // cCenter / cEast / cUp / cNorth / cFocal（未绑定焦散源时全 0 → FS 门控关）
-  if (this._causticsSource && hasCaustics) {
-    const c = this._causticsSource;
-    p[16] = c.centerEcef[0]; p[17] = c.centerEcef[1]; p[18] = c.centerEcef[2];
-    p[19] = c.coverMeters;
-    p[20] = c.eastEcef[0];  p[21] = c.eastEcef[1];  p[22] = c.eastEcef[2];
-    p[23] = sx * c.eastEcef[0] + sy * c.eastEcef[1] + sz * c.eastEcef[2];
-    p[24] = c.upEcef[0];    p[25] = c.upEcef[1];    p[26] = c.upEcef[2];
-    p[27] = sx * c.upEcef[0] + sy * c.upEcef[1] + sz * c.upEcef[2];
-    p[28] = c.northEcef[0]; p[29] = c.northEcef[1]; p[30] = c.northEcef[2];
-    p[31] = sx * c.northEcef[0] + sy * c.northEcef[1] + sz * c.northEcef[2];
-    p[32] = c.shallowDepthM;
-    p[33] = c.deepDepthM;
-  } else {
-    p[16] = 0; p[17] = 0; p[18] = 0; p[19] = 0;   // cCenter.w = 0 → 光柱关
-    p[20] = 0; p[21] = 0; p[22] = 0; p[23] = 0;
-    p[24] = 0; p[25] = 0; p[26] = 0; p[27] = 0;
-    p[28] = 0; p[29] = 0; p[30] = 0; p[31] = 0;
-    p[32] = 0; p[33] = 0;
-  }
-  p[34] = 0; p[35] = 0; // cFocal.zw 未用（补齐 144 B）
-  this._context.writeBuffer(this._paramsUBO, 0, p);
+    // ── 参数 UBO：[time, intensity, density, hasScenePos] [w, h, seaR, _]
+    //              [rgb, _] [sunDir.xyz, sunShaftIntensity]（Track G 水下光柱）──
+    // seaR = 相机星下点海面球半径（归一化，Camera.surfaceRadius 压扁面公式，
+    // 与 GBuffer 几何同系）——FS 背景像素用它做射线-海面求交（水下路径长）。
+    const p = this._params;
+    p[0] = time;
+    p[1] = this._intensity;
+    p[2] = this._particleDensity;
+    p[3] = hasScenePos;
+    p[4] = this._context.drawingBufferWidth;
+    p[5] = this._context.drawingBufferHeight;
+    p[6] = cam ? Camera.surfaceRadius(cam.position) : 1.0;
+    p[7] = this._seabedDepthM; // viewport.w：水下俯视参考海床深（米，0=关）
+    p[8]  = this._waterColor[0];
+    p[9]  = this._waterColor[1];
+    p[10] = this._waterColor[2];
+    // 太阳方向（地球→太阳，归一化 ECEF；与 PostProcessManager.projectSun 同源约定）
+    const [dx, dy, dz] = SunPosition.computeSunDirection(JulianDate.now());
+    p[12] = -dx;
+    p[13] = -dy;
+    p[14] = -dz;
+    p[15] = this._sunShaftIntensity;
+    this._context.writeBuffer(this._paramsUBO, 0, p);
 
     const pass = encoder.beginRenderPass({
       label: this.label,
@@ -448,42 +363,19 @@ export class UnderwaterFog implements IPass {
     pass.end();
   }
 
-  /** 场景位置/焦散 view 任一变更时重建 bind group（身份缓存防逐帧重建）。 */
-  private _rebuildBindGroup(scenePosView: GPUTextureView | null, causticsView: GPUTextureView | null): void {
-    if (!this._bindGroupLayout) return;
-    this._bindGroup = this._context.device.createBindGroup({
-      label: `${this.label}.BG`,
-      layout: this._bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: this._cameraUBO! } },
-        { binding: 1, resource: { buffer: this._paramsUBO! } },
-        { binding: 2, resource: scenePosView ?? this._fallbackView! },
-        { binding: 3, resource: this._posSampler! },
-        { binding: 4, resource: causticsView ?? this._causticsFallbackView! },
-        { binding: 5, resource: this._causticsSampler! },
-      ],
-    });
-    this._boundScenePos = scenePosView;
-    this._boundCaustics = causticsView;
-  }
-
   /** 释放 GPU 资源；调用后本 pass 不可再用。 */
   destroy(): void {
     this._destroyed = true;
     this._cameraUBO?.destroy();
     this._paramsUBO?.destroy();
     this._fallbackTex?.destroy();
-    this._causticsFallbackTex?.destroy();
     this._cameraUBO = null;
     this._paramsUBO = null;
     this._fallbackTex = null;
     this._fallbackView = null;
-    this._causticsFallbackTex = null;
-    this._causticsFallbackView = null;
     this._pipeline = null;
     this._bindGroup = null;
     this._bindGroupLayout = null;
     this._boundScenePos = null;
-    this._boundCaustics = null;
-}
+  }
 }

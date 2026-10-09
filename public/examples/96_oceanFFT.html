@@ -273,26 +273,14 @@
                                          // 0.2 全隐没，回调 0.28 至隐约可见）
         seabedDepthM: 5,                 // 水下俯视参考海床深（沙洲周边 4-6 m）
       });
-      uwFog.setSunShaftIntensity(1.3); // Track G：体积焦散光柱（tidewater
-                                         // Underwater.js _shaftCode 同法：视线
-                                         // march 采真焦散纹理，束状随波浪摆动；
-                                         // Round 2 LDR 域标定 K=14 后 1.3）
+      uwFog.setSunShaftIntensity(0.45); // Track G：水下太阳光柱（潜水观感）
+                                         // 1.6 过强：角向辐条 sin(ang·9) 在俯视构图里
+                                         // 铺满全屏成放射星芒（视觉模型实锤），压到微弱漏光
       // 距离衰减雾（水下应该是透明的）：G-Buffer worldPos 重建水下路径长，
       // 近处海床/沙洲/焦散透出、远处渐蓝（未绑定为均匀俯仰近似）
       uwFog.setScenePosView(() => viewer.scene.gbufferPass
         ? viewer.scene.gbufferPass.textures.worldPosView
         : null);
-      // 体积焦散光柱源：OceanCaustics 纹理 + 沙洲 ENU 基（march 局部系原点）
-      uwFog.bindCaustics({
-        view: () => caustics.causticsTexture,
-        coverMeters: caustics.coverMeters,
-        centerEcef: [breakCenter[0], breakCenter[1], breakCenter[2]],
-        eastEcef:  [sbEnu.east[0],  sbEnu.east[1],  sbEnu.east[2]],
-        upEcef:    [sbEnu.up[0],    sbEnu.up[1],    sbEnu.up[2]],
-        northEcef: [sbEnu.north[0], sbEnu.north[1], sbEnu.north[2]],
-        shallowDepthM: caustics.shallowDepthMeters,
-        deepDepthM: caustics.deepDepthMeters,
-      });
       const spray = new engine.BowSpray(context, { maxParticles: 2048, scene: viewer.scene });
       // L5/T4 岸线破碎波喷雾：发射带 = 沙洲岸线（吸附源取 ocean 的海床/位移视图）
       const breakSpray = new engine.BreakSpray(context, {
@@ -614,7 +602,7 @@
         floor.setSwash(e.target.checked ? 0.85 : 0);
       });
       document.getElementById('sunShaftToggle').addEventListener('change', (e) => {
-        uwFog.setSunShaftIntensity(e.target.checked ? 1.3 : 0);
+        uwFog.setSunShaftIntensity(e.target.checked ? 1.2 : 0);
       });
       // T-P/W/V/A 开关：卷唇破碎 / 卷云层 / 冲刷模拟 / 大气透视
       document.getElementById('peelToggle').addEventListener('change', (e) => {
@@ -665,7 +653,7 @@
         },
         setGodRays(b) { viewer.scene.postProcess.godRays.enabled = b; ck('godRaysToggle', b); },
         setSwash(b) { floor.setSwash(b ? 0.85 : 0); ck('swashToggle', b); },
-        setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 1.3 : 0); ck('sunShaftToggle', b); },
+        setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 0.45 : 0); ck('sunShaftToggle', b); },
         // ── T-P/W/V/A 探针扩展：卷唇破碎 / 卷云层 / 冲刷模拟 / 大气透视 ──
         setPeel(b) { ocean.setPeelWave(b ? PEEL : null); ck('peelToggle', b); },
         setCirrus(b) { clouds.setCirrus({ enable: b, coverage: 0.42, density: 0.55 }); ck('cirrusToggle', b); },
