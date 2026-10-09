@@ -239,7 +239,7 @@
     const seenEvKeys = new Set();        // 事件去重（near_miss 两机对称挂帧）
     const evCounts = {};
     const vehModels = new Map();         // id → Model（就绪）| null（加载中）| false（失败回退 BOX）——GLB 机标状态，demo() 内填充，__DASH.glb 诊断源
-    let sseMsgCount = 0, sseState = 'idle';
+    let sseMsgCount = 0, sseState = 'idle', badFrames = 0;
     let camMode = 'free';                // 'free' | 'follow'——默认自由（启动即定位白膜上空，2026-09-29 用户需求）
     const MAX_TRAJ_PTS = 1500, TRAJ_MIN_STEP_M = 2;
     const R_EARTH = engine.Cartesian3.EARTH_RADIUS;   // 归一化 ECEF 世界系半径（米制→单位球）
@@ -267,6 +267,7 @@
       demoOk: false, specOk: false,
       get sseState() { return sseState; },
       get sseMsgCount() { return sseMsgCount; },
+      get badFrames() { return badFrames; },   // 无效帧丢弃计数（红线防御诊断源）
       get seed() { return curSeed; },
       get simT() { const f0 = Object.values(vehiclesLatest)[0]; return f0 ? f0.sim_t_s : 0; },
       get nVehicles() { return Object.keys(vehiclesLatest).length; },
@@ -337,7 +338,12 @@
         `${SIM_URL}/stream?scenario=${encodeURIComponent(SPEC_DIR + file)}` +
         `&seed=${encodeURIComponent(seed)}`);
       es.addEventListener('frame', (ev) => {
-        const f = JSON.parse(ev.data);
+        // 无效帧红线（借鉴 WilhasonOceanMaster R9）：坏 JSON / pos_enu 缺失或非有限 →
+        // 丢弃本帧（保持上一有效帧渲染，绝不渲染 NaN 瞬移）；计数进 __DASH.badFrames
+        let f = null;
+        try { f = JSON.parse(ev.data); } catch (e) { badFrames += 1; return; }
+        const p = f && f.pos_enu;
+        if (!Array.isArray(p) || p.length < 2 || !p.every(Number.isFinite)) { badFrames += 1; return; }
         sseMsgCount += 1;
         if (sseState !== 'done') sseState = 'online';
         const vid = f.vehicle_id ?? 0;
