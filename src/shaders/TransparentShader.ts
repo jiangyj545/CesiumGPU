@@ -26,11 +26,14 @@ struct ModelUniforms {
 }
 
 struct MaterialUniforms {
-  baseColor : vec4<f32>,   // RGBA; alpha < 1 means transparent
-  roughness : f32,
-  metallic  : f32,
-  _pad0     : f32,
-  _pad1     : f32,
+  baseColor         : vec4<f32>,   // RGBA; alpha < 1 means transparent
+  roughness         : f32,
+  metallic          : f32,
+  // >0: screen-space ribbon half width in device pixels (polyline mode —
+  // position = centreline, normal = unit side vector, uv.y = edge sign).
+  // 0: ordinary world-space mesh.
+  screenHalfWidthPx : f32,
+  _pad1             : f32,
 }
 
 @group(0) @binding(0) var<uniform> camera   : CameraUniforms;
@@ -58,7 +61,26 @@ fn vs_main(in: VSIn) -> VSOut {
   out.worldPos    = worldPos4.xyz;
   out.worldNormal = normalize(worldN4.xyz);
   out.uv          = in.uv;
-  out.clipPos     = camera.viewProjMatrix * worldPos4;
+
+  if (material.screenHalfWidthPx > 0.0) {
+    // Screen-space constant pixel width (CesiumJS polyline semantics —
+    // same technique as FlowArrowShader): project the side vector to
+    // device pixels (perspective-correct — divide by this vertex's w),
+    // normalise, scale to the uniform half width and offset the clip
+    // position. The ribbon stays "width" px thick at ANY camera distance.
+    let side     = normalize(worldN4.xyz);
+    let clip     = camera.viewProjMatrix * worldPos4;
+    let sideClip = (camera.viewProjMatrix * vec4<f32>(side, 0.0)).xy;
+    let w        = max(clip.w, 1e-6);
+    let halfVp   = camera.viewportSize * 0.5;
+    let dirPx    = sideClip / w * halfVp;
+    let dirLen   = max(length(dirPx), 1e-6);
+    let offPx    = dirPx / dirLen * material.screenHalfWidthPx;
+    let sgn      = in.uv.y * 2.0 - 1.0;
+    out.clipPos  = vec4<f32>(clip.xy + sgn * offPx / halfVp * w, clip.z, clip.w);
+  } else {
+    out.clipPos  = camera.viewProjMatrix * worldPos4;
+  }
   return out;
 }
 
@@ -83,10 +105,12 @@ fn fs_accum(in: VSOut) -> FSOut {
   let alpha     = material.baseColor.a;
   let color     = material.baseColor.rgb;
 
-  // Simple diffuse lighting
-  let L      = normalize(vec3<f32>(0.5, 1.0, 0.3));
-  let NdotL  = max(dot(normalize(in.worldNormal), L), 0.0) * 0.8 + 0.2;
-  let litColor = color * NdotL;
+  // Screen-space ribbons (polylines) render unlit like CesiumJS Color
+  // materials — their normal slot carries the side vector, not a shading
+  // normal. Ordinary meshes keep the diffuse term.
+  let L       = normalize(vec3<f32>(0.5, 1.0, 0.3));
+  let NdotL   = max(dot(normalize(in.worldNormal), L), 0.0) * 0.8 + 0.2;
+  let litColor = select(color, color * NdotL, material.screenHalfWidthPx <= 0.0);
 
   // Depth used for weight (0 = near, 1 = far in clip space)
   let depth  = in.clipPos.z / in.clipPos.w;

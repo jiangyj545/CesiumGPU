@@ -35,7 +35,7 @@ export interface PolylineGraphics {
   positions?: PropertyOrValue<Cartesian3[]>;
   /** Ignore depth occlusion within this camera distance (metres; Infinity = always). */
   disableDepthTestDistance?: number;
-  /** Ribbon width in CSS pixels (visualizer 换算世界宽)。 */
+  /** Ribbon width in CSS pixels (屏幕空间恒定；visualizer 换算设备像素)。 */
   width?: number;
   color?: Color;
   /** Visibility window in metres (skip rendering outside near..far; may be a Property). */

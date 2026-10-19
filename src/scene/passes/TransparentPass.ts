@@ -306,7 +306,7 @@ export class TransparentPass implements IPass {
       label: 'Transparent.BGL1',
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
     });
 
@@ -348,7 +348,10 @@ export class TransparentPass implements IPass {
           },
         ],
       },
-      primitive:    { topology: 'triangle-list', cullMode: 'back' },
+      // Ribbons are single-sided geometry whose screen-space expansion gives
+      // view-dependent winding — culling would drop whole lines at grazing
+      // or reversed view angles.
+      primitive:    { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: { format: this._depthFormat, depthWriteEnabled: false, depthCompare: 'less' },
     };
 

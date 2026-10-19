@@ -108,12 +108,12 @@ export interface PointGraphics {
 ```typescript
 export interface PolylineGraphics {
   positions?: Cartesian3[];  // 归一化 ECEF，≥ 2 个点
-  width?: number;            // 像素宽（见下方换算说明）
+  width?: number;            // 像素宽（屏幕空间恒定，见下方说明）
   color?: Color;
 }
 ```
 
-> 折线底层是 `PolylineGeometry` 的**世界空间条带（ribbon）**，宽度换算系数为 1 px ≈ 64 m 世界宽度（`PIXELS_TO_WORLD_WIDTH = 1e-5`），因此屏幕上的实际线宽随缩放变化。这是当前版本的已知折衷。
+> 折线为**屏幕空间恒定像素宽**（CesiumJS 语义）：`PolylineGeometry` 以 `screenSpaceWidth` 模式输出中心线 + 侧向向量，透明管线（`TransparentShader` 顶点着色器）按 `width × dpr / 2` 设备像素在投影后展开——任意相机距离下线宽恒为 `width` CSS 像素。
 
 ### PolygonGraphics — 多边形
 

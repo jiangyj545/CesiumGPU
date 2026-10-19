@@ -35,21 +35,9 @@ export interface EntityVisualizerHost {
   readonly sampleTerrainHeight?: (lon: number, lat: number) => number;
   /** EffectManager-shaped mount point for FlowArrow polylines (P2-6); optional. */
   readonly effects?: { add(effect: unknown): unknown; remove(effect: unknown): boolean };
+  /** Scene depth view provider for depth-tested entity effects (FlowArrow occlusion); optional. */
+  readonly sceneDepthView?: () => GPUTextureView | null;
 }
-
-/**
- * Polyline pixel width → normalised world width factor.
- *
- * `PolylineGeometry` expects the *full ribbon width in normalised world units*
- * (Earth equatorial radius = 1, so 1 unit ≈ 6378 km and the geometry default
- * 0.001 ≈ 6.4 km).  Entity polylines specify `width` in pixels, and because
- * the ribbon is camera-independent its on-screen width necessarily varies
- * with zoom; this fixed factor is the compromise: 1 px ≈ 64 m of world width
- * (a 2 px line ≈ 128 m on the ground), i.e. the geometry default width at a
- * ~100 px on-screen footprint.  A future iteration may scale this by camera
- * distance each frame to approximate true screen-space width.
- */
-const PIXELS_TO_WORLD_WIDTH = 1e-5;
 
 /** Rebuild threshold for path polyline updates (normalised units, ~6 cm). */
 const PATH_EPSILON = 1e-8;
@@ -91,8 +79,10 @@ interface EntityPrimitives {
  * - **polygon** → `PolygonGeometry` → `Primitive`; alpha < 1 goes to the
  *   translucent (WBOIT) queue, otherwise it is opaque and rendered into the
  *   G-Buffer (receives lighting).
- * - **polyline** → `PolylineGeometry` → `Primitive`, always translucent
- *   (ribbons hug the surface and are usually semi-transparent).
+ * - **polyline** → `PolylineGeometry` (`screenSpaceWidth` centreline mode)
+ *   → `Primitive`, always translucent (ribbons hug the surface and are
+ *   usually semi-transparent); the transparent pipeline expands the ribbon
+ *   to a constant on-screen pixel width (CesiumJS semantics).
  * - **model** → `Model.fromGltfAsync` loaded once, then re-transformed every
  *   frame from `entity.position` + `entity.orientation` (see
  *   `composeEntityModelMatrix`).
@@ -117,6 +107,9 @@ interface EntityPrimitives {
 export class EntityVisualizer {
   /** True when the last update() mutated GPU state（P2-5 按需渲染脏源）。 */
   private _changed = true;
+  /** Last CSS→device pixel ratio pushed into screen-space ribbon primitives. */
+  private _lastScreenDpr = -1;
+
 
   /** Consume（读并清零）「上次 update 后场景内容有变」标记（P2-5 脏源）。 */
   consumeChange(): boolean {
@@ -170,6 +163,18 @@ export class EntityVisualizer {
   update(nowSec: number): void {
     // 脏标记不在此清零：由 consumeChange() 消费时清零，保证 update 窗口外
     //（definitionChanged → _rebuild / collectionChanged）的变更不被吞掉。
+
+    // Screen-space polyline width: CSS→device pixel factor (canvas resize /
+    // display moves). Pushed into ribbon primitives only when it changed.
+    const screenDpr = this._screenDpr();
+    if (screenDpr !== this._lastScreenDpr) {
+      this._lastScreenDpr = screenDpr;
+      for (const entry of this._visuals.values()) {
+        for (const prim of entry.polylinePrimitives) prim.setScreenSpaceDpr(screenDpr);
+        entry.pathPrimitive?.setScreenSpaceDpr(screenDpr);
+      }
+    }
+
     for (const [entity, entry] of this._visuals) {
       const raw = resolveProperty(entity.position);
       // P2-5：带动态 Property 的实体视为持续变化（OverlayPass 的
@@ -213,16 +218,28 @@ export class EntityVisualizer {
       //（窗外 prim.show=false）——同款相机距离轮询。
       const polylineDdc = resolveProperty(entity.polyline?.distanceDisplayCondition);
       const disableDepth = entity.polyline?.disableDepthTestDistance;
-      if ((polylineDdc || disableDepth !== undefined) && position) {
+      // 实体总开关（CesiumJS Entity.show 默认 true）与 DDC 合成门控
+      const polylineShow = entity.show !== false;
+      if ((polylineDdc || disableDepth !== undefined || !polylineShow) && position) {
         const dist = Cartesian3.distance(this._host.camera.position, position) * 6378137.0;
         const disabled = depthTestDisabled(disableDepth, dist);
         for (const prim of entry.polylinePrimitives) {
           prim.alwaysPassDepth = disabled;
-          if (polylineDdc) prim.show = polylineDdc.isVisible(dist);
+          const visible = polylineShow && (!polylineDdc || polylineDdc.isVisible(dist));
+          if (prim.show !== visible) { prim.show = visible; this._changed = true; }
         }
-        if (polylineDdc) this._changed = true; // 门控态随距离翻转，需重绘
       }
     }
+  }
+
+  /**
+   * CSS→device pixel ratio of the render surface (drawing buffer height over
+   * CSS viewport height). Guards against unsized canvases / stub contexts —
+   * falls back to 1.
+   */
+  private _screenDpr(): number {
+    const device = Number(this._context.drawingBufferHeight) || 0;
+    return Math.max(1, device / Math.max(1, this._host.viewportHeightPx));
   }
 
   // ── Private ─────────────────────────────────────────────────────────────────
@@ -307,14 +324,21 @@ export class EntityVisualizer {
     }
 
     const positions = resolveProperty(entity.polyline?.positions);
-    if (positions && positions.length >= 2) {
+    // flow 材质改走 FlowArrowPolyline 特效（Entity.material 契约：不再
+    // 走普通 ribbon 图元），此处跳过避免双线渲染。
+    const isFlow = entity.polyline?.material?.type === 'flow';
+    if (positions && positions.length >= 2 && !isFlow) {
       const width = resolveProperty(entity.polyline?.width) ?? 1;
+      // width is in pixels (CesiumJS semantics): centreline ribbon, expanded
+      // to a constant on-screen width by the transparent pipeline.
       const buffers = PolylineGeometry.fromCartesianPositions(
         positions,
-        { width: width * PIXELS_TO_WORLD_WIDTH }
+        { screenSpaceWidth: true }
       );
       // Ribbons hug the globe → usually semi-transparent, WBOIT queue.
-      const prim = this._addPrimitive(buffers, entity.polyline?.color ?? Color.WHITE, out, true, outPolyline);
+      const prim = this._addPrimitive(
+        buffers, entity.polyline?.color ?? Color.WHITE, out, true, outPolyline, width / 2
+      );
       void prim;
     }
   }
@@ -326,7 +350,8 @@ export class EntityVisualizer {
     color: Color,
     out: Primitive[],
     translucentOverride?: boolean,
-    outPolyline?: Primitive[]
+    outPolyline?: Primitive[],
+    screenHalfWidthCssPx?: number
   ): Primitive | null {
     // WebGPU forbids zero-sized buffers (degenerate/empty geometry).
     if (buffers.indexCount === 0 || buffers.vertices.byteLength === 0) return null;
@@ -338,7 +363,9 @@ export class EntityVisualizer {
       color,
       translucent,
       alpha:       color.alpha,
+      screenSpaceHalfWidthCssPx: screenHalfWidthCssPx ?? 0,
     });
+    primitive.setScreenSpaceDpr(this._screenDpr());
 
     if (translucent) {
       this._host.addTransparentPrimitive(primitive);
@@ -448,7 +475,7 @@ export class EntityVisualizer {
     if (points.length >= 2 && changed) {
       if (entry.pathPrimitive) this._host.primitives.remove(entry.pathPrimitive);
       const buffers = PolylineGeometry.fromCartesianPositions(points, {
-        width: (path.width ?? 2) * PIXELS_TO_WORLD_WIDTH,
+        screenSpaceWidth: true,
       });
       if (buffers.indexCount > 0 && buffers.vertices.byteLength > 0) {
         const color = path.color ?? Color.YELLOW;
@@ -458,7 +485,9 @@ export class EntityVisualizer {
           color,
           translucent: true,
           alpha: color.alpha,
+          screenSpaceHalfWidthCssPx: (path.width ?? 2) / 2,
         });
+        primitive.setScreenSpaceDpr(this._screenDpr());
         this._host.addTransparentPrimitive(primitive);
         entry.pathPrimitive = primitive;
         entry.lastPathCount = points.length;
@@ -470,9 +499,10 @@ export class EntityVisualizer {
     // P2-4 打回：path distanceDisplayCondition —— 窗外 prim.show=false。
     // 放在重建之后：新构建的 prim 同帧即被门控（首帧窗外即隐藏）。
     const pathDdc = resolveProperty(entity.path?.distanceDisplayCondition);
-    if (entry.pathPrimitive && pathDdc) {
+    // 实体总开关 entity.show（CesiumJS 默认 true）与 DDC 合成门控
+    if (entry.pathPrimitive) {
       const dist = Cartesian3.distance(this._host.camera.position, position) * 6378137.0;
-      const visible = pathDdc.isVisible(dist);
+      const visible = entity.show !== false && (!pathDdc || pathDdc.isVisible(dist));
       if (entry.pathPrimitive.show !== visible) this._changed = true;
       entry.pathPrimitive.show = visible;
     }
@@ -503,6 +533,7 @@ export class EntityVisualizer {
       const flow = new FlowArrowPolyline(this._context, {
         material,
         width: resolveProperty(entity.polyline?.width) ?? 6,
+        depthView: () => this._host.sceneDepthView?.() ?? null,
       });
       flow.setCamera(this._host.camera as unknown as Camera);
       this._host.effects.add(flow);
@@ -582,9 +613,10 @@ export class EntityVisualizer {
 
     // P2-4 打回：cylinder distanceDisplayCondition —— 窗外 prim.show=false。
     const cylinderDdc = resolveProperty(entity.cylinder?.distanceDisplayCondition);
-    if (entry.cylinderPrimitive && cylinderDdc) {
+    // 实体总开关 entity.show（CesiumJS 默认 true）与 DDC 合成门控
+    if (entry.cylinderPrimitive) {
       const dist = Cartesian3.distance(this._host.camera.position, position) * 6378137.0;
-      const visible = cylinderDdc.isVisible(dist);
+      const visible = entity.show !== false && (!cylinderDdc || cylinderDdc.isVisible(dist));
       if (entry.cylinderPrimitive.show !== visible) this._changed = true;
       entry.cylinderPrimitive.show = visible;
     }

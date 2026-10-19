@@ -7,9 +7,19 @@ export interface PolylineGeometryOptions {
   /**
    * Full ribbon width, in normalized world units (Earth equatorial radius = 1).
    * Note: 1 unit ~ 6378 km, so the default 0.001 ~ 6.4 km on the surface.
-   * Default: 0.001
+   * Ignored when `screenSpaceWidth` is set. Default: 0.001
    */
   width?: number;
+  /**
+   * Screen-space constant width mode (CesiumJS polyline semantics): the
+   * ribbon is NOT baked into the positions. Vertices carry the bare
+   * centreline in `position`, the unit side vector in `normal`, and the
+   * edge sign in `uv.y` ∈ {0,1}; the render pipeline expands them to a
+   * constant pixel width in its vertex shader (see `TransparentShader`).
+   * Only valid for pipelines that perform the screen-space expansion —
+   * ordinary world-space pipelines would render a zero-width line.
+   */
+  screenSpaceWidth?: boolean;
   /**
    * Vertex height mode.
    * - `'none'` (default): positions are used as-is.
@@ -39,13 +49,19 @@ const DENSIFY_STEP_DEG = 2.0;
 const MIN_SUBDIVISIONS = 32;
 
 /**
- * PolylineGeometry - Expands a polyline into a camera-independent triangle
- * ribbon, in normalized ECEF space (Earth equatorial radius = 1.0).
+ * PolylineGeometry - Expands a polyline into a triangle ribbon, in
+ * normalized ECEF space (Earth equatorial radius = 1.0).
  *
- * Each segment emits 4 vertices and 2 triangles; left/right offsets are
- * width/2 along a side vector that lies in the surface tangent plane
- * (perpendicular to both the segment tangent and the radial direction),
- * so the ribbon hugs the globe regardless of the view direction.
+ * Two width modes:
+ * - **world** (default): a camera-independent ribbon; left/right offsets
+ *   are `width/2` along a side vector in the surface tangent plane, so the
+ *   ribbon hugs the globe regardless of the view direction.
+ * - **screenSpaceWidth**: vertices stay on the centreline (`position`),
+ *   carry the unit side vector (`normal`) and the edge sign (`uv.y` ∈
+ *   {0,1}); the vertex shader expands them to a constant pixel width
+ *   (CesiumJS polyline semantics).
+ *
+ * Each segment emits 4 vertices and 2 triangles.
  *
  * Per-vertex uv: `u` accumulates arc length along the line (normalized world
  * units, usable by dash/flow materials); `v` is 0 on the left edge, 1 on the
@@ -73,6 +89,7 @@ export class PolylineGeometry {
 
     const width = options.width ?? 0.001;
     const halfWidth = width / 2;
+    const screenSpace = options.screenSpaceWidth === true;
 
     // Per-point tangents (adjacent-segment average for interior points).
     const tangents = PolylineGeometry._computeTangents(positions);
@@ -109,30 +126,38 @@ export class PolylineGeometry {
       const base = seg * 4;
 
       // Corner order: [L0, R0, L1, R1]; side = cross(tangent, radial).
-      const left0 = PolylineGeometry._offset(positions[i0], sides[i0], -halfWidth);
-      const right0 = PolylineGeometry._offset(positions[i0], sides[i0], halfWidth);
-      const left1 = PolylineGeometry._offset(positions[i1], sides[i1], -halfWidth);
-      const right1 = PolylineGeometry._offset(positions[i1], sides[i1], halfWidth);
-      const corners = [left0, right0, left1, right1];
-      const radials = [
-        PolylineGeometry._radial(positions[i0]),
-        PolylineGeometry._radial(positions[i0]),
-        PolylineGeometry._radial(positions[i1]),
-        PolylineGeometry._radial(positions[i1]),
-      ];
+      // screenSpaceWidth mode: positions stay on the centreline and the
+      // normal slot carries the unit side vector — the render pipeline
+      // expands the ribbon to a constant pixel width.
+      const corners = screenSpace
+        ? [positions[i0], positions[i0], positions[i1], positions[i1]]
+        : [
+            PolylineGeometry._offset(positions[i0], sides[i0], -halfWidth),
+            PolylineGeometry._offset(positions[i0], sides[i0], halfWidth),
+            PolylineGeometry._offset(positions[i1], sides[i1], -halfWidth),
+            PolylineGeometry._offset(positions[i1], sides[i1], halfWidth),
+          ];
+      const attribNormals = screenSpace
+        ? [sides[i0], sides[i0], sides[i1], sides[i1]]
+        : [
+            PolylineGeometry._radial(positions[i0]),
+            PolylineGeometry._radial(positions[i0]),
+            PolylineGeometry._radial(positions[i1]),
+            PolylineGeometry._radial(positions[i1]),
+          ];
       const vCoords = [0, 1, 0, 1];
       const uCoords = [cumulative[i0], cumulative[i0], cumulative[i1], cumulative[i1]];
 
       for (let c = 0; c < 4; c++) {
         const p = corners[c];
-        const radial = radials[c];
+        const n = attribNormals[c];
 
         positionsOut[pi] = p.x;
         positionsOut[pi + 1] = p.y;
         positionsOut[pi + 2] = p.z;
-        normalsOut[pi] = radial.x;
-        normalsOut[pi + 1] = radial.y;
-        normalsOut[pi + 2] = radial.z;
+        normalsOut[pi] = n.x;
+        normalsOut[pi + 1] = n.y;
+        normalsOut[pi + 2] = n.z;
         uvsOut[ti] = uCoords[c];
         uvsOut[ti + 1] = vCoords[c];
         pi += 3;
