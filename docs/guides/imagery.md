@@ -362,3 +362,35 @@ viewer.globe.layers.addImageryProvider(new LocalTileProvider(), {
 ## P1 新增：XYZ provider 认证 headers
 
 `XyzImageryProvider({ url, headers })` —— headers 透传到每个瓦片请求（如私有影像服务的 `Authorization: Bearer …`）；不传时行为不变。
+
+## P3：多图层合成（底图 + 注记）
+
+**缺陷背景**：真实消费方（hexapod GCS 天地图卫星）底图 `img_w` + 注记 `cia_w` 两层瓦片全部加载成功，但旧渲染路径只画最顶层可见层 → 只有透明底的注记上屏，卫星层躺在缓存里 → 黑底 + 只有线/注记。
+
+**引擎侧修复**：`ImageryLayerCollection.renderLayer` 解析渲染层——
+
+- **单可见层**：原 `activeLayer` 语义原样返回（零改动路径，回归风险隔离）；
+- **≥2 可见层**：合成层（`CompositeImageryProvider`）——按 TileKey 逐瓦片
+  `Promise.allSettled` 各子层 provider 取瓦片，自底向上 source-over 合成到
+  `OffscreenCanvas(tileSize)` 返回 ImageBitmap。
+
+```typescript
+const base = viewer.globe.layers.addImageryProvider(
+  XyzImageryProvider.tianditu(tk, 'img'));   // 卫星底图
+viewer.globe.layers.addImageryProvider(
+  XyzImageryProvider.tianditu(tk, 'cia'));   // 影像注记（透明底）
+// 无需额外调用：Globe.update 自动走合成层，底图+注记同屏。
+```
+
+**语义要点**：
+- 子层失败策略：任一子层某瓦片 reject/null → 该子层该瓦片跳过（透明洞，
+  alpha 由 canvas 自然合成），其余子层照常；全部失败才计瓦片失败（父级回退）。
+- `maximumLevel = min(子层)`；合成层 tile cache 正常 LRU；子 provider 各自
+  保留缓存（composite 直连 `provider.requestTile`，不经子层 LRU——重复占
+  一份可接受）。
+- 增删/显隐/`raiseToTop` 由可见集合签名比对捕获，变化即重建合成层；
+  隐藏层的 root 预热行为保留（可见成员层跳过自有 update，避免双份拉取）。
+- 合成在主线程 canvas（256 px 级别，不引 worker）；像素数学纯函数
+  `blendSourceOver`（node 可测，`tests/imagery/compositeImagery.spec.ts`）；
+  `requestTile` 经 `blendBufferSourceOver` 对整块瓦片**逐像素循环**混合
+  （天地图注记丢失缺陷的回归闸门在上述 spec）。

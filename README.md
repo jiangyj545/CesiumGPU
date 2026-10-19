@@ -7,6 +7,7 @@
 | 能力 | 状态 | 说明 / 入口 |
 |---|---|---|
 | 影像瓦片 | ✅ | XYZ Provider + 图层栈 + LRU 纹理池，见 [Imagery 指南](docs/guides/imagery.md) |
+| 多图层合成 | ✅ | 底图+注记逐瓦片 source-over 合成（`renderLayer` 解析），见 [Imagery 指南](docs/guides/imagery.md) |
 | 矢量（Entity） | ✅ | 折线 / 多边形 / 点 / 标注，见 [Entities 指南](docs/guides/entities.md) |
 | GeoJSON | ✅ | `GeoJsonDataSource`，见 [Entities 指南](docs/guides/entities.md) |
 | 绘制 | ✅ | 点 / 线 / 面 / 矩形球面绘制，见 [Interaction 指南](docs/guides/interaction.md) |
