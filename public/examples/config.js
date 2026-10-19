@@ -99,6 +99,8 @@ window.EXAMPLES_CONFIG = {
       items: [
         { name: '自由落体物理', fileName: '81_ballFall.html' },
         { name: '弹簧弹跳物理', fileName: '82_ballWiggle.html' },
+        { name: '合成传感器通道', fileName: '90_sensorCam.html' },
+        { name: 'Episode 轨迹回放', fileName: '91_episodeReplay.html' },
       ],
     },
     {

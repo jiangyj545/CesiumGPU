@@ -248,7 +248,7 @@ export class Scene {
       this._cameraUniformBuffer = this._context.device.createBuffer({
         label: 'Scene.CameraUBO',
         size:  CAMERA_UBO_SIZE,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, // COPY_SRC: RTC 诊断回读
       });
 
       // Build globe geometry
@@ -356,11 +356,16 @@ export class Scene {
     }
     this.primitives.add(primitive);
   }
+  private static _warnedTranslucent = false;
 
   /**
    * Add an opaque primitive to the scene.
    */
   addPrimitive(primitive: Primitive): void {
+    if (primitive.translucent && !Scene._warnedTranslucent) {
+      Scene._warnedTranslucent = true;
+      console.warn('Scene.addPrimitive: translucent primitive is skipped by the opaque pass; use addTransparentPrimitive instead.');
+    }
     if (this._opaquePipeline) {
       primitive.buildOpaqueBindGroup(this._opaquePipeline);
     }
@@ -568,6 +573,29 @@ export class Scene {
     const cam = this.camera;
     const data = new Float32Array(CAMERA_UBO_SIZE / 4);
 
+    // RTC（相对相机渲染）尾段：proj·viewRot（f64 预乘，view 平移列置零）+
+    // 相机位置 double-single 高低位拆分。f64 消除矩阵 f32 化的抵消损失，
+    // shader 侧相对量 ~1e-3 量级 f32 无损（掠墙深度量化残差根除，2026-10-18）。
+    const v = cam.viewMatrix.values;
+    const vr = [v[0], v[1], v[2], 0, v[4], v[5], v[6], 0, v[8], v[9], v[10], 0, 0, 0, 0, 1];
+    const pj = cam.projectionMatrix.values;
+    const m = new Array<number>(16).fill(0);
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        let s = 0;
+        for (let k = 0; k < 4; k++) s += pj[k * 4 + r] * vr[c * 4 + k];
+        m[c * 4 + r] = s;
+      }
+    }
+    const viewRotProj = new Float32Array(m);
+    const fr = (x: number): number => Math.fround(x);
+    const positionHi = { x: fr(cam.position.x), y: fr(cam.position.y), z: fr(cam.position.z) };
+    const positionLo = {
+      x: cam.position.x - positionHi.x,
+      y: cam.position.y - positionHi.y,
+      z: cam.position.z - positionHi.z,
+    };
+
     // Layout lives in src/renderer/CameraUniforms.ts (single source of truth).
     writeCameraUniforms(data, {
       viewMatrix:           cam.viewMatrix.values,
@@ -578,6 +606,9 @@ export class Scene {
       viewportHeight:       this._height,
       near:                 cam.frustum.near,
       far:                  cam.frustum.far,
+      viewRotProjMatrix:    viewRotProj,
+      positionHi,
+      positionLo,
     });
 
     this._context.writeBuffer(this._cameraUniformBuffer, 0, data);
@@ -606,6 +637,15 @@ export class Scene {
    */
   getDepthTexture(): GPUTexture | null {
     return this._gbufferPass?.getDepthTexture() ?? null;
+  }
+
+  /**
+   * Scene depth view (G-Buffer depth32float) handed to EntityVisualizer as
+   * the `sceneDepthView` host capability — consumed by depth-tested entity
+   * effects (FlowArrow terrain/globe occlusion).  Null before initialize().
+   */
+  sceneDepthView(): GPUTextureView | null {
+    return this._gbufferPass?.getDepthView() ?? null;
   }
 
   /**

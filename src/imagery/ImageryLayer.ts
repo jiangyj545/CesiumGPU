@@ -653,10 +653,17 @@ const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
  * x = cos(lat)·cos(lon), y and z scaled by the polar ratio).
  */
 function surfacePosition(latitude: number, longitude: number, result: Cartesian3): Cartesian3 {
+  // 真 WGS84 归一化映射（与 EllipsoidGeometry.createRegion、fromDegrees ÷a
+  // 同式）——瓦片选择中心必须与渲染几何/采集相机同系：旧压扁系中心在 30.5°N
+  // 与真椭球差 22.7km，斜视采集视锥下近场瓦片整体被视锥裁掉（W-A 深度残差）。
+  const ratio = WGS84_POLAR_RATIO;
+  const e2 = 1 - ratio * ratio;
   const cosLat = Math.cos(latitude);
-  result.x = cosLat * Math.cos(longitude);
-  result.y = cosLat * Math.sin(longitude) * WGS84_POLAR_RATIO;
-  result.z = Math.sin(latitude) * WGS84_POLAR_RATIO;
+  const sinLat = Math.sin(latitude);
+  const n = 1 / Math.sqrt(1 - e2 * sinLat * sinLat);
+  result.x = n * cosLat * Math.cos(longitude);
+  result.y = n * cosLat * Math.sin(longitude);
+  result.z = n * (1 - e2) * sinLat;
   return result;
 }
 

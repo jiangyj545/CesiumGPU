@@ -87,6 +87,13 @@ export interface SensorPose {
   pitchRad: number;
   /** 绕视线（弧度），Phase 0 恒 0。 */
   rollRad: number;
+  /**
+   * 米制 ECEF 直传（可选，缺省走 lon/lat 分支）。位姿源持有真值 ECEF 时
+   * 应直传：经 fromDegrees(lon,lat) 的往返会把位姿源的 ENU 线性近似误差
+   * 带进渲染相机（0.02-0.35m），掠墙像素被 1/sin(夹角) 放大成米级深度残差
+   * （W-A 深度残差收尾，2026-10-18）。与 sim-kernel 帧 pos_ecef 同约定。
+   */
+  posEcefM?: [number, number, number];
 }
 
 /**
@@ -104,6 +111,11 @@ export interface SensorPose {
  * （`×1/EARTH_SCALE` 归一化）两个约定共用，未被 febba8d 改动。
  */
 export function sensorCamEcefDestination(pose: SensorPose): Cartesian3 {
+  // 米制 ECEF 直传优先（见 SensorPose.posEcefM 注释）：setView 的 x/y/z
+  // 分支 ×1/EARTH_SCALE 归一化，两约定共用。
+  if (pose.posEcefM) {
+    return new Cartesian3(pose.posEcefM[0], pose.posEcefM[1], pose.posEcefM[2]);
+  }
   return Cartesian3.fromDegrees(pose.lonDeg, pose.latDeg, pose.heightM);
 }
 

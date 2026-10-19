@@ -63,6 +63,13 @@ export interface CreateRegionOptions {
    * false (linear).
    */
   mercatorV?: boolean;
+  /**
+   * RTC 几何中心：真 WGS84 归一化 ECEF [x,y,z]（f64，通常 = tile 中心）。
+   * 给出时输出顶点（含裙边）为**相对该中心的偏移**（f32 量化亚毫米），
+   * 配合 Primitive.origin 走 encoded-camera 深度精确路径；缺省 undefined
+   * = 绝对世界坐标（旧行为逐位兼容）。
+   */
+  origin?: [number, number, number];
 }
 
 /**
@@ -225,6 +232,12 @@ export class EllipsoidGeometry {
     const edgeLift = options.edgeLift;
     const ratio   = WGS84_POLAR_RATIO;
     const ratioSq = ratio * ratio;
+    // 真椭球映射常量：与 Cartesian3.fromDegrees（米制 WGS84）÷a 逐位一致——
+    // 传感器相机/城市白模/verify-depth 全在真 WGS84 约定，瓦片几何必须同系。
+    // （旧压扁系 [cosφcosλ, cosφsinλ·ρ, sinφ·ρ] 在 30.5°N 比真椭球低 13.2km、
+    // 偏 22.7km：掠射/斜视采集下深度通道成片读到 13km 深的"瓦片表面"，
+    // 且选择中心与相机视锥错位近场全被裁——W-A 深度残差根因，2026-10-18。）
+    const e2 = 1 - ratio * ratio;
 
     // Mercator rows: v must follow the Mercator-y of the latitude, not the
     // latitude itself (see CreateRegionOptions.mercatorV). Precompute the
@@ -286,6 +299,9 @@ export class EllipsoidGeometry {
       }
       const cosLat = Math.cos(lat);
       const sinLat = Math.sin(lat);
+      // 真椭球归一化半径系数（N/a 与 N/a·(1-e²)，h=0）——与 fromDegrees ÷a 同式。
+      const nLat = 1 / Math.sqrt(1 - e2 * sinLat * sinLat);
+      const zn = nLat * (1 - e2);
 
       for (let slice = 0; slice <= slices; slice++) {
         const s   = slice / slices;
@@ -296,11 +312,17 @@ export class EllipsoidGeometry {
         const ny = cosLat * Math.sin(lon);
         const nz = sinLat;
 
-        // Position (EllipsoidGeometry normalisation: x on unit sphere,
-        // y/z squashed by the polar ratio).
-        vertices[vi++] = rowScale * nx;
-        vertices[vi++] = rowScale * ny * ratio;
-        vertices[vi++] = rowScale * nz * ratio;
+        // Position（真 WGS84 归一化：x=n·cosφcosλ, y=n·cosφsinλ, z=n(1-e²)sinφ；
+        // rowScale 仍为向地心的径向缩放）。RTC：origin 给定时写相对中心偏移。
+        if (options.origin) {
+          vertices[vi++] = rowScale * nLat * nx - options.origin[0];
+          vertices[vi++] = rowScale * nLat * ny - options.origin[1];
+          vertices[vi++] = rowScale * zn * nz - options.origin[2];
+        } else {
+          vertices[vi++] = rowScale * nLat * nx;
+          vertices[vi++] = rowScale * nLat * ny;
+          vertices[vi++] = rowScale * zn * nz;
+        }
 
         // Ellipsoid surface normal (same math as createGeometry).
         const ny2  = ny / ratioSq;
@@ -358,9 +380,18 @@ export class EllipsoidGeometry {
         for (const v of edge) {
           // 同 lat/lon、半径乘 (1-skirtDepth)；法线沿用表面法线、uv 沿用边缘值。
           for (let f = 0; f < 8; f++) vertices[viSkirt * 8 + f] = vertices[v * 8 + f];
-          vertices[viSkirt * 8]     *= skirtScale;
-          vertices[viSkirt * 8 + 1] *= skirtScale;
-          vertices[viSkirt * 8 + 2] *= skirtScale;
+          if (options.origin) {
+            // RTC：相对坐标不能直接乘 skirtScale（中心偏移会一起被缩放）——
+            // abs·s - c = rel·s + c·(s-1)，分量式补偿。
+            const o = options.origin;
+            vertices[viSkirt * 8]     = vertices[v * 8]     * skirtScale + o[0] * (skirtScale - 1);
+            vertices[viSkirt * 8 + 1] = vertices[v * 8 + 1] * skirtScale + o[1] * (skirtScale - 1);
+            vertices[viSkirt * 8 + 2] = vertices[v * 8 + 2] * skirtScale + o[2] * (skirtScale - 1);
+          } else {
+            vertices[viSkirt * 8]     *= skirtScale;
+            vertices[viSkirt * 8 + 1] *= skirtScale;
+            vertices[viSkirt * 8 + 2] *= skirtScale;
+          }
           skirts.push(viSkirt++);
         }
         for (let i = 0; i + 1 < edge.length; i++) {

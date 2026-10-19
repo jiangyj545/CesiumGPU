@@ -23,7 +23,7 @@
  */
 
 /** 共享相机 uniform buffer 的字节大小。 */
-export const CAMERA_UBO_SIZE = 256;
+export const CAMERA_UBO_SIZE = 336;
 
 /** 相机 UBO 各成员的字节偏移（必须与各 shader 的 CameraUniforms struct 一致）。 */
 export const CAMERA_UBO_OFFSETS = {
@@ -33,6 +33,12 @@ export const CAMERA_UBO_OFFSETS = {
   position: 192,
   viewportSize: 208,
   nearFar: 224,
+  // RTC（相对相机渲染，encoded camera）尾段：仅 GBuffer/Pick 深度精确路径
+  // 消费；旧 shader 的 CameraUniforms struct 未声明这些字段——uniform 绑定
+  // 允许 buffer 大于 struct，缺省写入 0 即可（RTC 图元仅 Scene 主相机启用）。
+  viewRotProj: 240,
+  camHi: 304,
+  camLo: 320,
 } as const;
 
 /** 每帧写入相机 UBO 的字段值。矩阵为 16 元素列主序 Float32Array。 */
@@ -45,6 +51,11 @@ export interface CameraUniformValues {
   viewportHeight: number;
   near: number;
   far: number;
+  /** RTC 深度路径：proj·viewRot（view 平移列置零，f64 预乘）。缺省写 0。 */
+  viewRotProjMatrix?: Float32Array;
+  /** RTC：相机位置 double-single 高/低位（f64 → fround 拆分）。缺省写 0。 */
+  positionHi?: { x: number; y: number; z: number };
+  positionLo?: { x: number; y: number; z: number };
 }
 
 /**
@@ -71,4 +82,23 @@ export function writeCameraUniforms(data: Float32Array, camera: CameraUniformVal
   const nf = CAMERA_UBO_OFFSETS.nearFar >> 2; // = 56，见上方对齐说明
   data[nf]     = camera.near;
   data[nf + 1] = camera.far;
+
+  // RTC 尾段（缺省 0）：f32 相对量在 ~1e-3 量级，深度绝对误差 ~亚毫米
+  if (camera.viewRotProjMatrix) {
+    data.set(camera.viewRotProjMatrix, CAMERA_UBO_OFFSETS.viewRotProj >> 2);
+  }
+  if (camera.positionHi) {
+    const hi = CAMERA_UBO_OFFSETS.camHi >> 2;
+    data[hi] = camera.positionHi.x;
+    data[hi + 1] = camera.positionHi.y;
+    data[hi + 2] = camera.positionHi.z;
+    data[hi + 3] = 0.0;
+  }
+  if (camera.positionLo) {
+    const lo = CAMERA_UBO_OFFSETS.camLo >> 2;
+    data[lo] = camera.positionLo.x;
+    data[lo + 1] = camera.positionLo.y;
+    data[lo + 2] = camera.positionLo.z;
+    data[lo + 3] = 0.0;
+  }
 }

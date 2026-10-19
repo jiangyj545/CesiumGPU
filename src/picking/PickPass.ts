@@ -217,9 +217,15 @@ export class PickPass {
       label: 'PickPass.WorldPosReadback', size: READBACK_BYTES_PER_ROW, usage: bufferUsage,
     });
 
-    this._frameHook = (encoder: GPUCommandEncoder) => {
+    this._frameHook = (_encoder: GPUCommandEncoder) => {
       this.debug.hookCalls += 1;
-      this._encodePickFrame(encoder);
+      // W-A 修复（实验①命中）：pick 编制走**独立 encoder + 独立 submit**，与主帧
+      // 编码完全隔离——同 encoder 混编时 pick 的校验错误会使整个 submission
+      // 作废（主帧全空帧，零 GPU 错误表面现象，2026-10-18）。pick 用自持
+      // 纹理/缓冲，与主帧无资源依赖，独立提交语义等价且互不污染。
+      const enc = device.createCommandEncoder({ label: 'PickPass.Enc' });
+      this._encodePickFrame(enc);
+      device.queue.submit([enc.finish()]);
     };
     deps.addFrameHook(this._frameHook);
 
@@ -635,6 +641,29 @@ export class PickPass {
     const cam  = this._deps.camera;
     const data = new Float32Array(CAMERA_UBO_SIZE / 4);
 
+    // RTC 尾段与 Scene 主相机写入端保持同值（proj·viewRot + 位置 hi/lo）——
+    // RTC 图元（瓦片/城市）在 pick 视图里走同款精确路径；缺尾段时 hi/lo 差分
+    // 会以 0 为基准产生 ~1.0 量级的伪相对坐标（W-A，2026-10-18）。
+    const v = cam.viewMatrix.values;
+    const vr = [v[0], v[1], v[2], 0, v[4], v[5], v[6], 0, v[8], v[9], v[10], 0, 0, 0, 0, 1];
+    const pj = cam.projectionMatrix.values;
+    const m = new Array<number>(16).fill(0);
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        let s = 0;
+        for (let k = 0; k < 4; k++) s += pj[k * 4 + r] * vr[c * 4 + k];
+        m[c * 4 + r] = s;
+      }
+    }
+    const viewRotProj = new Float32Array(m);
+    const fr = (x: number): number => Math.fround(x);
+    const positionHi = { x: fr(cam.position.x), y: fr(cam.position.y), z: fr(cam.position.z) };
+    const positionLo = {
+      x: cam.position.x - positionHi.x,
+      y: cam.position.y - positionHi.y,
+      z: cam.position.z - positionHi.z,
+    };
+
     writeCameraUniforms(data, {
       viewMatrix:           cam.viewMatrix.values,
       projectionMatrix:     cam.projectionMatrix.values,
@@ -644,6 +673,9 @@ export class PickPass {
       viewportHeight:       this._targetHeight,
       near:                 cam.frustum.near,
       far:                  cam.frustum.far,
+      viewRotProjMatrix:    viewRotProj,
+      positionHi,
+      positionLo,
     });
 
     this._deps.context.writeBuffer(this._cameraUbo, 0, data);
@@ -702,6 +734,9 @@ export class PickPass {
    * a microtask so it strictly follows the submit.
    */
   private _encodePickFrame(encoder: GPUCommandEncoder): void {
+    // W-A E1（实验①）：运行时禁用 pick 编制——验证「pick pass 与 GBuffer 同
+    // encoder 状态污染」假设（页设 globalThis.__WA_E1_DISABLE_PICK__=true）。
+    if ((globalThis as Record<string, unknown>).__WA_E1_DISABLE_PICK__ === true) return;
     const job = this._pending;
     if (!job || job.encoded) return;
 

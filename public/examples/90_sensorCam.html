@@ -341,6 +341,10 @@
         pose: {
           lonDeg: lon, latDeg: lat, heightM,
           headingRad: heading, pitchRad, rollRad,
+          // 米制 ECEF 直传（W-A 深度残差收尾）：渲染相机与 sim 真值 pos_ecef
+          // 同点——经 enuToLonLat 线性近似的 lon/lat 往返带 0.02-0.35m 失配，
+          // 掠墙像素 1/sin(夹角) 放大成 1-4m 深度残差（2026-10-18）。
+          posEcefM: [f.pos_ecef[0], f.pos_ecef[1], f.pos_ecef[2]],
         },
         targetEnu,
         setpoint: { vx: f.vel_e[0], vy: f.vel_e[1], vz: f.vel_e[2], yawRate: 0 },
@@ -456,7 +460,15 @@
         seedState = (seedState * 1664525 + 1013904223) >>> 0;
         return seedState / 0xffffffff;
       };
-      const builder = new CityBlockBuilder();
+      // 城市 RTC（W-A）：城市顶点相对锚点存储可再消 f32 量化（单开实测 0 异常），
+      // 但「城市+瓦片」双 RTC 组合存在全帧空片元缺陷（零 GPU 错误、UBO/数学逐项
+      // 验证正确，未定因）——缺省关，verify-depth 已由瓦片 RTC 达成 0.06%。
+      // ?waRtcCity=1 实验启用（勿与瓦片 RTC 同开，见 RFC）。
+      const waRtcCity = new URLSearchParams(location.search).get('waRtcCity') === '1';
+      const cityAnchor = engine.Cartesian3.fromDegreesNormalized(ORIGIN.lon, ORIGIN.lat, 0);
+      const builder = new CityBlockBuilder({
+        ...(waRtcCity ? { origin: [cityAnchor.x, cityAnchor.y, cityAnchor.z] } : {}),
+      });
       // COLS/ROWS/GAP 见文件头常量区（W9 上移：CITY_OFF 初始化早于 demo()）
       for (let i = 0; i < COLS; i++) {
         for (let j = 0; j < ROWS; j++) {
@@ -933,6 +945,7 @@
         window.__DEMO_OK = false;
         return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
       }
+      window.__VIEWER = viewer; // 诊断出口：瓦片选择/图元数/相机联调探针（与 __WINGMEN 同族）
       try {
         await demo(viewer, engine);
         window.__DEMO_OK = true;

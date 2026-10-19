@@ -34,6 +34,23 @@ export interface PrimitiveOptions {
    * so the instance id space never collides with primitive pickIds.
    */
   instanceIds?: Uint32Array;
+  /**
+   * Screen-space constant ribbon half width in CSS pixels (>0 opts this
+   * primitive into the polyline screen-space path of the transparent
+   * pipeline: the vertex shader expands it to `× dpr` device pixels —
+   * CesiumJS polyline semantics). The geometry must be a centreline ribbon
+   * from `PolylineGeometry` with `screenSpaceWidth: true`. 0/undefined =
+   * ordinary world-space mesh. Default: 0.
+   */
+  screenSpaceHalfWidthCssPx?: number;
+  /**
+   * RTC（relative-to-center）几何中心：真 WGS84 归一化 ECEF [x,y,z]（f64 JS
+   * 数值）。给出时，顶点 attribute 解释为**相对该中心的偏移**（幅度小 → f32
+   * 量化亚毫米），GBuffer/Pick 深度走 encoded-camera 精确路径；缺省 undefined
+   * = 顶点即世界坐标（旧行为逐位兼容）。modelMatrix 必须为单位阵（纯平移
+   * 语义已并入中心）。
+   */
+  origin?: [number, number, number];
 }
 
 /**
@@ -77,6 +94,14 @@ export class Primitive {
   private _indexCount: number;
   private _translucent: boolean;
   private readonly _unlit: boolean;
+  /** Screen-space ribbon half width in CSS px (0 = ordinary mesh). */
+  private _screenHalfWidthCssPx: number;
+  /** CSS→device pixel ratio used to resolve the ribbon half width. */
+  private _screenDpr = 1;
+  /** Last device-px half width written to the material UBO (write coalescing). */
+  private _screenHalfWidthDevicePx = 0;
+  /** RTC 几何中心（顶点相对它存储）；null = 顶点即世界坐标（旧路径）。 */
+  private readonly _origin: [number, number, number] | null;
 
   private _modelUniformBuffer: GPUBuffer;
   private _materialUniformBuffer: GPUBuffer;
@@ -104,6 +129,8 @@ export class Primitive {
     this._unlit      = options.unlit ?? false;
     this._color      = options.color ?? Color.WHITE;
     this._alpha      = options.alpha ?? 1.0;
+    this._screenHalfWidthCssPx = options.screenSpaceHalfWidthCssPx ?? 0;
+    this._origin = options.origin ?? null;
 
     // Allocate the 24-bit GPU pick id (0 = background / no hit)
     if (Primitive._nextPickId > 0xFFFFFF) {
@@ -117,7 +144,7 @@ export class Primitive {
     this._vertexBuffer = device.createBuffer({
       label: 'Primitive.VBO',
       size:  options.vertices.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, // COPY_SRC: RTC 诊断回读
     });
     // Copy through the view (not .buffer) so subarray() views upload exactly
     // their own range instead of the whole underlying ArrayBuffer.
@@ -143,14 +170,16 @@ export class Primitive {
     context.writeBuffer(this._indexBuffer, 0, new Uint32Array(options.indices));
     this._indexCount = options.indices.length;
 
-    // Model uniform buffer: modelMatrix (64 bytes) + normalMatrix (64 bytes) = 128 bytes
+    // Model uniform buffer: modelMatrix (64) + normalMatrix (64)
+    // + RTC originHi/Lo（2×16）= 192 bytes（旧 shader 只读前 128B，兼容）
     this._modelUniformBuffer = device.createBuffer({
       label: 'Primitive.ModelUBO',
-      size:  128,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      size:  192,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, // COPY_SRC: RTC 诊断回读
     });
 
-    // Material uniform buffer: baseColor(16) + roughness(4) + metallic(4) + pad(8) = 32 bytes
+    // Material uniform buffer: baseColor(16) + roughness(4) + metallic(4)
+    // + screenHalfWidthPx(4) + pad(4) = 32 bytes
     this._materialUniformBuffer = device.createBuffer({
       label: 'Primitive.MaterialUBO',
       size:  32,
@@ -228,6 +257,12 @@ export class Primitive {
     wc.x = m[0] * lc.x + m[4] * lc.y + m[8]  * lc.z + m[12];
     wc.y = m[1] * lc.x + m[5] * lc.y + m[9]  * lc.z + m[13];
     wc.z = m[2] * lc.x + m[6] * lc.y + m[10] * lc.z + m[14];
+    // RTC：局部球在相对中心坐标系里——回世界系要加回几何中心。
+    if (this._origin) {
+      wc.x += this._origin[0];
+      wc.y += this._origin[1];
+      wc.z += this._origin[2];
+    }
 
     // Radius scales with the largest basis-column magnitude (uniform scale
     // in this engine, but the max keeps the sphere safe under any scaling).
@@ -247,6 +282,19 @@ export class Primitive {
 
   set alpha(a: number) {
     this._alpha = a;
+    this._updateMaterialUBO();
+  }
+
+  /**
+   * Update the CSS→device pixel ratio used to resolve the screen-space
+   * ribbon half width (canvas resize / display moves). No-op for ordinary
+   * meshes and when the resolved device-pixel width is unchanged.
+   */
+  setScreenSpaceDpr(dpr: number): void {
+    if (!Number.isFinite(dpr) || dpr <= 0) return;
+    const device = this._screenHalfWidthCssPx * dpr;
+    if (this._screenHalfWidthCssPx > 0 && device === this._screenHalfWidthDevicePx) return;
+    this._screenDpr = dpr;
     this._updateMaterialUBO();
   }
 
@@ -425,9 +473,22 @@ export class Primitive {
     nm[8]  = m[8]; nm[9]  = m[9]; nm[10] = m[10]; nm[11] = 0;
     nm[12] = 0;    nm[13] = 0;    nm[14] = 0;      nm[15] = 1;
 
-    const data = new Float32Array(32); // 128 bytes / 4
+    const data = new Float32Array(48); // 192 bytes / 4
     data.set(m, 0);
     data.set(nm, 16);
+    // RTC 尾段：originHi(xyz, w=flag)/originLo（f64 → fround 拆分）。
+    // 非 RTC 图元 flag=0，shader 走旧 worldPos 路径（尾段 0，逐位兼容）。
+    const o = this._origin;
+    if (o) {
+      data[32] = Math.fround(o[0]);
+      data[33] = Math.fround(o[1]);
+      data[34] = Math.fround(o[2]);
+      data[35] = 1.0; // RTC flag
+      data[36] = o[0] - Math.fround(o[0]);
+      data[37] = o[1] - Math.fround(o[1]);
+      data[38] = o[2] - Math.fround(o[2]);
+      data[39] = 0.0;
+    }
     this._context.writeBuffer(this._modelUniformBuffer, 0, data);
   }
 
@@ -439,6 +500,8 @@ export class Primitive {
     data[3] = this._alpha;
     data[4] = 0.5; // roughness
     data[5] = 0.0; // metallic
+    this._screenHalfWidthDevicePx = this._screenHalfWidthCssPx * this._screenDpr;
+    data[6] = this._screenHalfWidthDevicePx; // screenHalfWidthPx (device px)
     this._context.writeBuffer(this._materialUniformBuffer, 0, data);
   }
 }

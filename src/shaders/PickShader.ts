@@ -13,7 +13,7 @@
  * id = 0 renders as (0,0,0,0) — the clear value means "background / no hit".
  */
 export const PICK_SHADER = /* wgsl */`
-// 256B camera UBO — layout single source of truth: src/renderer/CameraUniforms.ts
+// 336B camera UBO — layout single source of truth: src/renderer/CameraUniforms.ts
 // (uniform vec2 aligns to 16 → viewportSize @208, nearFar @224 — NOT @216)
 struct CameraUniforms {
   viewMatrix      : mat4x4<f32>,   // @0   (64B)
@@ -22,11 +22,16 @@ struct CameraUniforms {
   cameraPosition  : vec4<f32>,     // @192 (16B)
   viewportSize    : vec2<f32>,     // @208 (8B)
   nearFar         : vec2<f32>,     // @224 (8B) x = near, y = far
+  viewRotProj     : mat4x4<f32>,   // @240 (64B) RTC: proj·viewRot（view 平移置零）
+  camHi           : vec4<f32>,     // @304 (16B) RTC: 相机位置 double-single 高位
+  camLo           : vec4<f32>,     // @320 (16B) RTC: 低位
 }
 
 struct ModelUniforms {
   modelMatrix  : mat4x4<f32>,
   normalMatrix : mat4x4<f32>,
+  originHi     : vec4<f32>,    // @128 RTC: 几何中心高位，w=flag(1=RTC)
+  originLo     : vec4<f32>,    // @144 RTC: 中心低位；顶点 = 相对中心偏移
 }
 
 struct PickIdUniform {
@@ -47,11 +52,23 @@ struct VertexOutput {
   @builtin(position) clipPosition : vec4<f32>,
 }
 
+// RTC（相对相机渲染）裁剪位置：与 GBufferShader.vs_main 同款 hi/lo 差分，
+// 保证 pick id 平面与深度平面逐像素同面（seg↔depth 配对不破）。
+fn rtcClipPos(posRel: vec3<f32>) -> vec4<f32> {
+  let dHi = model.originHi.xyz - camera.camHi.xyz;
+  let dLo = model.originLo.xyz - camera.camLo.xyz;
+  return camera.viewRotProj * vec4<f32>(posRel + dHi + dLo, 1.0);
+}
+
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
   var out: VertexOutput;
   let worldPos = model.modelMatrix * vec4<f32>(in.position, 1.0);
-  out.clipPosition = camera.viewProjMatrix * worldPos;
+  out.clipPosition = select(
+    camera.viewProjMatrix * worldPos,
+    rtcClipPos(in.position),
+    model.originHi.w > 0.5
+  );
   return out;
 }
 
@@ -97,7 +114,11 @@ struct InstancedVertexOutput {
 fn vs_instanced(in: InstancedVertexInput) -> InstancedVertexOutput {
   var out: InstancedVertexOutput;
   let worldPos = model.modelMatrix * vec4<f32>(in.position, 1.0);
-  out.clipPosition = camera.viewProjMatrix * worldPos;
+  out.clipPosition = select(
+    camera.viewProjMatrix * worldPos,
+    rtcClipPos(in.position),
+    model.originHi.w > 0.5
+  );
   out.instanceId = in.instanceId;
   return out;
 }

@@ -383,7 +383,9 @@ export class Globe {
       return;
     }
 
-    const layer = this.layers.activeLayer;
+    // P3 多图层合成：单可见层 = 原 activeLayer 原样（零改动路径）；≥2 可见
+    // 层 = 集合的合成层（CompositeImageryProvider 逐瓦片叠加）。
+    const layer = this.layers.renderLayer;
     if (layer === null) {
       this._clearTilePrimitives();
     } else {
@@ -395,8 +397,13 @@ export class Globe {
     // Hidden layers still tick `update` — ImageryLayer uses the hidden branch
     // only to warm its root tiles (16 fetches, one-time), so flipping a layer
     // visible never starts from an empty cache (no full-screen hole).
+    // Composite members are skipped: the composite layer drives their
+    // providers directly（合成层已取瓦片，避免成员层再跑一套四叉树双份拉取）.
+    const members = new Set(this.layers.compositedMembers());
     for (const hidden of this.layers) {
-      if (hidden !== layer) hidden.update(this._context.device, camera, this._context.drawingBufferHeight);
+      if (hidden !== layer && !members.has(hidden)) {
+        hidden.update(this._context.device, camera, this._context.drawingBufferHeight);
+      }
     }
 
     // Terrain streaming runs alongside imagery: meshes arrive asynchronously
@@ -592,15 +599,19 @@ export class Globe {
       const r = isSkirt ? POLAR_FILL_SKIRT_RADIUS : 1.0;
       const cosLat = Math.cos(lat);
       const sinLat = Math.sin(lat);
+      // 真椭球映射（与 EllipsoidGeometry.createRegion 同式同源，见彼处注释）——
+      // 极区填充与瓦片在 ±85.0511° 共边，两映射必须一致才无缝。
+      const nLat = 1 / Math.sqrt(1 - (1 - ratio * ratio) * sinLat * sinLat);
+      const zn = nLat * ratio * ratio;
       for (let slice = 0; slice <= slices; slice++) {
         const lon = west + (east - west) * (slice / slices);
         const nx = cosLat * Math.cos(lon);
         const ny = cosLat * Math.sin(lon);
         const nz = sinLat;
 
-        vertices[vi++] = r * nx;
-        vertices[vi++] = r * ny * ratio;
-        vertices[vi++] = r * nz * ratio;
+        vertices[vi++] = r * nLat * nx;
+        vertices[vi++] = r * nLat * ny;
+        vertices[vi++] = r * zn * nz;
 
         const ny2 = ny / ratioSq;
         const nz2 = nz / ratioSq;
@@ -690,6 +701,7 @@ export class Globe {
       vertices:    geometry.vertices,
       indices:     geometry.indices,
       translucent: false,
+      origin:      tileRTCEnabled() ? tileRTCOrigin(tile) : undefined,
     });
     // Geometry is generated directly in normalised ECEF (EllipsoidGeometry
     // convention, Earth radius = 1) — identity model matrix, like the base globe.
@@ -770,6 +782,7 @@ export class Globe {
         edgeLift,
         mercatorV: true,
         skirtDepth: TILE_SKIRT_DEPTH,
+        origin: tileRTCEnabled() ? tileRTCOrigin(tile) : undefined,
       }
     );
 
@@ -1117,6 +1130,39 @@ const TILE_SKIRT_DEPTH = 0.005;
  */
 function tileRadiusScale(_level: number): number {
   return 1.0;
+}
+
+/**
+ * tile 的 RTC 几何中心：tile 矩形中心点的真 WGS84 归一化 ECEF（与
+ * ImageryLayer.surfacePosition / Cartesian3.fromDegrees÷a 同式，f64）。
+ * 顶点相对它存储（f32 量化亚毫米），深度走 encoded-camera 精确路径
+ * （掠射瓦片量化残差根除，2026-10-18）。
+ */
+/**
+ * 瓦片 RTC 开关：缺省开（verify-depth 3 集 0.06% 过闸配置：瓦片 RTC 开 +
+ * 城市 legacy——城市墙掠射 f32 量化是残差主体，瓦片为陡角入射几乎不放大；
+ * 城市 RTC 单开虽 0/0 集，但与瓦片 RTC 同开的游离残差族随航线段波动，
+ * 落地取实测最优组合）。?waRtcTiles=0 可关瓦片 RTC 对照。
+ */
+function tileRTCEnabled(): boolean {
+  return typeof location === 'undefined'
+    || new URLSearchParams(location.search).get('waRtcTiles') !== '0';
+}
+
+function tileRTCOrigin(tile: TileKey): [number, number, number] {
+  const rect = tile.rectangle();
+  const lat = (rect.north + rect.south) / 2;
+  const lon = (rect.west + rect.east) / 2;
+  const ratio = WGS84_POLAR_RATIO;
+  const e2 = 1 - ratio * ratio;
+  const sinLat = Math.sin(lat);
+  const n = 1 / Math.sqrt(1 - e2 * sinLat * sinLat);
+  const cosLat = Math.cos(lat);
+  return [
+    n * cosLat * Math.cos(lon),
+    n * cosLat * Math.sin(lon),
+    n * (1 - e2) * sinLat,
+  ];
 }
 
 /** WGS84 polar / equatorial ratio (matches EllipsoidGeometry normalisation). */

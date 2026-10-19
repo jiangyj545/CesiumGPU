@@ -42,6 +42,12 @@ export interface ExtrudedGeometryOptions {
    * 默认系城市悬在影像上空即「白膜飘在空中」。
    */
   flattened?: boolean;
+  /**
+   * RTC 几何中心：真 WGS84 归一化 ECEF [x,y,z]（f64）。给出时输出顶点为
+   * **相对该中心的偏移**（f32 量化亚毫米），配合 Primitive.origin 走
+   * encoded-camera 深度精确路径；缺省 undefined = 绝对世界坐标（旧行为）。
+   */
+  origin?: [number, number, number];
 }
 
 /**
@@ -182,7 +188,14 @@ export class ExtrudedGeometry {
       nx: number, ny: number, nz: number,
       u: number, w: number,
     ): void => {
-      positions[v * 3] = p.x; positions[v * 3 + 1] = p.y; positions[v * 3 + 2] = p.z;
+      // RTC：origin 给定时写相对中心偏移（f64 减法后 f32 化，量化亚毫米）
+      if (options.origin) {
+        positions[v * 3]     = p.x - options.origin[0];
+        positions[v * 3 + 1] = p.y - options.origin[1];
+        positions[v * 3 + 2] = p.z - options.origin[2];
+      } else {
+        positions[v * 3] = p.x; positions[v * 3 + 1] = p.y; positions[v * 3 + 2] = p.z;
+      }
       normals[v * 3] = nx; normals[v * 3 + 1] = ny; normals[v * 3 + 2] = nz;
       uvs[v * 2] = u; uvs[v * 2 + 1] = w;
     };

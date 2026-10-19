@@ -18,6 +18,13 @@ export interface CityBlockBuilderOptions {
    * 城市悬在影像上空 ~13km（中纬度）。
    */
   flattenedWorld?: boolean;
+  /**
+   * RTC 几何中心：真 WGS84 归一化 ECEF [x,y,z]（f64，通常 = 城市锚点的
+   * fromDegreesNormalized 值）。透传 `ExtrudedGeometry.origin` 与产出的
+   * `Primitive.origin`——顶点相对中心存储（f32 量化亚毫米），深度走
+   * encoded-camera 精确路径。缺省 undefined = 绝对世界坐标（旧行为）。
+   */
+  origin?: [number, number, number];
 }
 
 /** 一个分块的纯数据结果（无 GPU 依赖，可直接测试 / 离线检查）。 */
@@ -65,6 +72,8 @@ export class CityBlockBuilder {
   private readonly _maxChunkBytes: number;
   /** 压扁世界放置（透传 ExtrudedGeometry.flattened）。 */
   private readonly _flattenedWorld: boolean;
+  /** RTC 几何中心（透传 ExtrudedGeometry/Primitive）；null = 绝对坐标。 */
+  private readonly _origin: [number, number, number] | null;
 
   /** 实例 id 分配上限（23-bit）：pick shader 输出 `0x800000 | id`，bit23 为实例标记位。 */
   static readonly MAX_INSTANCE_ID = 0x7FFFFF;
@@ -90,6 +99,7 @@ export class CityBlockBuilder {
   constructor(options: CityBlockBuilderOptions = {}) {
     this._maxChunkBytes = options.maxChunkBytes ?? CityBlockBuilder.DEFAULT_MAX_CHUNK_BYTES;
     this._flattenedWorld = options.flattenedWorld ?? false;
+    this._origin = options.origin ?? null;
   }
 
   /** 累计楼栋总数。 */
@@ -107,7 +117,10 @@ export class CityBlockBuilder {
    * @returns this，支持链式调用
    */
   addBuilding(ring: LonLatPoint[], heightM: number, semanticId = 0): this {
-    const g = ExtrudedGeometry.create({ ring, heightM, semanticId, flattened: this._flattenedWorld });
+    const g = ExtrudedGeometry.create({
+      ring, heightM, semanticId, flattened: this._flattenedWorld,
+      ...(this._origin ? { origin: this._origin } : {}),
+    });
     if (g.indexCount === 0) return this;
 
     // F12 实例 id：进程级唯一建筑序号（共享 23-bit 分配器，防跨系统串扰）。
@@ -168,6 +181,7 @@ export class CityBlockBuilder {
         vertices: c.geometry.vertices,
         indices:  c.geometry.indices,
         instanceIds: c.instanceIds,
+        ...(this._origin ? { origin: this._origin } : {}),
       }));
     }
     return out;

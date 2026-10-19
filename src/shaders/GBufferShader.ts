@@ -14,11 +14,16 @@ struct CameraUniforms {
   cameraPosition  : vec4<f32>,     // @192 (16B) world-space camera position (w = unused)
   viewportSize    : vec2<f32>,     // @208 (8B)
   nearFar         : vec2<f32>,     // @224 (8B) x = near, y = far
+  viewRotProj     : mat4x4<f32>,   // @240 (64B) RTC: proj·viewRot（view 平移置零）
+  camHi           : vec4<f32>,     // @304 (16B) RTC: 相机位置 double-single 高位
+  camLo           : vec4<f32>,     // @320 (16B) RTC: 低位
 }
 
 struct ModelUniforms {
   modelMatrix  : mat4x4<f32>,
   normalMatrix : mat4x4<f32>,  // upper-left 3x3 of inverse-transpose model matrix
+  originHi     : vec4<f32>,    // @128 RTC: 几何中心高位（真 WGS84 归一化），w=flag(1=RTC)
+  originLo     : vec4<f32>,    // @144 RTC: 中心低位；顶点 attribute = 相对中心偏移
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
@@ -50,7 +55,18 @@ fn vs_main(in: VertexInput) -> VertexOutput {
   out.worldPosition = worldPos4.xyz;
   out.worldNormal   = normalize(worldNorm4.xyz);
   out.uv            = in.uv;
-  out.clipPosition  = camera.viewProjMatrix * worldPos4;
+  if (model.originHi.w > 0.5) {
+    // RTC（相对相机渲染，encoded camera）：顶点 attribute = 相对几何中心的
+    // 偏移（幅度小 → f32 量化亚毫米）。hi/lo 差值经 Sterbenz 精确相减，
+    // δ 相互抵消 → 相对相机坐标 f32 无损；深度不再携带 ±0.38m 顶点量化。
+    let dHi = model.originHi.xyz - camera.camHi.xyz;
+    let dLo = model.originLo.xyz - camera.camLo.xyz;
+    let pRelEye = in.position + dHi + dLo;
+    out.worldPosition = model.originHi.xyz + in.position;  // worldPos RT（光照用）
+    out.clipPosition  = camera.viewRotProj * vec4<f32>(pRelEye, 1.0);
+  } else {
+    out.clipPosition  = camera.viewProjMatrix * worldPos4;
+  }
   return out;
 }
 
