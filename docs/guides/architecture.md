@@ -246,6 +246,7 @@ src/
 | 新绘制类型 | 参考 `DrawHandler`（LEFT_CLICK 加点 / RIGHT_CLICK、双击结束） | [interaction.md](./interaction.md) |
 | 新量测类型 | `Measure` 加静态方法 + `MeasureCollection.createMeasurement` 分发 | [analysis.md](./analysis.md) |
 | 飞行/漫游定制 | `CameraFlightPath` 或 `HermiteSpline`/`CatmullRomSpline` + `preRender` | [camera.md](./camera.md) 第 7 节 |
+| 新 tileset 内容格式 | `TilesetContentLoader` 测试缝替换 `loadTileContent`（magic 嗅探 `sniffTileContentKind` → 解码 → Primitive[]/Effect[]） | [3dtiles.md](./3dtiles.md) |
 
 ## 8. 混合与深度状态速查
 

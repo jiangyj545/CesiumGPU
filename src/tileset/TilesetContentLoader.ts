@@ -218,6 +218,16 @@ function resolveContent(
 ): TileContent | null {
   if (!raw || typeof raw.uri !== 'string' || raw.uri.length === 0) return null;
   const uri = raw.uri;
+  // 3DTiles 1.1 内嵌 content：uri 为 data: URI（base64 glb 内嵌进
+  // tileset.json）。不走 URL 相对解析（无 base 可言）、也不过 urlDecorator
+  // （key 注入等对自包含数据无意义）；resolvedUrl 原样持有，取数层
+  // （TilesetPrimitive）按前缀识别直接解码、不发网络请求。
+  if (uri.startsWith('data:')) {
+    const comma = uri.indexOf(',');
+    const mime = comma > 5 ? uri.slice(5, comma).split(';')[0].toLowerCase() : '';
+    const kind: TileContentKind = mime.includes('gltf') || mime === '' ? 'glb' : 'unknown';
+    return { uri, resolvedUrl: uri, kind };
+  }
   // 相对 tileset.json URL 解析为绝对 URL，再过 urlDecorator（key 注入等）。
   // baseUrl 可能本身是根相对路径（'/data/.../tileset.json'，无 origin）——
   // 直接 new URL(uri, baseUrl) 会抛 TypeError 落入保底分支，导致相对 uri

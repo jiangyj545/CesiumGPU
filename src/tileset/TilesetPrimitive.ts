@@ -73,7 +73,26 @@ export type TileContentLoader = (
 ) => Promise<BuiltTileContent>;
 
 /**
+ * data: URI → ArrayBuffer（3DTiles 1.1 内嵌 content）。支持 `;base64` 与
+ * 百分号编码的明文载荷；非法格式抛错（调用方计入 failed，不静默）。
+ */
+export function decodeDataUri(uri: string): ArrayBuffer {
+  const comma = uri.indexOf(',');
+  if (comma < 0) throw new Error(`TilesetPrimitive: 非法 data: URI（缺 "," 分隔）: ${uri.slice(0, 64)}…`);
+  const meta = uri.slice(5, comma);
+  const payload = uri.slice(comma + 1);
+  if (/;base64$/i.test(meta)) {
+    const bin = atob(payload);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+  return new TextEncoder().encode(decodeURIComponent(payload)).buffer as ArrayBuffer;
+}
+
+/**
  * 默认实现：fetch content → 剥壳/解析 → 组装 Primitive[]。
+ * data: URI（内嵌 content）直接解码、不发网络请求；其余 fetch 取数。
  * b3dm：extractGlb + RTC_CENTER；glb/gltf：整包直接 parseGlbBuffer。
  * 任何失败向上抛（Tileset3D 计入 failed，单瓦片失败不炸整树）。
  */
@@ -83,7 +102,9 @@ export const loadTileContent: TileContentLoader = async (
   tileTransform: Matrix4,
   fetchOptions?: { init?: RequestInit }
 ): Promise<BuiltTileContent> => {
-  const buffer = await fetchArrayBuffer(content.resolvedUrl, { init: fetchOptions?.init });
+  const buffer = content.resolvedUrl.startsWith('data:')
+    ? decodeDataUri(content.resolvedUrl)
+    : await fetchArrayBuffer(content.resolvedUrl, { init: fetchOptions?.init });
 
   let glbBuffer: ArrayBuffer;
   let rtc: RtcCenter | null = null;

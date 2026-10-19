@@ -26,6 +26,7 @@
 | FlowArrow 流动箭头线 | ✅ | polyline.material type:'flow'（弧长相位滚动 + 动态 positions 重建），见 [Entities 指南](docs/guides/entities.md) |
 | 雾 / 闪电 | ✅ | FogEffect（距离+高度雾+染色）/ LightningEffect（strike/包络/随机序列），见 [Effects 指南](docs/guides/effects.md) |
 | LERC 地形 | ✅ | ArcGIS Terrain3D LERC1 解码 + provider（headers/maximumLevel），见 [Terrain 指南](docs/guides/terrain.md) |
+| pnts 点云瓦片 | ✅ | 3DTiles pnts（非压缩/量化/Draco 点压缩 + RTC_CENTER），magic 嗅探分派（.e3m 后缀放行），见 [3DTiles 指南](docs/guides/3dtiles.md) |
 | 动态墙 | ✅ | `DynamicWall` 光带上涌墙体，见 [Effects 指南](docs/guides/effects.md) |
 | 扫描 | ✅ | `CircleScan` 贴地圆形扩散波前，见 [Effects 指南](docs/guides/effects.md) |
 | 粒子 | ✅ | `ParticleSystem` compute shader（火焰/喷泉/烟花/烟雾），见 [Effects 指南](docs/guides/effects.md) |

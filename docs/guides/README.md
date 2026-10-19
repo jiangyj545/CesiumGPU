@@ -15,6 +15,7 @@
 | 7 | [特效系统（Effects）](./effects.md) | `IPass`/`EffectManager`、动态墙/扫描/粒子/天气、自定义特效 pass 与 unlit 管线 |
 | 8 | [引擎架构（Architecture）](./architecture.md) | 4-pass 延迟渲染管线、目录结构、归一化 ECEF 坐标系约定、ADR 索引 |
 | 9 | [地形与贴地（Terrain）](./terrain.md) | `TerrainProvider` 双格式（quantized-mesh/Terrarium）、`sampleHeight` 采样、拾取/量测/几何贴地 |
+| 10 | [3DTiles 与 pnts 点云（3DTiles）](./3dtiles.md) | `Tileset3D` 树调度、b3dm/glb/pnts magic 嗅探分派、Draco 点压缩 wasm、RTC_CENTER 包围体合成 |
 
 ## 其他文档
 
@@ -30,6 +31,7 @@
 | [welcome.html](http://localhost:3001/examples/welcome.html) | 引擎能力总览 |
 | [01_imagery.html](http://localhost:3001/examples/01_imagery.html) | 影像瓦片体系 |
 | [02_camera.html](http://localhost:3001/examples/02_camera.html) | 相机与飞行 |
+| [101_pnts.html](http://localhost:3001/examples/101_pnts.html) | 3DTiles pnts 点云 |
 | [03_geojson.html](http://localhost:3001/examples/03_geojson.html) | Entity / GeoJSON |
 | [04_geometry.html](http://localhost:3001/examples/04_geometry.html) | 几何与图元 |
 | [05_draw.html](http://localhost:3001/examples/05_draw.html) | 绘制与量测 |
