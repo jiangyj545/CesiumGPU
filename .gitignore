@@ -46,3 +46,7 @@ docs/api/
 
 # W2b: 全量建筑分块数据（由 仿真/scripts/export_buildings_json.py 生成，不入 git）
 public/examples/data/buildings/
+
+# 本地会话/校验临时产物（.claude worktrees、svgcheck 页面截图比对）
+.claude/
+svgcheck/
