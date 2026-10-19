@@ -245,6 +245,9 @@
         '</html>',
       ].join('\n');
       document.getElementById('quickStart').innerHTML = highlight(QUICK_START);
+
+      // ── 文档页就绪探针（批量验证判据：脚本执行完毕无异常；中途抛错保持 undefined） ──
+      window.__DEMO_OK = true;
     })();
   </script>
 </body>
