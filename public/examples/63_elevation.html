@@ -32,7 +32,7 @@
     <div id="controls"></div>
     <div id="legend"><div class="bar"></div><span id="legendText">— m … — m</span></div>
     <div id="result">初始化中…</div>
-    <p class="warn">⚠ 需要本地地形服务在线：http://localhost:8888（terrain_hubei）。
+    <p class="warn">⚠ 需要本地地形服务在线：http://127.0.0.1:8888（terrain_hubei）。
       离线时采样全为 0，点阵呈最低色带。</p>
   </div>
   <script src="./js/demo-utils.js"></script>
@@ -56,7 +56,7 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
@@ -73,43 +73,67 @@
       };
 
       // ── 1. 挂载湖北地形（8888 quantized-mesh）──────────────────────
-      let sampleHeight = () => 0;
+      let terrainLayer = null;
       try {
         const provider = new engine.LocalQuantizedMeshProvider({
-          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
           maximumLevel: 14,
         });
         if (typeof engine.TerrainLayer === 'function') {
           viewer.globe.setTerrainProvider(provider);
-          sampleHeight = (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat);
+          terrainLayer = viewer.globe.terrainLayer;
         }
       } catch (err) {
         console.error('[63_elevation] terrain init failed:', err);
       }
 
       // ── 2. 网格采样 + 分层设色点阵 ─────────────────────────────────
-      const BBOX = { lonMin: 109.5, lonMax: 111.5, latMin: 30.7, latMax: 31.9 };
+      const BBOX = { lonMin: 109.7, lonMax: 110.5, latMin: 31.1, latMax: 32.1 }; // 神农架—大巴山（DEM 数据稠密区）
       const COLS = 32, ROWS = 24;
       const entities = viewer.scene.entities;
       let stat = { min: 0, max: 0, nonzero: 0 };
 
-      function rebuild() {
+      const DEG2RAD = Math.PI / 180;
+      let rebuildGen = 0;
+      async function rebuild() {
+        const gen = ++rebuildGen;
         entities.removeAll();
-        // 第一遍：采样求 min/max
-        const samples = [];
-        let min = Infinity, max = -Infinity;
+        // 先 await ensureRegion+pin 预载（L10）就绪再回读，避免读到未加载瓦片的 0
+        const pts = [];
         for (let r = 0; r < ROWS; r++) {
           for (let c = 0; c < COLS; c++) {
-            const lon = BBOX.lonMin + (BBOX.lonMax - BBOX.lonMin) * (c / (COLS - 1));
-            const lat = BBOX.latMin + (BBOX.latMax - BBOX.latMin) * (r / (ROWS - 1));
-            const h = sampleHeight(lon, lat);
-            samples.push([lon, lat, h]);
-            if (h < min) min = h;
-            if (h > max) max = h;
+            pts.push([
+              BBOX.lonMin + (BBOX.lonMax - BBOX.lonMin) * (c / (COLS - 1)),
+              BBOX.latMin + (BBOX.latMax - BBOX.latMin) * (r / (ROWS - 1)),
+            ]);
           }
         }
+        let samples = pts.map(([lon, lat]) => [lon, lat, 0]);
+        if (terrainLayer) {
+          // 分带采样：整包 2°×1.2° 的 L10 瓦片一次性预载会被 LRU 挤出
+          // （渲染流持续抢占），ensureRegion 结束时多数瓦片已不在缓存 →
+          // 回读全 0。按行带（4 行/带）逐带 ensureRegion+pin → 立刻回读，
+          // 每带仅 ~24 张瓦片，采样时仍是热的。
+          const BAND_ROWS = 4;
+          for (let r0 = 0; r0 < ROWS; r0 += BAND_ROWS) {
+            const r1 = Math.min(ROWS, r0 + BAND_ROWS);
+            const idx = [], cartos = [];
+            for (let i = 0; i < pts.length; i++) {
+              const r = Math.floor(i / COLS);
+              if (r >= r0 && r < r1) {
+                idx.push(i);
+                cartos.push(new engine.Cartographic(pts[i][0] * DEG2RAD, pts[i][1] * DEG2RAD, 0));
+              }
+            }
+            const res = await engine.sampleTerrain(terrainLayer, cartos, 10);
+            if (gen !== rebuildGen) return; // 已被更新一轮重建取代
+            res.forEach((c, k) => { samples[idx[k]][2] = c.height; });
+          }
+        }
+        // min/max → 8 级分带着色
+        let min = Infinity, max = -Infinity;
+        for (const s of samples) { if (s[2] < min) min = s[2]; if (s[2] > max) max = s[2]; }
         const range = Math.max(max - min, 1);
-        // 第二遍：按 8 级分带着色，逐点建实体
         for (const [lon, lat, h] of samples) {
           const band = Math.min(7, Math.floor((h - min) / range * 8));
           const [cr, cg, cb] = BAND_COLORS[band];
@@ -135,13 +159,13 @@
       // 地形瓦片异步就绪 → 周期重采样直到覆盖充分
       rebuild();
       let tries = 0;
-      const timer = setInterval(() => {
+      const timer = setInterval(async () => {
         tries += 1;
         if (!shown) return; // 隐藏期间只刷统计不重建
-        rebuild();
+        await rebuild();
         if (stat.nonzero > 0.6 || tries >= 12) clearInterval(timer);
         refresh();
-      }, 1200);
+      }, 1500);
 
       // ── 3. UI ──────────────────────────────────────────────────────
       let shown = true;
@@ -153,10 +177,10 @@
         refresh();
       });
       showBtn.classList.add('active');
-      addBtn('重新采样', () => {
+      addBtn('重新采样', async () => {
         clearInterval(timer);
         tries = 12; // 标记结束自动重采样
-        rebuild();
+        await rebuild();
         refresh();
       });
 
@@ -177,7 +201,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [110.8, 31.3, 380_000],
+          view: [110.1, 31.6, 380_000],
           imagery: 'gaode-sat',
           title: '63 · 高程分层设色 Elevation',
         }));

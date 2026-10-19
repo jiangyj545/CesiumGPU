@@ -44,7 +44,7 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
@@ -53,7 +53,7 @@
 
       // ── 1. 离线地形 provider（显式 URL 便于替换为自己的服务）────────
       const provider = new engine.LocalQuantizedMeshProvider({
-        url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+        url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
         maximumLevel: 14,
       });
 
@@ -108,6 +108,30 @@
         ['神农架(远)', 110.67, 31.74],
         ['恩施(远)', 109.49, 30.27],
       ];
+      // 远点瓦片不在相机视锥内 → 同步 sampleHeight 只会读到 0。
+      // 用 sampleTerrain(level 10) 按包络预载（ensureRegion）后采样；
+      // 不用 MostDetailed(L14)：1~2° 包络会拉数千瓦片，L10 精度足够面板展示。
+      const SAMPLE_LEVEL = 10;
+      let farPromise = null; // null = 未开始；Promise<[[name,lon,lat,h]|...]>
+      function farHeights() {
+        const t = globe.terrainLayer;
+        if (!t) return Promise.resolve(FAR.map(([n, lon, lat]) => [n, lon, lat, null]));
+        if (!farPromise) {
+          farPromise = engine.sampleTerrain(
+            t,
+            FAR.map(([, lon, lat]) => engine.Cartographic.fromDegrees(lon, lat)),
+            SAMPLE_LEVEL
+          ).then(
+            (res) => res.map((p, i) => [FAR[i][0], FAR[i][1], FAR[i][2], p.height]),
+            (err) => {
+              console.warn('[18] 远点预载采样失败:', err.message);
+              farPromise = null; // 允许下轮重试
+              return FAR.map(([n, lon, lat]) => [n, lon, lat, null]);
+            }
+          );
+        }
+        return farPromise;
+      }
       function refresh() {
         const t = globe.terrainLayer;   // null = 椭球模式
         const lines = [`地形模式: ${terrainOn ? '在线（8888 离线服务）' : '关闭（0 高椭球）'}`, '── 已加载区采样 ──'];
@@ -125,14 +149,19 @@
         } else {
           lines.push('（尚未定位到已加载瓦片，等待流式加载…）');
         }
-        lines.push('── 远城点（飞近后才有值，否则 0）──');
-        for (const [name, lon, lat] of FAR) {
-          const h = t ? t.sampleHeight(lon, lat) : 0;
-          lines.push(`${name}（${lon}, ${lat}）: ${h.toFixed(1)} m`);
-        }
-        result.textContent = lines.join('\n');
+        lines.push(`── 远城点（sampleTerrain L${SAMPLE_LEVEL} 预载采样）──`);
+        farHeights().then((rows) => {
+          for (const [name, lon, lat, h] of rows) {
+            lines.push(
+              h === null || h === 0
+                ? `${name}（${lon}, ${lat}）: 未加载/无数据（0 m）`
+                : `${name}（${lon}, ${lat}）: ${h.toFixed(1)} m`
+            );
+          }
+          result.textContent = lines.join('\n');
+        });
+        result.textContent = lines.join('\n') + '\n（远点采样中…）';
       }
-      setInterval(refresh, 1500);
 
       // ── 初始：开地形，视角定在湖北 ─────────────────────────────────
       setTerrain(true);

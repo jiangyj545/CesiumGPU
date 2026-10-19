@@ -154,15 +154,39 @@ export function decodeQuantizedMesh(
   // --- indices (high-water-mark, continuous until the edge-index region) ---
   // Layout verified against the live service and the official CesiumJS
   // decoder (CesiumTerrainProvider.createQuantizedMeshTerrainData):
-  //   u32 triangleCount (= first segment length only in this service's
-  //   tiles) followed by a CONTINUOUS u16 high-water-mark stream that runs
-  //   until the edge-index region begins. The edge region starts with four
-  //   u32 counts (west/south/east/north) each in [1, 200]; we scan forward
-  //   from the end of the declared segment for the first position where all
-  //   four counts are plausible, treating everything before it as indices.
+  //   u32 count followed by a CONTINUOUS u16 high-water-mark stream. The
+  //   u32 is the **triangle count** in this service's tiles (3× index values);
+  //   older readings treated it as a value count, truncating the stream to a
+  //   third and leaving every tile ~half untriangulated (sampleHeight covered
+  //   only ~50% of each tile — page 63 measured 33% grid coverage). Try the
+  //   3×count reading first and validate every decoded index against
+  //   vertexCount; on any out-of-range index (or truncated buffer) fall back
+  //   to the legacy edge-region scan below.
   const declaredCount = view.getUint32(off, true);
   off += 4;
 
+  const decodeHighWater = (count: number): Uint32Array | null => {
+    if (off + 2 * count > u8.length) return null; // truncated buffer
+    const out = new Uint32Array(count);
+    let highest = 0;
+    for (let i = 0; i < count; i++) {
+      const code = view.getUint16(off + 2 * i, true);
+      const index = highest - code;
+      if (code === 0) highest++;
+      if (index < 0 || index >= vertexCount) return null; // desynced stream
+      out[i] = index;
+    }
+    return out;
+  };
+
+  // 两种读法竞争，取「更长的合法解码」：
+  // - A：declared 为三角形数（本服务真实布局，3×declared 个值）；
+  // - B：旧读法（declared 为值数）+ 边缘区扫描（合成瓦片 / 旧数据布局）。
+  // 合成旧布局瓦片的 declared 恰为值数且带边缘区时，B 通过扫描解出比
+  // A 更长的流（A 只读到 min(3×declared, 缓冲) 且常常越界判非法），
+  // 旧断言保持成立；真实服务瓦片无 4×u32 边缘区，B 只剩 declared 个
+  // 值（旧 bug：三角形只剩 1/3），A 胜出。
+  const candidateA = decodeHighWater(3 * declaredCount);
   const findEdgeRegionStart = (): number => {
     const maxScan = Math.floor((u8.length - off - 16) / 2);
     for (let n = declaredCount; n <= maxScan; n++) {
@@ -181,16 +205,12 @@ export function decodeQuantizedMesh(
     }
     return declaredCount; // fall back to the declared segment length
   };
-  const indexCount = findEdgeRegionStart();
-
-  const baseIndices = new Uint32Array(indexCount);
-  let highest = 0;
-  for (let i = 0; i < indexCount; i++) {
-    const code = view.getUint16(off, true);
-    off += 2;
-    baseIndices[i] = highest - code;
-    if (code === 0) highest++;
-  }
+  const candidateB = decodeHighWater(findEdgeRegionStart());
+  const baseIndices =
+    candidateA !== null && (candidateB === null || candidateA.length >= candidateB.length)
+      ? candidateA
+      : (candidateB ?? new Uint32Array(0));
+  off += 2 * baseIndices.length;
   // 之后的边缘索引 / 扩展块（octvertexnormals 等）全部跳过。
 
   // --- positions (geographic TMS, south-up) --------------------------------
@@ -244,7 +264,7 @@ export function decodeQuantizedMesh(
 
   // --- triangles: base mesh + skirt ----------------------------------------
   const triangles: number[] = [];
-  for (let i = 0; i < indexCount; i++) triangles.push(baseIndices[i]);
+  for (let i = 0; i < baseIndices.length; i++) triangles.push(baseIndices[i]);
 
   // 四条边分别按另一坐标排序，把相邻边缘顶点连成裙边三角形。
   const west: number[] = [];
@@ -284,6 +304,9 @@ export function decodeQuantizedMesh(
     indices,
     minHeight: heights.min,
     maxHeight: heights.max,
+    // 裙边顶点紧跟主网格（vertexCount..totalVertices-1），CPU 采样据此
+    // 排除裙边三角形（贴边采样不再得到负的裙深高程）。
+    skirtVertexStart: vertexCount,
     center: [
       view.getFloat64(OFFSET.CENTER, true),
       view.getFloat64(OFFSET.CENTER + 8, true),

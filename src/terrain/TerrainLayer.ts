@@ -52,7 +52,7 @@ export class TerrainLayer {
   /** Keys with a fetch in progress (dedup guard). */
   private readonly _inflight = new Set<string>();
 
-  /** Keys the provider reported as unavailable; not retried this session. */
+  /** Keys whose fetch failed (transient or data-less) — session-scoped skip. */
   private readonly _failed = new Set<string>();
 
   /**
@@ -287,7 +287,29 @@ export class TerrainLayer {
     this._pinnedTiles.clear();
   }
 
+  /**
+   * 解除 `boundsDeg` 覆盖的 `level` 级瓦片 pin（只删这些键，不动其它
+   * 分析 pin；{@link sampleTerrain} 采样周期专用，避免 unpinAll 误伤
+   * 淹没/水深等长周期 pin）。
+   */
+  unpinRegion(
+    boundsDeg: { west: number; south: number; east: number; north: number },
+    level: number
+  ): void {
+    for (const tile of this._tilesInBounds(boundsDeg, level)) {
+      this._pinnedTiles.delete(tile.key);
+    }
+  }
+
   // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * `ensureRegion` 实际加载的层级（`level` 钳制到 layer / provider 最大值）。
+   * 采样 pin 需与预载层级对齐（见 sampleTerrain）。
+   */
+  effectiveLevel(level: number): number {
+    return Math.min(level, this._maximumLevel, this.provider.maximumLevel);
+  }
 
   /**
    * Quadtree selection with view-frustum and horizon culling (iterative,
@@ -412,6 +434,7 @@ export class TerrainLayer {
       });
     }
   }
+
 
   /**
    * Render set: each selected tile with its own mesh, or the nearest loaded
@@ -784,6 +807,10 @@ export class TerrainLayer {
     if (entry.llh === null) entry.llh = this._buildVertexLonLatHeight(entry.mesh);
     const llh     = entry.llh;
     const indices = entry.mesh.indices;
+    // 裙边排除（几何级）：含裙边顶点（index ≥ skirtVertexStart）的三角形
+    // 是贴边墙，插值出的高度是裙深伪高程（可比真实地形低数百米）。
+    // 宽松的重心容差会让贴边查询点落进这些 2D 退化窄条，须直接跳过。
+    const skirtStart = entry.mesh.skirtVertexStart ?? indices.length;
 
     // Work in tile-local coordinates: absolute lon/lat near ±180 have huge
     // magnitude where the squared-area denominators lose precision (a
@@ -796,9 +823,11 @@ export class TerrainLayer {
     const triCount = triangles === null ? indices.length / 3 : triangles.length;
     for (let t = 0; t < triCount; t++) {
       const i = triangles === null ? t * 3 : triangles[t];
-      const a = indices[i]     * 3;
-      const b = indices[i + 1] * 3;
-      const c = indices[i + 2] * 3;
+      const ia = indices[i], ib = indices[i + 1], ic = indices[i + 2];
+      if (ia >= skirtStart || ib >= skirtStart || ic >= skirtStart) continue; // skirt wall
+      const a = ia * 3;
+      const b = ib * 3;
+      const c = ic * 3;
 
       const ax = llh[a] - ox, ay = llh[a + 1] - oy;
       const e0x = llh[b] - ox - ax, e0y = llh[b + 1] - oy - ay;
@@ -1171,7 +1200,7 @@ const STITCH_CACHE_CAPACITY = 512;
  * 分析 pin 允许的最高瓦片层级（pinRegion 前置校验）。粗层 pin 才不会把
  * 渲染视锥需要的精细瓦片挤出缓存池。
  */
-const MAX_PIN_LEVEL = 10;
+export const MAX_PIN_LEVEL = 10;
 
 /** 分析 pin 的瓦片总数上限（pinRegion 前置校验）。 */
 const MAX_PINNED_TILES = 256;
@@ -1191,6 +1220,7 @@ function emptyRenderTile(z: number, x: number, y: number, ancestorLevels: number
 
 /** WGS84 polar / equatorial ratio (matches EllipsoidGeometry normalisation). */
 const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
+
 
 /** WGS84 semi-major axis (metres). */
 const WGS84_SEMI_MAJOR = 6378137.0;

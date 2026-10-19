@@ -34,7 +34,7 @@
     <p class="desc">用 DrawHandler 画一条<b>多点连续路径</b>（区别于两点直线剖面）：
       「分析」优先 POST /api/v1/spatial/profile（8891 后台 PostGIS + 湖北
       ASTER GDEM 30m），按当前重采样点数请求真实 DEM 剖面；失败或超时（30s）
-      回退为逐点 <code>sampleHeight</code> 前端近似。canvas 2D 绘制
+      回退为前端 <code>sampleTerrain</code> L10 预载采样（按剖面包络 ensureRegion）。
       「里程—海拔」剖面图，附最高/最低/平均高程、累计爬升/下降、最大坡度等统计；
       球面上同步画出贴地路径线与顶点标记。</p>
     <label>剖面重采样点数 <span id="nVal">240</span></label>
@@ -48,7 +48,7 @@
     <div id="mode" class="mode">模式: 初始化…</div>
     <p class="warn">⚠ 分析优先请求后台 DEM 剖面 API（localhost:8892，湖北 ASTER
       GDEM 30m）；失败或超时（30s）回退为前端近似，该模式需要本地地形服务在线：
-      <code>http://localhost:8888</code>（terrain_hubei），离线时剖面退化为平线。
+      <code>http://127.0.0.1:8888</code>（terrain_hubei），离线时剖面退化为平线。
       默认示例路径（宜昌→荆门）位于 DEM 覆盖区 108-116E/29-34N。</p>
   </div>
   <canvas id="profileChart" height="220"></canvas>
@@ -60,7 +60,7 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
@@ -77,7 +77,7 @@
       try {
         if (typeof engine.TerrainLayer === 'function') {
           viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
-            url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+            url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
             maximumLevel: 14,
           }));
           terrainOk = true;
@@ -125,16 +125,34 @@
         return { pts, total };
       }
 
-      // ── 3. 剖面计算 + canvas 绘制 ───────────────────────────────────
-      function computeProfile(llDeg) {
+      // ── 3. 剖面计算 + canvas 绘图 ───────────────────────────────────
+      // 回退模式：sampleTerrain(L10) 按剖面包络 ensureRegion 预载瓦片后采样
+      // （不用 MostDetailed/L14：长路径会拉数千瓦片；L10 与 pinRegion 上限一致），
+      // 采样期间 pinRegion 防 LRU 挤出。
+      async function computeProfile(llDeg) {
         const n = nSlider.valueAsNumber;
         const { pts, total } = resamplePath(llDeg, n);
-        pts.forEach((p) => { p.h = sampleHeight(p.lon, p.lat); });
+        const t = viewer.globe.terrainLayer;
+        if (!t) {
+          pts.forEach((p) => { p.h = 0; });
+          return { pts, total };
+        }
+        const res = await engine.sampleTerrain(
+          t,
+          pts.map((p) => engine.Cartographic.fromDegrees(p.lon, p.lat)),
+          10
+        );
+        const b = {
+          west: Math.min(...pts.map((p) => p.lon)), south: Math.min(...pts.map((p) => p.lat)),
+          east: Math.max(...pts.map((p) => p.lon)), north: Math.max(...pts.map((p) => p.lat)),
+        };
+        try { t.pinRegion(b, 10); } catch (e) { console.warn('[80] pinRegion:', e.message); }
+        pts.forEach((p, i) => { p.h = res[i].height; });
         return { pts, total };
       }
 
       // ── 3b. 后台 DEM 剖面 API（8891，失败/超时回退前端近似）──────────
-      const PROFILE_API = 'http://localhost:8892/api/v1/spatial/profile';
+      const PROFILE_API = 'http://127.0.0.1:8892/api/v1/spatial/profile';
       const modeEl = document.getElementById('mode');
       let profileMode = 'local'; // 'backend' | 'local'
       let lastNote = '';
@@ -149,7 +167,7 @@
           modeEl.textContent = '模式: 后台 DEM 计算 | 后台 PostGIS/DEM:湖北 ASTER GDEM 30m';
           modeEl.style.color = '#4ade80';
         } else {
-          modeEl.textContent = '模式: 前端近似（离线）';
+          modeEl.textContent = '模式: 回退模式（8892 后台不可用，前端 ensureRegion 预载采样）';
           modeEl.style.color = '#ffd479';
         }
       }
@@ -324,7 +342,13 @@
             (err && err.name === 'AbortError' ? '超时 30s' : (err && err.message) || String(err)) +
             '）→ 已回退前端近似';
           setMode('local');
-          prof = computeProfile(llDeg); // 前端近似回退
+          try { prof = await computeProfile(llDeg); } // 前端预载采样回退
+          catch (e2) {
+            console.warn('[80] 预载采样失败:', e2.message);
+            const { pts, total } = resamplePath(llDeg, nSlider.valueAsNumber);
+            pts.forEach((p) => { p.h = 0; });
+            prof = { pts, total };
+          }
         }
         drawChart(prof, llDeg.length);
 

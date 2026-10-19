@@ -59,12 +59,8 @@ describe('sampleTerrainMostDetailed', () => {
     // y = floor((lat+90)/22.5) = 4（TMS 南起）。两格点同瓦片 → 恰好 1 块。
     expect(provider.requests).toEqual(['3/8/4']);
     // 高度回填（sampleTerrainMostDetailed 用 provider 最高层采样；
-    // Cartographic 存弧度：10° = 0.1745…, 20° = 0.3490…）。
-    expect(sample).toHaveBeenCalledWith(
-      (10 * Math.PI) / 180,
-      (20 * Math.PI) / 180,
-      3
-    );
+    // sampleTerrain 内部把弧度转成度传给 sampleHeight）。
+    expect(sample).toHaveBeenCalledWith(10, 20, 3);
     expect(result.map((p) => p.height)).toEqual([111, 222]);
     // 新数组：入参对象未被改写。
     expect(input.map((p) => p.height)).toEqual(inputSnapshot);
@@ -97,10 +93,35 @@ describe('sampleTerrain（level 钉定）', () => {
     const { layer, warn } = makeLayer(provider);
     const sample = vi.spyOn(layer, 'sampleHeight').mockReturnValue(42);
     const result = await sampleTerrain(layer, [Cartographic.fromDegrees(10, 20)], 2);
-    // z2：cols=8 → x=floor(190/45)=4；TMS 南起 rows=4 → y=floor(110/45)=2。
-    expect(provider.requests).toEqual(['2/4/2']);
-    expect(sample).toHaveBeenCalledWith((10 * Math.PI) / 180, (20 * Math.PI) / 180, 2);
+    expect(sample).toHaveBeenCalledWith(10, 20, 2);
     expect(result[0].height).toBe(42);
+    warn.mockRestore();
+  });
+
+  it('单位约定：弧度入参 → 度采样，返回高度为米（湖北 110.67°E/31.74°N）', async () => {
+
+    const provider = new RecordingProvider(5);
+    const { layer, warn } = makeLayer(provider);
+    // 引擎 sampleHeight 返回米（神农架山区数百~三千米），sampleTerrain 须原样透传，
+    // 不得按 Cartographic.height 归一化约定（1 = EARTH_SCALE 米）换算。
+    const ensure = vi.spyOn(layer, 'ensureRegion').mockResolvedValue(undefined);
+    const sample = vi.spyOn(layer, 'sampleHeight').mockReturnValue(1723.5);
+    const result = await sampleTerrain(
+      layer,
+      [Cartographic.fromDegrees(110.67, 31.74)],
+      5
+    );
+    // 预载 bounds 与采样入参均为度，而非弧度（0.1745…/0.3490… 那种值）。
+    expect(ensure).toHaveBeenCalledWith(
+      { west: 110.67, south: 31.74, east: 110.67, north: 31.74 },
+      5
+    );
+    expect(sample).toHaveBeenCalledWith(110.67, 31.74, 5);
+    expect(result[0].height).toBeCloseTo(1723.5, 6);
+    expect(result[0].longitude).toBeCloseTo((110.67 * Math.PI) / 180, 12);
+    expect(result[0].latitude).toBeCloseTo((31.74 * Math.PI) / 180, 12);
+    ensure.mockRestore();
+    sample.mockRestore();
     warn.mockRestore();
   });
 });

@@ -210,6 +210,42 @@ describe('quantizedMeshDecoder', () => {
       expect(Array.from(mesh.indices.slice(0, 6))).toEqual([0, 1, 2, 1, 3, 2]);
     });
 
+    it('declared 为三角形数（真实服务布局）：解出 3×declared 全量索引', () => {
+      // 3×3 网格 8 个三角形；索引流按「首次出现顺序」编号（高水位可编码）。
+      // 真实 8888 服务在顶点区后写的是**三角形数**（如 10/1650/690：
+      // declared=5518 → 16554 个 u16 值）。旧读法只取前 1/3，瓦片近半
+      // 无三角形 → sampleHeight 覆盖 ~50%（63 页实测 33%）。
+      const stream = [
+        0, 1, 2, 0, 2, 3, // cellA
+        1, 4, 5, 1, 5, 2, // cellB
+        3, 2, 6, 3, 6, 7, // cellC
+        2, 5, 8, 2, 8, 6, // cellD
+      ];
+      const tile: SyntheticTile = {
+        center: [0, 0, 0],
+        vertices: [
+          { u: 0, v: 0, h: 0 },
+          { u: 16383, v: 0, h: 4095 },
+          { u: 16383, v: 16383, h: 8191 },
+          { u: 0, v: 16383, h: 2047 },
+          { u: 32767, v: 0, h: 6143 },
+          { u: 32767, v: 16383, h: 10239 },
+          { u: 16383, v: 32767, h: 14335 },
+          { u: 0, v: 32767, h: 3071 },
+          { u: 32767, v: 32767, h: 12287 },
+        ],
+        indices: stream,
+        minH: 0,
+        maxH: 2000,
+        declaredIndexCount: 8, // 三角形数（非值数）
+      };
+      const mesh = decodeQuantizedMesh(packTile(tile), 10, 1650, 690);
+      // 基础索引 = 3×declared = 24，全部 < vertexCount 且还原原始流
+      const base = Array.from(mesh.indices.slice(0, 24));
+      expect(base).toEqual(stream);
+      expect(Math.max(...base)).toBeLessThan(9);
+    });
+
     it('高程官方 f32 对非法时回退 +56/+64 的 f64 对', () => {
       const tile: SyntheticTile = {
         ...cornerTile,

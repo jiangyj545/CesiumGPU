@@ -32,6 +32,14 @@ export interface TerrainMeshData {
   maxHeight: number;
   /** Tile centre, ECEF meters (for error/bounding-sphere computation). */
   center: [number, number, number];
+  /**
+   * Index of the first skirt (edge-wall) vertex; `undefined` = mesh without
+   * skirts. Vertices at or above this index are tile-rim duplicates pushed
+   * radially downward — CPU sampling skips triangles touching them (their
+   * interpolated heights are skirt artefacts, hundreds of metres below the
+   * real terrain).
+   */
+  skirtVertexStart?: number;
 }
 
 /**

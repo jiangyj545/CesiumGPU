@@ -1,4 +1,4 @@
-import type { TerrainLayer } from './TerrainLayer';
+import { TerrainLayer, MAX_PIN_LEVEL } from './TerrainLayer';
 import { Cartographic } from '../math/Cartographic';
 
 /**
@@ -35,16 +35,55 @@ export async function sampleTerrain(
 ): Promise<Cartographic[]> {
   if (positions.length === 0) return [];
 
+  // Cartographic 存弧度；ensureRegion / sampleHeight 以度为入参。
+  const RAD2DEG = 180 / Math.PI;
   let west = Infinity, east = -Infinity, south = Infinity, north = -Infinity;
   for (const p of positions) {
-    if (p.longitude < west) west = p.longitude;
-    if (p.longitude > east) east = p.longitude;
-    if (p.latitude < south) south = p.latitude;
-    if (p.latitude > north) north = p.latitude;
+    const lon = p.longitude * RAD2DEG;
+    const lat = p.latitude * RAD2DEG;
+    if (lon < west) west = lon;
+    if (lon > east) east = lon;
+    if (lat < south) south = lat;
+    if (lat > north) north = lat;
   }
-  await layer.ensureRegion({ west, south, east, north }, level);
+  const bounds = { west, south, east, north };
 
-  return positions.map(
-    (p) => new Cartographic(p.longitude, p.latitude, layer.sampleHeight(p.longitude, p.latitude, level))
-  );
+  // Cesium sampleTerrainMostDetailed 语义：结果不受缓存压力影响。pin 必须在
+  // 预载 await **之前**生效——预载期间渲染流（更精细瓦片）就会把已到手的
+  // 采样瓦片从 LRU 挤出，ensureRegion 结束时它们已不在缓存，回读只得 0。
+  // pin 层级与 ensureRegion 的钳制结果对齐，再封顶 MAX_PIN_LEVEL（pin 只允
+  // 许粗层）：>L10 时钉住包络的 L10 祖先作兜底——即便更精细采样瓦片被逐出，
+  // sampleHeight 也回退到祖先高程而非 0；pin 总数超限时退化为现状并
+  // console.info 一次。
+  const pinLevel = Math.min(layer.effectiveLevel(level), MAX_PIN_LEVEL);
+  let pinned = false;
+  try {
+    layer.pinRegion(bounds, pinLevel);
+    pinned = true;
+  } catch {
+    if (!pinDegradationNotified) {
+      console.info(
+        `sampleTerrain: 包络在 L${pinLevel} 反算的 pin 瓦片数超限，退化为不 pin（采样瓦片可能被 LRU 驱逐）`
+      );
+      pinDegradationNotified = true;
+    }
+  }
+
+  await layer.ensureRegion(bounds, level);
+
+  // 高度单位：米（Cesium sampleTerrain 语义）。注意与 Cartographic.height
+  // 的归一化约定（1 = EARTH_SCALE 米）不同——Cesium API 兼容层刻意保留米，
+  // 调用方（示例/测量面板）直接以米显示；如需归一化请自行 ÷EARTH_SCALE。
+  try {
+    return positions.map((p) => {
+      const lon = p.longitude * RAD2DEG;
+      const lat = p.latitude * RAD2DEG;
+      return new Cartographic(p.longitude, p.latitude, layer.sampleHeight(lon, lat, level));
+    });
+  } finally {
+    if (pinned) layer.unpinRegion(bounds, pinLevel);
+  }
 }
+
+/** 进程级“pin 退化已提示”标记（只 console.info 一次）。 */
+let pinDegradationNotified = false;

@@ -32,7 +32,7 @@
     <div id="controls"></div>
     <div id="legend"><div class="bar"></div><span id="legendText">— m … — m</span></div>
     <div id="result">初始化中…</div>
-    <p class="warn">⚠ 需要本地地形服务在线：http://localhost:8888（terrain_hubei）。</p>
+    <p class="warn">⚠ 需要本地地形服务在线：http://127.0.0.1:8888（terrain_hubei）。</p>
   </div>
   <script src="./js/demo-utils.js"></script>
   <script type="module">
@@ -56,7 +56,7 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
@@ -73,37 +73,65 @@
       };
 
       // ── 挂载湖北地形 ───────────────────────────────────────────────
-      let sampleHeight = () => 0;
+      let terrainLayer = null;
       try {
         const provider = new engine.LocalQuantizedMeshProvider({
-          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
           maximumLevel: 14,
         });
         if (typeof engine.TerrainLayer === 'function') {
           viewer.globe.setTerrainProvider(provider);
-          sampleHeight = (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat);
+          terrainLayer = viewer.globe.terrainLayer;
         }
       } catch (err) {
         console.error('[64_colorTerrain] terrain init failed:', err);
       }
 
       // ── 密集网格预采样（行优先，扫描动画按行取用）───────────────────
-      const BBOX = { lonMin: 109.6, lonMax: 111.4, latMin: 30.8, latMax: 31.8 };
+      const BBOX = { lonMin: 109.75, lonMax: 110.45, latMin: 31.15, latMax: 32.05 }; // 神农架—大巴山（DEM 数据稠密区）
       const COLS = 48, ROWS = 36;
       const entities = viewer.scene.entities;
       const grid = [];   // grid[r] = [{lon,lat,h}, ...]
       let hMin = Infinity, hMax = -Infinity;
 
-      function resample() {
+      const DEG2RAD = Math.PI / 180;
+      async function resample() {
         grid.length = 0;
         hMin = Infinity; hMax = -Infinity;
+        const pts = [];
         for (let r = 0; r < ROWS; r++) {
           const lat = BBOX.latMin + (BBOX.latMax - BBOX.latMin) * (r / (ROWS - 1));
-          const row = [];
           for (let c = 0; c < COLS; c++) {
             const lon = BBOX.lonMin + (BBOX.lonMax - BBOX.lonMin) * (c / (COLS - 1));
-            const h = sampleHeight(lon, lat);
-            row.push({ lon, lat, h });
+            pts.push({ lon, lat });
+          }
+        }
+        // await ensureRegion+pin 预载（L10）就绪再回读，避免读到未加载瓦片的 0
+        let hs = pts.map(() => 0);
+        if (terrainLayer) {
+          // 分带采样：整包 1.8°×1° 的 L10 瓦片一次性预载会被 LRU 挤出，
+          // 按行带（6 行/带）逐带 ensureRegion+pin → 立刻回读（同 63 页）。
+          const BAND_ROWS = 6;
+          for (let r0 = 0; r0 < ROWS; r0 += BAND_ROWS) {
+            const r1 = Math.min(ROWS, r0 + BAND_ROWS);
+            const idx = [], cartos = [];
+            for (let i = 0; i < pts.length; i++) {
+              const r = Math.floor(i / COLS);
+              if (r >= r0 && r < r1) {
+                idx.push(i);
+                cartos.push(new engine.Cartographic(pts[i].lon * DEG2RAD, pts[i].lat * DEG2RAD, 0));
+              }
+            }
+            const res = await engine.sampleTerrain(terrainLayer, cartos, 10);
+            res.forEach((c, k) => { hs[idx[k]] = c.height; });
+          }
+        }
+        for (let r = 0; r < ROWS; r++) {
+          const row = [];
+          for (let c = 0; c < COLS; c++) {
+            const i = r * COLS + c;
+            const h = hs[i];
+            row.push({ lon: pts[i].lon, lat: pts[i].lat, h });
             if (h < hMin) hMin = h;
             if (h > hMax) hMax = h;
           }
@@ -112,7 +140,6 @@
         legendText.textContent =
           `${Math.round(hMin)} m ─────── ${Math.round(hMax)} m（连续渐变）`;
       }
-      resample();
 
       // ── 扫描着色：自南向北逐行铺设彩色点 ───────────────────────────
       let exaggeration = 1;
@@ -149,9 +176,8 @@
         }, 90);
       }
 
-      // 地形瓦片异步就绪 → 延迟重采样并二次扫描
-      setTimeout(() => { resample(); startScan(); }, 2000);
-      startScan();
+      // 地形预载就绪后再扫描（await sampleTerrain 保证非 0 覆盖）
+      resample().then(() => startScan());
 
       // ── UI ─────────────────────────────────────────────────────────
       const exagBtns = [1, 2, 4].map((k) => {
@@ -164,7 +190,7 @@
         if (k === 1) btn.classList.add('active');
         return btn;
       });
-      addBtn('重新扫描', () => startScan());
+      addBtn('重采样+扫描', () => resample().then(() => startScan()));
 
       function refresh() {
         const done = scanRow * COLS;
@@ -184,7 +210,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [110.8, 31.3, 320_000],
+          view: [110.1, 31.6, 320_000],
           imagery: 'gaode-sat',
           title: '64 · 彩色地形 ColorTerrain',
         }));
