@@ -10,7 +10,7 @@
       padding:12px 14px;background:rgba(10,18,30,.82);border:1px solid rgba(120,180,255,.25);
       border-radius:8px;color:#d8e8ff;box-shadow:0 2px 12px rgba(0,0,0,.45);font:13px/1.6 system-ui,sans-serif;}
     .cg-panel h1{font-size:15px;margin:0 0 6px;color:#9fd0ff;}
-    .cg-panel .desc{font-size:12px;color:#8fa8c8;margin:0 0 8px;}
+    .cg-panel .desc{font-size:13px;color:#8fa8c8;margin:0 0 8px;}
     .cg-panel h2{font-size:12px;margin:8px 0 4px;color:#7fb4e8;}
     .cg-panel button{margin:3px 5px 3px 0;padding:4px 9px;font-size:12px;cursor:pointer;
       background:rgba(40,80,140,.55);color:#dbeaff;border:1px solid rgba(120,180,255,.35);
@@ -19,13 +19,13 @@
     .cg-panel button:disabled{opacity:.4;cursor:default;}
     .cg-panel input[type=text]{padding:4px 8px;font-size:12px;color:#dbeaff;
       background:rgba(20,35,60,.7);border:1px solid rgba(120,180,255,.3);border-radius:5px;width:120px;}
-    .cg-panel ul{list-style:none;margin:4px 0;padding:0;font-size:12px;}
+    .cg-panel ul{list-style:none;margin:4px 0;padding:0;font-size:13px;}
     .cg-panel li{display:flex;align-items:center;gap:6px;padding:3px 6px;margin:2px 0;
       background:rgba(30,50,85,.4);border-radius:4px;}
     .cg-panel li .bm-name{flex:1;color:#cfe4ff;cursor:pointer;}
     .cg-panel li .bm-name:hover{color:#fff;text-decoration:underline;}
     .cg-panel li .bm-del{padding:1px 7px;background:rgba(160,50,50,.5);}
-    .cg-panel #result{font:11px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+    .cg-panel #result{font:13px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
       white-space:pre-wrap;margin-top:8px;}
   </style>
 </head>
@@ -123,11 +123,31 @@
         if (history.length > 50) history.shift();   // 上限 50 条
         histIdx = history.length - 1;
         updateHistUi();
+        drawTrack();
       }
 
       function updateHistUi() {
         $('btnBack').disabled = histIdx <= 0;
         $('btnFwd').disabled = histIdx >= history.length - 1;
+      }
+
+      // ── Q4 精修：历史轨迹线（setView→flyTo 序列连线）────────────────
+      const track = viewer.scene.entities.add({
+        name: '历史轨迹',
+        polyline: {
+          positions: [],
+          width: 3,
+          color: new engine.Color(0.35, 0.9, 1.0, 0.85),
+        },
+      });
+      function drawTrack() {
+        if (history.length < 2) return;          // 单点无线段
+        const pts = history.map((v) => C3.fromDegreesNormalized(v.lon, v.lat, 0));
+        track.polyline = {
+          positions: pts,
+          width: 3,
+          color: track.polyline.color,
+        };
       }
 
       $('btnBack').addEventListener('click', () => {

@@ -23,13 +23,29 @@
       DemoUtils.toast('LERC 地形已挂载（失败自动降级为椭球）');
     }
 
-    const { viewer } = await DemoUtils.startup({
-      engine,
-      view: [105, 36, 6_000_000],
-      title: '100 LERC 地形 (ArcGIS Terrain3D)',
-    });
-    await demo(viewer);
-    DemoUtils.showCode(demo, '示例源码');
+    // ── 标准启动模板（异步 IIFE + __DEMO_OK 探针：module 顶层不允许 return）──
+    (async () => {
+      window.__DEMO_OK = false;
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 6_000_000],
+          title: '100 LERC 地形 (ArcGIS Terrain3D)',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer);
+        DemoUtils.showCode(demo, '示例源码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
   </script>
 </body>
 </html>

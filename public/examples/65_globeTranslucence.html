@@ -30,7 +30,7 @@
       对齐 EV 08_globeTranslucence（引擎 G-Buffer 为不透明管线，以画布透明 +
       骨架显隐近似）。</p>
     <div id="controls"></div>
-    <label>球体不透明度 <input id="alpha" type="range" min="0.1" max="1" step="0.01" value="1" /><span id="alphaVal">100%</span></label>
+    <label>球体不透明度 <input id="alpha" type="range" min="0.1" max="1" step="0.01" value="0.55" /><span id="alphaVal">55%</span></label>
     <div id="result">初始化中…</div>
     <p class="warn">⚠ 注：引擎 G-Buffer 管线不支持逐片元球体透明，透明度作用于
       画布合成层；"透视模式"以骨架线近似 EV 的地下透视。</p>
@@ -82,10 +82,12 @@
       };
 
       const graticule = buildGraticule(viewer, engine);
-      for (const e of graticule) e.show = false;
 
-      let seeThrough = false;
-      const seeBtn = addBtn('透视模式: 关', () => {
+      // 默认即主题效果：不透明度 0.55 + 透视模式开（对齐原 Cesium
+      // translucent demo 打开即见半透明透视球的体验）
+      let seeThrough = true;
+      viewer.globe.show = false;                 // 隐藏球面 → 透看背面
+      const seeBtn = addBtn('透视模式: 开', () => {
         seeThrough = !seeThrough;
         seeBtn.textContent = `透视模式: ${seeThrough ? '开' : '关'}`;
         seeBtn.classList.toggle('active', seeThrough);
@@ -93,6 +95,7 @@
         for (const e of graticule) e.show = seeThrough;  // 显示骨架
         refresh();
       });
+      seeBtn.classList.add('active');
 
       addBtn('低轨视角', () => viewer.camera.flyTo({
         destination: { lon: 114.3, lat: 30.6, height: 350_000 },
@@ -119,6 +122,7 @@
           `页面背景: 深空色，低透明度时透出星空底色`;
       }
       document.body.style.background = 'radial-gradient(circle at 50% 40%, #0b1530 0%, #020409 70%)';
+      viewer.canvas.style.opacity = slider.value; // 初始 0.55：打开即半透明
       refresh();
     }
 

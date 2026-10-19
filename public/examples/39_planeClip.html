@@ -127,7 +127,7 @@
                          toUnit(c3.lon, c3.lat, h), toUnit(c4.lon, c4.lat, h), UP);
           }
           w.show = false;
-          viewer.scene.addPrimitive(w);
+          viewer.scene.addTransparentPrimitive(w);
           walls.push(w);
         }
         applySlice();

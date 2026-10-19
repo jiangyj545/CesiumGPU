@@ -138,7 +138,7 @@
                 pixelSize: 16,
                 color: isEnd ? engine.Color.RED : engine.Color.GREEN,
               },
-              label: { text: name, font: '15px sans-serif', fillColor: engine.Color.WHITE, show: true },
+              label: { text: isEnd ? name : '', font: '15px sans-serif', fillColor: engine.Color.WHITE, show: isEnd },
             }));
             nPoint++;
           }
@@ -161,12 +161,12 @@
           if (e.position) collect(e.position);
         }
         if (minLon > maxLon) return; // 未采集到任何坐标
+        const cLon = (minLon + maxLon) / 2 - 0.03, cLat = (minLat + maxLat) / 2 + 0.01;
+        const hM = Math.max(Math.max(maxLon - minLon, maxLat - minLat) * 111_320 * 2, 20_000);
+        // {lon,lat} 走压扁系（与 Globe 同系）；归一化实体相对压扁地表
+        // 向北浮起，轨迹在画面偏北——高度取包络 2.5 倍保证整体入画
         viewer.camera.flyTo({
-          destination: {
-            lon: (minLon + maxLon) / 2,
-            lat: (minLat + maxLat) / 2,
-            height: Math.max(maxLon - minLon, maxLat - minLat) * 111_320 * 8,
-          },
+          destination: { lon: cLon, lat: cLat, height: hM },
           duration: 2.5,
         });
       }

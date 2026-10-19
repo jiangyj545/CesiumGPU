@@ -52,7 +52,7 @@
       };
 
       const LAT = 38.8;
-      const BALL_R = 12_000;
+      const BALL_R = 14_000;
       const ANCHOR_H = 60_000;                    // 弹簧锚点离地 60 km
 
       // ── 5 个弹簧参数：k 刚度(1/s²)、c 阻尼(1/s) 逐球递增 ────────────────
@@ -193,7 +193,7 @@
       setInterval(refresh, 150);
 
       viewer.camera.setView({
-        destination: C3.fromDegrees(116.8, 35.2, 1_200_000),
+        destination: C3.fromDegrees(116.4, 38.7, 260_000),
       });
       refresh();
     }

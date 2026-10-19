@@ -25,7 +25,7 @@
     <h1>37 · 模型小场景（航母编队）</h1>
     <div class="desc">
       对齐 EV-Globe 06_smallScene：多模型组合摆放一个场景。本页用
-      CVN-76 航母 + J10C 舰载机 ×2 + 鹰击-88 导弹箱 ×2 + 直升机
+      CVN-76 航母 + 护卫车 ×2 + 保障车 ×2 + 直-9 直升机
       在海面上摆一个编队锚泊阵型；支持逐模型显隐与视角/环绕控制。
       注：E3M 场景格式不支持，全部以 glTF Model 组合近似。
     </div>
@@ -36,9 +36,18 @@
     import * as engine from '/src/index.ts';
 
     const ES = engine.Camera.EARTH_SCALE;
+    const RHO = engine.Camera.WGS84_POLAR_RATIO;
 
+    // 引擎可见世界是「线性压扁归一化 ECEF」：(cosφcosλ, ρ·cosφsinλ, ρ·sinφ)·(1+h/a)
+    // （Globe/瓦片/相机 {lon,lat} 快捷同款）。fromDegrees 米制 WGS84 ECEF 与该面
+    // 相差 ~22 km，模型会悬空远离可见地表——这里按压扁公式构造 ECEF 喂给 eNU
+    // （内部 ÷EARTH_SCALE），平移分量正好落在可见海面上。
     function placeMatrix(lon, lat, hMeters, headingDeg) {
-      const ecef = engine.Cartesian3.fromDegrees(lon, lat, hMeters);
+      const rad = Math.PI / 180, s = 1 + hMeters / ES;
+      const ecef = new engine.Cartesian3(
+        Math.cos(lat * rad) * Math.cos(lon * rad) * s * ES,
+        Math.cos(lat * rad) * Math.sin(lon * rad) * RHO * s * ES,
+        Math.sin(lat * rad) * RHO * s * ES);
       const enu  = engine.Transforms.eastNorthUpToFixedFrame(ecef);
       const rot  = engine.Matrix4.fromRotationZ(engine.CesiumMath.toRadians(headingDeg));
       const yUp  = engine.Matrix4.fromRotationX(Math.PI / 2);
@@ -65,21 +74,27 @@
         lat: CENTER.lat + dyM / 110_540,
       });
 
-      // 模型清单：相对航母中心的摆放位置（米）/ 朝向 / 显示尺寸（米）
+      // 模型清单：相对航母中心的摆放位置（米）/ 朝向 / scale
+      // 注意 scale 语义是「米 / glTF 本地单位」（世界尺寸 = 本地几何 × scale），
+      // 不是最终米数：ligen 长轴 134.3 单位、GroundVehicle.glb 全模 8.6 单位、
+      // groundvehicle.gltf 8.74 单位、z9 机身 14.3 单位（z901 节点 0.007769
+      // 已含），据此校准到 ≈ 目标视觉尺寸。
+      // 注：J10C/MisYJ88 源模型为 KTX2 压缩纹理（引擎暂不支持）；DF26 的
+      // BN2.gltf 顶点带 baked 偏移且装配几何呈薄片状（任何 scale 下都不可辨），
+      // 均改用 GroundVehicle 护卫车辆替代。
       const DEFS = [
         { key: 'cvn',  label: 'CVN-76 航母', url: '/data/gltf/CVN-76/ligen.gltf',
-          dx: 0,    dy: 0,    heading: 15,  size: 340 },
-        // 注：J10C/MisYJ88 源模型为 KTX2 压缩纹理（引擎暂不支持），改用 DF26 护卫装备替代
-        { key: 'j10a', label: 'DF26 发射车 1', url: '/data/model/DF26/BN2.gltf',
-          dx: -90,  dy: 40,   heading: 105, size: 30 },
-        { key: 'j10b', label: 'DF26 发射车 2', url: '/data/model/DF26/BN2.gltf',
-          dx: -90,  dy: -50,  heading: 105, size: 30 },
+          dx: 0,    dy: 0,    heading: 15,  size: 2.5 },                 // ≈336 m
+        { key: 'j10a', label: '护卫车 1', url: '/data/model/GroundVehicle/GroundVehicle.glb',
+          dx: -90,  dy: 40,   heading: 105, size: 3.5 },                 // ≈30 m
+        { key: 'j10b', label: '护卫车 2', url: '/data/model/GroundVehicle/GroundVehicle.glb',
+          dx: -90,  dy: -50,  heading: 105, size: 3.5 },                 // ≈30 m
         { key: 'yj1',  label: '保障车 ×1',  url: '/data/gltf/groundvehicle.gltf',
-          dx: 260,  dy: 160,  heading: 200, size: 40 },
+          dx: 260,  dy: 160,  heading: 200, size: 4.6 },                 // ≈40 m
         { key: 'yj2',  label: '保障车 ×2',  url: '/data/gltf/groundvehicle.gltf',
-          dx: 280,  dy: -170, heading: 340, size: 40 },
+          dx: 280,  dy: -170, heading: 340, size: 4.6 },                 // ≈40 m
         { key: 'z9',   label: '直-9（悬停）', url: '/data/model/plane/z9.gltf',
-          dx: 20,   dy: 10,   heading: 250, size: 26, alt: 180 },
+          dx: 20,   dy: 10,   heading: 250, size: 1.8, alt: 180 },       // ≈26 m
       ];
 
       const models = {};   // key -> Model
@@ -114,14 +129,14 @@
       }
 
       const panView = () => viewer.camera.flyTo({
-        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.02, 5200),
-        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-38) },
+        destination: { lon: CENTER.lon + 0.0001, lat: CENTER.lat - 0.00025, height: 180 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-68) },
         duration: 2,
       });
       const deckView = () => {
         const p = rel(-40, 0);
         viewer.camera.flyTo({
-          destination: engine.Cartesian3.fromDegrees(p.lon, p.lat - 0.006, 900),
+          destination: { lon: p.lon, lat: p.lat - 0.006, height: 900 },
           orientation: { heading: engine.CesiumMath.toRadians(10), pitch: engine.CesiumMath.toRadians(-22) },
           duration: 2,
         });
@@ -147,7 +162,7 @@
         const rad = engine.CesiumMath.toRadians(orbitHeading);
         const p = rel(Math.sin(rad) * rM, -Math.cos(rad) * rM);
         viewer.camera.setView({
-          destination: engine.Cartesian3.fromDegrees(p.lon, p.lat, hM),
+          destination: { lon: p.lon, lat: p.lat, height: hM },
           orientation: { heading: rad, pitch: engine.CesiumMath.toRadians(-33) },
         });
         orbitRaf = requestAnimationFrame(orbitStep);

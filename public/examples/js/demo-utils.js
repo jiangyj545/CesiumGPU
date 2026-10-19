@@ -132,6 +132,9 @@
     'background:rgba(8,12,18,.95);border:1px solid rgba(92,207,255,.4);color:#8ee6ff;',
     'font:13px/1.4 system-ui,sans-serif;padding:8px 18px;border-radius:6px;',
     'box-shadow:0 4px 16px rgba(0,0,0,.5);}',
+    // 面板正文可读性（Q4）：全局覆盖各页 .cg-panel 12px 正文 → 13px
+    '.cg-panel .desc{font-size:13px !important;}',
+    '.cg-panel #result{font-size:13px !important;}',
   ].join('');
 
   var styleInjected = false;

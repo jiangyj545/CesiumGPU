@@ -138,8 +138,11 @@
       viewer.camera.flyTo({
         destination: { lon: 110.8, lat: 30.8, height: 260_000 },
         orientation: { heading: 0.6, pitch: -0.55 },
+        duration: 2.5,
       });
       result.textContent = '点「📸 截图」捕获当前画面。';
+      // Q4 精修：飞行到位后自动截一张预览图
+      setTimeout(() => { takeShot(); }, 3_200);
     }
 
     // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────

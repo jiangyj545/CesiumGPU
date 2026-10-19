@@ -139,12 +139,12 @@ fn fs_main(input : VSOut) -> @location(0) vec4<f32> {
 
   let viewDir = normalize(camPos - input.worldPos);
   let refl    = reflect(-viewDir, n);
-  let spec    = pow(max(dot(refl, normalize(water.sunDir.xyz)), 0.0), 64.0) * water.glint;
   let fres    = pow(1.0 - max(dot(viewDir, n), 0.0), 3.0);
-
+  let spec    = pow(max(dot(refl, normalize(water.sunDir.xyz)), 0.0), 30.0) * water.glint;
   let base  = water.color.rgb * (0.72 + 0.28 * crest);
   let rgb   = base + vec3<f32>(spec) + water.color.rgb * fres * 0.55;
-  let alpha = water.color.a * (0.62 + 0.38 * fres);
+  // 基础不透明度 0.62→0.78：压低底图瓦片色差透出（矩形色块接缝）。
+  let alpha = water.color.a * (0.78 + 0.22 * fres);
 
   return vec4<f32>(rgb, alpha);
 }

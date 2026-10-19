@@ -169,6 +169,21 @@
         }
       }
 
+      // ── 卫星轨迹线（CZML path 的静态近似：位置采样全序列连线）────────
+      const tracks = [];
+      for (const m of movers) {
+        if (m.samples.length < 2) continue;
+        tracks.push(scene.entities.add(new engine.Entity({
+          name: `${m.entity.name} 轨迹`,
+          polyline: {
+            positions: m.samples.map((s) =>
+              new engine.Cartesian3(s.v[0] / S, s.v[1] / S, s.v[2] / S)),
+            width: 2,
+            color: new engine.Color(1, 0.3, 0.9, 0.7),
+          },
+        })));
+      }
+
       // ── 兜底演示：样例全为 reference 引用时，用合成轨道动画保证画面非空 ──
       let fallbackMover = null;
       if (movers.length === 0 && lines.length === 0) {
@@ -226,7 +241,7 @@
       };
 
       addBtn('飞到数据范围', () => viewer.camera.flyTo({
-        destination: { lon: 105, lat: 25, height: 22_000_000 },
+        destination: { lon: 55, lat: -5, height: 5_500_000 },
         duration: 2,
       }));
 
@@ -237,7 +252,7 @@
       setInterval(() => {
         result.textContent =
           `CZML 包 ${packets.length} 个 · clock ${interval[0]} → ${interval[1]}\n` +
-          `动画点 ${movers.length} · 动画线 ${lines.length} · 静态包 ${nStatic}\n` +
+          `动画点 ${movers.length} · 动画线 ${lines.length} · 轨迹线 ${tracks.length} · 静态包 ${nStatic}\n` +
           `reference 引用跳过 ${nRef} 包${fallbackMover ? '（已降级为合成轨道演示）' : ''}\n` +
           `时间轴 ${fmtT(simTime)} / ${fmtT(duration)} ×${speed} ${playing ? '播放中' : '已暂停'}`;
       }, 300);
@@ -249,7 +264,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [105, 25, 22_000_000],
+          view: [55, -5, 5_500_000],
           imagery: 'gaode-sat',
           title: '21 · CZML 时间轴加载',
         }));

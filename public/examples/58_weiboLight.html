@@ -34,12 +34,11 @@
   <script type="module">
     import * as engine from '/src/index.ts';
 
-    const A = 6378137.0, B = 6356752.3142;
-    const E2 = (A * A - B * B) / (A * A), D2R = Math.PI / 180;
+    // 与引擎 DynamicWall 顶点同系：fromDegreesNormalized（WGS84/A，
+    // 08 页验证路径）。原 22km 柱高 × 6km 半宽在 10500km 相机距离下
+    // 不足 1px，故 0/12 可见；本页改为 76km 柱高 + 11km 半宽 + 拉近相机。
     function lonLat(lat_, lon_, hM = 0) {
-      const lat = lat_ * D2R, lon = lon_ * D2R, s = Math.sin(lat);
-      const n = A / Math.sqrt(1 - E2 * s * s), xy = (n + hM) * Math.cos(lat);
-      return new engine.Cartesian3(xy * Math.cos(lon) / A, xy * Math.sin(lon) / A, (n * (1 - E2) + hM) * s / A);
+      return engine.Cartesian3.fromDegreesNormalized(lon_, lat_, hM);
     }
 
     async function demo(viewer, engine) {
@@ -63,7 +62,7 @@
 
       const pillars = [];
       for (const city of CITIES) {
-        const d = 0.055;   // 光柱半宽（度），≈6 km
+        const d = 0.10;    // 光柱半宽（度），≈11 km（白昼底图下保证侧壁像素宽）
         const ring = [
           lonLat(city.lat - d, city.lon - d), lonLat(city.lat - d, city.lon + d),
           lonLat(city.lat + d, city.lon + d), lonLat(city.lat + d, city.lon - d),
@@ -71,10 +70,10 @@
         ];
         const wall = new engine.DynamicWall(viewer.context, {
           positions: ring,
-          height: 0.0035,                       // ≈22 km 光柱高
-          color: [city.c[0], city.c[1], city.c[2], 0.85],
+          height: 0.012,                      // ≈76 km 光柱高（与 08 页验证档一致）
+          color: [city.c[0], city.c[1], city.c[2], 0.95],
           speed: 0.5, repeat: 2,
-          camera: viewer.camera,
+          camera: viewer.scene.camera,
         });
         viewer.scene.effects.add(wall);
         wall.show = false;
@@ -82,7 +81,7 @@
         // 顶部呼吸光点（即时渲染）
         const top = viewer.scene.entities.add({
           name: city.name + '光点',
-          position: lonLat(city.lat, city.lon, 23_000),
+          position: lonLat(city.lat, city.lon, 77_000),
           point: { color: new engine.Color(city.c[0], city.c[1], city.c[2], 0.95), pixelSize: 8 },
           label: { text: city.name, font: '12px sans-serif', fillColor: new engine.Color(0.9, 0.95, 1.0, 0.85) },
         });
@@ -142,7 +141,7 @@
       });
     }
 
-    DemoUtils.startup({ engine, title: '58 · 城市光柱 WeiboLight', view: [105, 34.5, 10_500_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '58 · 城市光柱 WeiboLight', view: [112, 33, 4_200_000], imagery: 'gaode-sat' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

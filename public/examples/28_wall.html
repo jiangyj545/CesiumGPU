@@ -102,11 +102,13 @@
         },
       }));
 
-      addBtn('城墙正视（低空）', () => viewer.camera.flyTo({
-        destination: { lon: 108.94, lat: 34.12, height: 9_000 },
-        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-8) },
-        duration: 2.5,
-      }));
+      addBtn('城墙正视（低空）', () => {
+        // 低空（<15km）对象式 flyTo 会钻地黑屏（引擎已知），改用米制 setView 可靠路径
+        viewer.camera.setView({
+          destination: engine.Cartesian3.fromDegrees(108.94, 34.15, 8_000),
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-60) },
+        });
+      });
       addBtn('斜俯全域', () => viewer.camera.flyTo({
         destination: { lon: 108.98, lat: 34.20, height: 42_000 },
         orientation: { heading: engine.CesiumMath.toRadians(-30), pitch: engine.CesiumMath.toRadians(-40) },
@@ -118,10 +120,29 @@
         duration: 2.5,
       }));
 
-      result.textContent =
+      // 默认视角：南侧 8km、离地 ~23km 斜视外墙南立面——墙面光带
+      // 底部亮→顶部渐隐可辨（米制机位在压扁世界恒高 ~13km，已实测校准）
+      viewer.camera.setView({
+        destination: engine.Cartesian3.fromDegrees(108.94, 34.20, 10_000),
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-20) },
+      });
+
+      const baseText =
         `DynamicWall 环形墙 ×2（外 4km 高青色 / 内 2.5km 高橙色，光带上涌）\n` +
         `corridor 近似：宽幅半透明 polyline 26px + 中心亮线\n` +
         `诚实注明：引擎无 CorridorGraphics，走廊为贴地宽线近似`;
+      // 面板相机高度读数：正视低空机位防钻地验证（>0 即在地表之上）
+      const cam = viewer.scene.camera;
+      const camHeightM = () => {
+        const p = cam.position;
+        const r = Math.hypot(p.x, p.y, p.z);
+        return Math.max(0, (r - engine.Camera.surfaceRadius(p)) * engine.Camera.EARTH_SCALE);
+      };
+      window.__CAM_H = camHeightM;
+      setInterval(() => {
+        result.textContent = baseText + `\n相机高度: ${Math.round(camHeightM()).toLocaleString()} m`;
+      }, 500);
+      result.textContent = baseText + `\n相机高度: ${Math.round(camHeightM()).toLocaleString()} m`;
     }
 
     // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────

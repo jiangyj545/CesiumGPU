@@ -72,19 +72,18 @@
           name: r.name + ' 光晕底',
           polyline: {
             positions,
-            width: 22,
-            color: new engine.Color(cr, cg, cb, 0.16),
+            width: 28,
+            color: new engine.Color(cr, cg, cb, 0.28),
           },
         }));
         const core = scene.entities.add(new engine.Entity({
           name: r.name,
           polyline: {
             positions,
-            width: 5,
+            width: 6,
             color: new engine.Color(cr, cg, cb, 0.95),
           },
         }));
-        haloLines.push({ base, core, color: [cr, cg, cb], positions });
       }
 
       // ── 流动脉冲：短亮段沿每条线步进 ─────────────────────────────
@@ -136,18 +135,18 @@
       });
       addBtn('光晕增强', () => {
         for (const l of haloLines) {
-          l.base.polyline = { positions: l.positions, width: 34, color: new engine.Color(l.color[0], l.color[1], l.color[2], 0.26) };
+          l.base.polyline = { positions: l.positions, width: 40, color: new engine.Color(l.color[0], l.color[1], l.color[2], 0.4) };
         }
       });
       addBtn('光晕恢复', () => {
         for (const l of haloLines) {
-          l.base.polyline = { positions: l.positions, width: 22, color: new engine.Color(l.color[0], l.color[1], l.color[2], 0.16) };
+          l.base.polyline = { positions: l.positions, width: 28, color: new engine.Color(l.color[0], l.color[1], l.color[2], 0.28) };
         }
       });
       addBtn('全国视角', () => viewer.camera.flyTo({ destination: { lon: 110, lat: 32, height: 5_000_000 }, duration: 2 }));
 
       result.textContent =
-        `光晕航线 ${ROUTES.length} 条（宽 22px 淡底 + 5px 亮芯）\n` +
+        `光晕航线 ${ROUTES.length} 条（宽 28px 淡底 + 6px 亮芯）\n` +
         `流动脉冲 ${pulses.length} 个（每 ${STEP_MS}ms 步进，短亮段沿弧线移动）\n` +
         `诚实注明：无 PolylineGlowMaterial，光晕 = 双层透明度叠加`;
     }

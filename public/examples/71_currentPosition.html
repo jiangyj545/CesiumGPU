@@ -43,7 +43,7 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/1/3/1.terrain', { cache: 'no-store' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
@@ -64,7 +64,7 @@
       try {
         if (typeof engine.TerrainLayer === 'function') {
           viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
-            url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+            url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
             maximumLevel: 14,
           }));
           terrainOk = true;
@@ -80,10 +80,12 @@
       const RATIO = 6356752.3142 / 6378137;
       const EARTH = 6378137;
       function toLonLat(p) {
-        const mag = Math.hypot(p.x, p.y, p.z);
-        const ux = p.x / mag;
-        const uy = (p.y / mag) / RATIO;
-        const uz = (p.z / mag) / RATIO;
+        // 先还原压扁（y/z ÷RATIO 回球面），再取模长：直接对压扁坐标取模
+        // 会把中纬度海平面点算成 -5~6 km 的假高程（曾致 HUD -5611.8 m）。
+        const ux = p.x;
+        const uy = p.y / RATIO;
+        const uz = p.z / RATIO;
+        const mag = Math.hypot(ux, uy, uz);
         return {
           lon: Math.atan2(uy, ux) * 180 / Math.PI,
           lat: Math.atan2(uz, Math.hypot(ux, uy)) * 180 / Math.PI,

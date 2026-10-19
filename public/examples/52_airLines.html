@@ -95,7 +95,7 @@
         const color = AIRLINE_COLORS[r[0] % AIRLINE_COLORS.length];
         const line = viewer.scene.entities.add({
           name: `${src[0]} → ${dst[0]}`,
-          polyline: { positions: samples, width: 1.5, color: new engine.Color(color[0], color[1], color[2], 0.4) },
+          polyline: { positions: samples, width: 2.5, color: new engine.Color(color[0], color[1], color[2], 0.45) },
         });
 
         // 航班光点（沿弧推进）

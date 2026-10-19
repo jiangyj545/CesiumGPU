@@ -83,7 +83,7 @@
         name: '京沪航线',
         polyline: {
           positions: ROUTE.map(([lon, lat]) => lonLat(lon, lat, 120_000)),
-          width: 3,
+          width: 4,
           color: css('#ff4040'),
         },
       }));
@@ -98,7 +98,7 @@
         },
         polyline: {
           positions: [...REGION, REGION[0]].map(([lon, lat]) => lonLat(lon, lat)),
-          width: 2,
+          width: 3,
           color: css('#7fb0ff'),
         },
       }));
@@ -135,7 +135,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [105, 35, 7_000_000],
+          view: [111.0, 34.5, 1_300_000],
           imagery: 'gaode-sat',
           title: '04 · 手工构造几何体实体',
         }));

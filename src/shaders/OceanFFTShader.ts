@@ -641,7 +641,7 @@ fn cssmShadowFactor(worldPos: vec3<f32>, normal: vec3<f32>, viewDist: f32) -> f3
 
 const EARTH_SCALE : f32 = 6378137.0;
 const OCEAN_CASCADES : i32 = ${CASCADES};
-const FOG_DIST : f32 = 12000.0;
+const FOG_DIST : f32 = 9000.0;
 // 泡沫图案世界平铺周期（米）：中频级联量级，图案不糊也不高频闪烁
 const FOAM_TILE_M : f32 = 28.0;
 // 2026-10-09 破平铺：单层 repeat 采样在 35m 俯视下出现整片相同形状的
@@ -863,8 +863,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 能量摊到更宽 lobe，能量近似守恒）。stepMPix ≤ 0.1m（≈200m 内）
   // widen=1，近中场逐字节零回归；水上/水下同规则（远场 glitter 同源）。
   let widen = min( max( 1.0 + ( stepMPix - 0.025 ) * 8.0, 1.0 ), 12.0 );
-  var spec = ( pow( ndh, 500.0 / ( rough * widen ) ) * ( 2.8 / sqrt( widen ) )
-             + pow( ndh, 48.0 / ( rough * sqrt( widen ) ) ) * 0.38 ) * ( 0.25 + fresnel );
+  var spec = ( pow( ndh, 500.0 / ( rough * widen ) ) * ( 2.3 / sqrt( widen ) )
+             + pow( ndh, 48.0 / ( rough * sqrt( widen ) ) ) * 0.31 ) * ( 0.25 + fresnel );
+  // 海平线白噪带（40-60px）：远场欠采样 glitter 在雾带内碎成噪点——
+  // 2.5-8km 距离门把高光在进雾带前压掉 55%（中近场零回归）。
+  spec *= 1.0 - 0.55 * smoothstep( 2500.0, 8000.0, distM );
   spec = select( spec, spec * 0.35, uw );
 
   // CSSM 阴影因子（L3）：太阳直射贡献（太阳高光 + 天光反射）同乘，软边船影；
@@ -1124,7 +1127,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     fogCol = mix( fogCol, fogCol * sunTint * 1.4, toSun * apStrength );
   }
   let fog = 1.0 - exp( - distM / FOG_DIST );
-  col = mix( col, fogCol, fog * 0.88 );
+  col = mix( col, fogCol, fog * 0.96 );
 
   // 水下仰视 Snell 窗：视线与竖直夹角 < 临界角 ~48.6°（ndv > ~0.66）区域
   // 透明天空（亮窗），窗外全反射暗带；alpha 同步降——此前海面 alpha 恒

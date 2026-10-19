@@ -60,13 +60,29 @@
       DemoUtils.toast('雾 + 闪电已挂载：拖动视角观察距离/高度雾；每 ~6s 自动闪电');
     }
 
-    const { viewer } = await DemoUtils.startup({
-      engine,
-      view: [105, 36, 8_000_000],
-      title: '99 FogEffect / LightningEffect',
-    });
-    await demo(viewer);
-    DemoUtils.showCode(demo, '示例源码');
+    // ── 标准启动模板（异步 IIFE + __DEMO_OK 探针：module 顶层不允许 return）──
+    (async () => {
+      window.__DEMO_OK = false;
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [105, 36, 8_000_000],
+          title: '99 FogEffect / LightningEffect',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer);
+        DemoUtils.showCode(demo, '示例源码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
   </script>
 </body>
 </html>

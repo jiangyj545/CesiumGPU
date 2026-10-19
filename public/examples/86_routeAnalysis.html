@@ -113,20 +113,25 @@
         routeEnts = [];
       }
 
-      /** 途经点标牌 + 到地面垂线（heightM 为 0 时省略垂线） */
+      /** 途经点标牌 + 到地面垂线（heightM 为 0 时省略垂线）
+       * Q4 精修：标记 12px；标签按序号错开偏移 + 引线，避免垂直堆叠重叠 */
       function drawWaypointMarkers(wps, heightM) {
         wps.forEach((p, i) => {
+          // 标签错开：偶数航点标签在右上、奇数在左下，拉开垂直堆叠
+          const offX = i % 2 === 0 ? 46 : -46;
+          const offY = i % 2 === 0 ? -30 : 34;
           routeEnts.push(entities.add(new engine.Entity({
             position: norm(p.lon, p.lat, heightM),
             point: {
               color: i === 0 || i === wps.length - 1
                 ? engine.Color.RED : engine.Color.YELLOW,
-              pixelSize: 9,
+              pixelSize: 12,
             },
             label: {
               text: `${i + 1} ${p.name}`,
-              font: '13px sans-serif',
+              font: '14px sans-serif',
               fillColor: engine.Color.WHITE,
+              pixelOffset: new engine.Cartesian2(offX, offY),
             },
           })));
           if (heightM > 0) {

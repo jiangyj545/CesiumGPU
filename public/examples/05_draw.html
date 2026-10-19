@@ -98,6 +98,34 @@
         refresh();
       });
 
+      // ── Q4 精修：空闲态预置 1 点 + 1 线 + 1 面演示图形（可「清除全部」重绘）─
+      const S = engine.Camera.EARTH_SCALE;
+      const deg = (lon, lat, hM = 0) => {
+        const p = engine.Cartesian3.fromDegrees(lon, lat, hM);
+        return new engine.Cartesian3(p.x / S, p.y / S, p.z / S);
+      };
+      viewer.scene.entities.add({
+        name: '演示点',
+        position: deg(116.39, 39.9, 50_000),
+        point: { color: new engine.Color(1, 0.35, 0.25, 1), pixelSize: 10 },
+        label: { text: '演示点', fillColor: engine.Color.WHITE },
+      });
+      viewer.scene.entities.add({
+        name: '演示线',
+        polyline: {
+          positions: [deg(115.2, 40.2, 100_000), deg(116.4, 40.8, 100_000), deg(117.6, 40.3, 100_000)],
+          width: 3, color: new engine.Color(0.3, 0.85, 1.0, 0.95),
+        },
+      });
+      viewer.scene.entities.add({
+        name: '演示面',
+        polygon: {
+          hierarchy: { positions: [deg(115.6, 39.0), deg(116.8, 38.7), deg(116.6, 39.7)] },
+          color: new engine.Color(0.35, 1.0, 0.5, 0.45),
+        },
+      });
+      drawn.push('#1 演示点', '#2 演示线', '#3 演示面');
+
       viewer.camera.setView({
         destination: { lon: 116.39, lat: 39.9, height: 1_500_000 },
       });

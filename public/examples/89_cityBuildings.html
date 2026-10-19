@@ -204,7 +204,7 @@
       let semanticId = 0;
       for (let start = 0; start < payloads.length; start += BLOCKS_PER_BATCH) {
         const batch = payloads.slice(start, start + BLOCKS_PER_BATCH);
-        const builder = new CityBlockBuilder();
+        const builder = new CityBlockBuilder({ flattenedWorld: true });
         const tb = performance.now();
         for (const blk of batch) {
           for (const b of blk.buildings) {
@@ -267,7 +267,7 @@
       }
 
       // 2) 合批构建：N 栋 → 分块大 buffer（semanticId 用楼栋序号，F3 分割预留）
-      const builder = new CityBlockBuilder();
+      const builder = new CityBlockBuilder({ flattenedWorld: true });
       const t0 = performance.now();
       for (let i = 0; i < buildings.length; i++) {
         builder.addBuilding(buildings[i].ring, buildings[i].heightM, i + 1);

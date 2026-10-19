@@ -92,8 +92,9 @@
           const sy = (iv0 - this._vTop) / dv * img.naturalHeight;
           const sw = Math.max((iu1 - iu0) / du * img.naturalWidth, 1e-3);
           const sh = Math.max((iv1 - iv0) / dv * img.naturalHeight, 1e-3);
-          const canvas = document.createElement('canvas');
-          canvas.width = canvas.height = 256;
+          // ImageryProvider.requestTile 契约返回 ImageBitmap：普通 HTMLCanvasElement
+          // 没有 transferToImageBitmap（仅 OffscreenCanvas 有），须用离屏画布
+          const canvas = new OffscreenCanvas(256, 256);
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, sx, sy, sw, sh,
             (iu0 - u0) * 256, (iv0 - v0) * 256, (iu1 - iu0) * 256, (iv1 - iv0) * 256);

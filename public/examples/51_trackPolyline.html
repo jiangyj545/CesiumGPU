@@ -45,6 +45,101 @@
 
     async function demo(viewer, engine) {
       const info = document.getElementById('info');
+      // ── 底图垫底：航迹全在东海海面（~131.4°E, 31.8°N），高德/Mapnik
+      //    均无海洋瓦片 → 最底叠一层全局暗蓝单色底图（页面内
+      //    SolidOceanProvider，鸭子类型实现 ImageryProvider 接口，参照
+      //    17_localImage 的 SingleTileProvider 写法），陆地上 Mapnik/高德
+      //    照常覆盖，海面瓦片 404 处透出蓝色海面 ─────────────────────
+      class SolidOceanProvider {
+        constructor() {
+          this.url = 'solid-ocean://deep-blue';
+          this._tile = null;                     // 懒建 1×256×256 纯色瓦片
+        }
+        get maximumLevel() { return 18; }
+        get tileSize() { return 256; }
+        get subdomains() { return []; }
+        get ready() { return true; }
+        resolveUrl() { return this.url; }
+        async requestTile() {
+          if (!this._tile) {
+            const canvas = new OffscreenCanvas(256, 256);  // 契约要求 ImageBitmap
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = 'rgb(13, 36, 68)';
+            ctx.fillRect(0, 0, 256, 256);
+            this._tile = canvas.transferToImageBitmap();
+          }
+          return this._tile;
+        }
+      }
+      const layers = viewer.globe.layers;
+      const gaode = layers.get(0);   // startup 加载的高德卫星层
+      // 高德海面是纯色占位瓦片（~129,135,120，画面"格网"的来源）且不透明，
+      // 会盖住任何垫底层 → 用 SeaMaskXyzProvider 包装高德：纯色瓦片置空
+      // 透出下层蓝海，真实陆地影像瓦片原样透传（顶替原高德层）。
+      class SeaMaskXyzProvider {
+        constructor(url, subdomains) {
+          this._inner = new engine.XyzImageryProvider({
+            url, subdomains, maximumLevel: 18, tileSize: 256,
+          });
+        }
+        get url() { return this._inner.url; }
+        get maximumLevel() { return this._inner.maximumLevel; }
+        get tileSize() { return this._inner.tileSize; }
+        get subdomains() { return this._inner.subdomains; }
+        get ready() { return true; }
+        resolveUrl(key) { return this._inner.resolveUrl(key); }
+        async requestTile(key) {
+          const bmp = await this._inner.requestTile(key);
+          if (!bmp) return null;
+          const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(bmp, 0, 0);
+          const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+          // 高德海上占位瓦片：均值 ≈ (129,135,120) 灰绿纯色 + JPEG 噪声
+          //（对均值 ±15，个别像元到 ±22）。按「均值命中占位色板 ±10 且
+          // 全图对均值偏差 ≤ 24」判定；真实陆地影像均值不落此色板。
+          const sum = [0, 0, 0];
+          let n = 0;
+          for (let i = 0; i < d.length; i += 16) {  // 每 4 像元抽 1 检测
+            sum[0] += d[i]; sum[1] += d[i + 1]; sum[2] += d[i + 2]; n++;
+          }
+          const mean = [sum[0] / n, sum[1] / n, sum[2] / n];
+          const PLACEHOLDER = [129, 135, 120];
+          const meanMatch = mean.every((v, k) => Math.abs(v - PLACEHOLDER[k]) < 10);
+          if (meanMatch) {
+            for (let i = 0; i < d.length; i += 16) {
+              if (Math.abs(d[i] - mean[0]) > 48 || Math.abs(d[i + 1] - mean[1]) > 48 ||
+                  Math.abs(d[i + 2] - mean[2]) > 48) {
+                return canvas.transferToImageBitmap(); // 占位色但带强纹理
+              }
+            }
+            return transparentTile();              // 占位→全透明：透出下层蓝海
+          }
+          return canvas.transferToImageBitmap();      // 非占位色：真实影像瓦片
+        }
+      }
+
+      // 全透明瓦片：占位瓦片须回「透明」而非 null——null 会触发引擎的
+      // 祖先瓦片上采样回退（陆域祖先盖住海面），透明则真正透出下层。
+      function transparentTile() {
+        const canvas = new OffscreenCanvas(256, 256);
+        return canvas.transferToImageBitmap();
+      }
+      layers.addImageryProvider(new SolidOceanProvider());   // 底：全球暗蓝海面
+      layers.addImageryProvider(new engine.XyzImageryProvider({  // 中：陆域细节
+        url: 'http://127.0.0.1:8890/tiles/Mapnik/{z}/{x}/{y}.png',
+        maximumLevel: 16, tileSize: 256,
+      }));
+      layers.addImageryProvider(new SeaMaskXyzProvider(  // 顶：过滤版高德卫星
+        gaode.provider.url, gaode.provider.subdomains));
+      layers.remove(gaode);
+      let svcWarn = '';
+      fetch('http://127.0.0.1:8890/tiles/Mapnik/3/6/3.png', { method: 'HEAD' })
+        .then(r => { if (!r.ok) throw new Error(r.status); })
+        .catch(() => {
+          svcWarn = '⚠ 离线影像(8890)未启动，陆地无 Mapnik 细节（海面仍有蓝色底图）\n';
+        });
+
 
       // ── 加载历史航迹（[{trackline:[{time,lon,lat,alt,…}]}]）────────────
       const resp = await fetch('/data/trakline.json');
@@ -56,13 +151,7 @@
       if (raw.length < 2) throw new Error('trakline.json 无有效 trackline 点');
       const pts = raw.map(p => lonLat(p.lat, p.lon, p.alt));
 
-      // 全轨迹淡显
-      viewer.scene.entities.add({
-        name: '历史航迹',
-        polyline: { positions: pts, width: 2, color: new engine.Color(0.3, 0.7, 1.0, 0.35) },
-      });
-
-      // 弧长表
+      // 弧长表（进度 → 位置插值）
       const cum = [0];
       for (let i = 1; i < pts.length; i++) {
         cum.push(cum[i - 1] + engine.Cartesian3.distance(pts[i - 1], pts[i]));
@@ -77,37 +166,72 @@
         return new engine.Cartesian3(p0.x + (p1.x - p0.x) * f, p0.y + (p1.y - p0.y) * f, p0.z + (p1.z - p0.z) * f);
       }
 
-      // 已飞高亮线（进度推进 4% 时整体重建一次）
-      let flownEntity = null, flownMark = -1;
+      // ── 航迹渲染：FlowArrowPolyline 特效 ────────────────────────────
+      // 注：当前工作区实体几何（polyline/point/polygon，含不透明）经
+      // PrimitiveCollection 的绘制链路不显示（并发分支改动中），但特效
+      // 管线（FlowArrow/FloodWater 等）正常 → 本页航迹/领航点全部走特效。
+      const effects = viewer.scene.effects;
+      function flowLine(material, width) {
+        const f = new engine.FlowArrowPolyline(viewer.scene.context, { material, width });
+        f.setCamera(viewer.scene.camera);
+        effects.add(f);
+        return f;
+      }
+
+      // 全轨迹淡显（青蓝底线 + 同色箭头）
+      const fullLine = flowLine({
+        type: 'flow',
+        color: [0.3, 0.7, 1.0, 0.12],
+        arrowColor: [0.4, 0.8, 1.0, 0.25],
+        repeatCount: 40,
+      }, 3);
+      fullLine.setPositions(pts);
+
+      // 已飞高亮线（进度推进 4% 时整体重建一次；橙底线 + 橙箭头）
+      const flownLine = flowLine({
+        type: 'flow',
+        color: [1.0, 0.55, 0.1, 0.55],
+        arrowColor: [1.0, 0.55, 0.1, 0.95],
+        repeatCount: 40,
+      }, 5);
+      let flownMark = -1;
       function rebuildFlown(progress) {
         const step = Math.floor(progress * 25);
         if (step === flownMark) return;
         flownMark = step;
-        if (flownEntity) viewer.scene.entities.remove(flownEntity);
         const n = Math.max(2, Math.round(progress * (pts.length - 1)) + 1);
-        flownEntity = viewer.scene.entities.add({
-          name: '已飞航迹',
-          polyline: { positions: pts.slice(0, n), width: 4, color: new engine.Color(1.0, 0.55, 0.1, 0.95) },
-        });
+        flownLine.setPositions(pts.slice(0, n));
       }
 
-      // 领航点 + 6 级渐隐尾迹（point 即时渲染，逐帧更新）
-      const head = viewer.scene.entities.add({
-        name: '领航点', position: pts[0],
-        point: { color: new engine.Color(1.0, 0.3, 0.2, 1.0), pixelSize: 12 },
-      });
+      // 领航点 + 6 级渐隐尾迹：每级一段微小径向竖线（长 ~130 m），宽屏
+      // 幅 10-16 px 屏幕空间恒定——30 km 跟随视角下即清晰光点，逐帧位移。
+      function radialMarkerPair(p) {
+        return [p, new engine.Cartesian3(p.x * 1.00002, p.y * 1.00002, p.z * 1.00002)];
+      }
+      const head = flowLine({
+        type: 'flow', color: [1.0, 0.25, 0.15, 1.0],
+        arrowColor: [1.0, 0.25, 0.15, 1.0], repeatCount: 1,
+      }, 14);
       const TRAIL = 6;
       const trail = [];
       for (let i = 0; i < TRAIL; i++) {
         const fade = 1 - (i + 1) / (TRAIL + 1);
-        trail.push(viewer.scene.entities.add({
-          name: '尾迹' + i, position: pts[0],
-          point: { color: new engine.Color(1.0, 0.6 - fade * 0.3, 0.15, fade * 0.7), pixelSize: 10 * fade + 2 },
-        }));
+        trail.push(flowLine({
+          type: 'flow',
+          color: [1.0, 0.5 - fade * 0.2, 0.15, fade * 0.8],
+          arrowColor: [1.0, 0.5 - fade * 0.2, 0.15, fade * 0.8],
+          repeatCount: 1,
+        }, Math.round(8 * fade) + 2));
       }
+      head.setPositions(radialMarkerPair(pts[0]));
+      for (const t of trail) t.setPositions(radialMarkerPair(pts[0]));
 
       // ── 回放控制 ─────────────────────────────────────────────────────
-      let playing = true, progress = 0, speed = 2.0, follow = false, last = performance.now();
+      // 默认开启跟随（30km 视角）：默认远视距下 4km 航迹投影 <2px 不可见，
+      // 打开页面即以跟随视角看到航迹线与领航点（可点按钮关闭）。
+      let playing = true, progress = 0, speed = 2.0, follow = true, last = performance.now();
+      document.getElementById('btnFollow').textContent = '跟随: 开';
+      document.getElementById('btnFollow').classList.add('active');
       rebuildFlown(0);
 
       viewer.preRender = () => {
@@ -119,9 +243,9 @@
         last = now;
 
         const headPos = pointAt(progress);
-        head.position = headPos;
+        head.setPositions(radialMarkerPair(headPos));
         for (let i = 0; i < TRAIL; i++) {
-          trail[i].position = pointAt(Math.max(0, progress - (i + 1) * 0.008));
+          trail[i].setPositions(radialMarkerPair(pointAt(Math.max(0, progress - (i + 1) * 0.008))));
         }
         rebuildFlown(progress);
 
@@ -130,7 +254,7 @@
           const r = headPos;
           const lat = Math.atan2(r.z, Math.hypot(r.x, r.y)) / D2R;
           const lon = Math.atan2(r.y, r.x) / D2R;
-          viewer.camera.setView({ destination: { longitude: lon, latitude: lat, height: 30_000 } });
+          viewer.camera.setView({ destination: { lon, lat, height: 30_000 } });
         }
         refresh(progress);
       };
@@ -162,7 +286,7 @@
       function refresh(p) {
         const idx = Math.min(raw.length - 1, Math.round(p * (raw.length - 1)));
         const t = new Date(raw[idx].time);
-        info.textContent =
+        info.textContent = svcWarn +
           `点数: ${raw.length}   进度: ${(p * 100).toFixed(1)}%\n` +
           `时间: ${t.toISOString().slice(0, 19).replace('T', ' ')}\n` +
           `位置: ${raw[idx].lon.toFixed(3)}°E, ${raw[idx].lat.toFixed(3)}°N  高度 ${raw[idx].alt.toFixed(0)}m`;

@@ -82,13 +82,24 @@
         for (const entity of [...ds.entities]) {
           scene.entities.add(entity);
           loadedEntities.push(entity);
+          // Q4 精修：面填充 0.45 + 暗色描边（黄面在亮地表可辨）
+          if (entity.polygon) {
+            entity.polygon = {
+              ...entity.polygon,
+              color: new engine.Color(1.0, 0.85, 0.2, 0.45),
+            };
+            const ring = entity.polygon.hierarchy.positions;
+            const outline = scene.entities.add(new engine.Entity({
+              name: (entity.name || '边界') + ' 描边',
+              polyline: {
+                positions: [...ring, ring[0]],
+                width: 1.5,
+                color: new engine.Color(120 / 255, 90 / 255, 0, 0.8),
+              },
+            }));
+            loadedEntities.push(outline);
+          }
         }
-        const nPoly = loadedEntities.filter((e) => e.polygon).length;
-        const nLine = loadedEntities.filter((e) => e.polyline).length;
-        result.textContent =
-          `伴生 GeoJSON 加载完成（源 .shp → 服务端转换产物）\n` +
-          `实体 ${loadedEntities.length}：面 ${nPoly} / 线 ${nLine}\n` +
-          `提示：可点击"SHP 主头解析"查看二进制结构`;
         viewer.camera.flyTo({ destination: { lon: 105, lat: 35, height: 9_000_000 }, duration: 2 });
       }
 

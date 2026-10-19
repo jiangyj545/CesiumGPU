@@ -51,6 +51,7 @@ struct WeatherParams {
 struct VSOut {
   @builtin(position) pos    : vec4<f32>,
   @location(0)       corner : vec2<f32>,
+  @location(1)       edge   : f32,   // min(局部盒内高度到上/下边界的归一距离)，0=贴边
 };
 
 // Rain tint (pale blue-white) and snow tint (near white).
@@ -119,6 +120,8 @@ fn vs_rain(
   var out : VSOut;
   out.pos    = P.viewProj * vec4<f32>(p, 1.0);
   out.corner = corner;
+  // 顶/底 wrap 边界羽化系数（8% 高度带内淡入淡出，消除分层突变亮带）
+  out.edge   = min(local.y / P.boxSize.y + 0.5, 0.5 - local.y / P.boxSize.y) * 2.0;
   return out;
 }
 
@@ -140,21 +143,24 @@ fn vs_snow(
   var out : VSOut;
   out.pos    = P.viewProj * vec4<f32>(p, 1.0);
   out.corner = corner;
+  out.edge   = min(local.y / P.boxSize.y + 0.5, 0.5 - local.y / P.boxSize.y) * 2.0;
   return out;
 }
 
 @fragment
-fn fs_rain(@location(0) corner : vec2<f32>) -> @location(0) vec4<f32> {
-  // Slight fade towards the streak tips so hard quad edges are not visible.
-  let fade = 1.0 - abs(corner.y) * 0.2;
-  return vec4<f32>(RAIN_COLOR, P.style.y * fade);
+fn fs_rain(@location(0) corner : vec2<f32>, @location(1) edge : f32) -> @location(0) vec4<f32> {
+  // 条带尖端 + 横向边缘双羽化（硬矩形边不可见）。
+  let fade = (1.0 - abs(corner.y) * 0.2) * (1.0 - abs(corner.x) * 0.3);
+  // 盒边界羽化：wrap 瞬移的粒子淡入，消除水平分层亮带。
+  let edgeFade = smoothstep(0.0, 0.08, edge);
+  return vec4<f32>(RAIN_COLOR, P.style.y * fade * edgeFade);
 }
 
 @fragment
-fn fs_snow(@location(0) corner : vec2<f32>) -> @location(0) vec4<f32> {
+fn fs_snow(@location(0) corner : vec2<f32>, @location(1) edge : f32) -> @location(0) vec4<f32> {
   // Soft round flake: corner is quad-space [-1,1].
   let d     = length(corner);
-  let alpha = (1.0 - smoothstep(0.55, 1.0, d)) * P.style.y;
+  let alpha = (1.0 - smoothstep(0.55, 1.0, d)) * P.style.y * smoothstep(0.0, 0.08, edge);
   if (alpha <= 0.004) {
     discard;
   }

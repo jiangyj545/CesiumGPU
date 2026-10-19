@@ -24,7 +24,7 @@
   <div class="cg-panel">
     <h1>09 圆形扫描 CircleScan</h1>
     <p class="desc">双实例同时运行：北京（青色 500 km，3 环 / 2.5s）与
-      上海（橙红 250 km，2 环 / 1.6s）。扫描波从中心周期性向外扩散，圆盘逐顶点贴地投影。</p>
+      上海（深红 250 km，2 环 / 1.6s）。扫描波从中心周期性向外扩散，圆盘逐顶点贴地投影。</p>
     <div id="controls"></div>
     <div id="result">初始化中…</div>
   </div>
@@ -57,7 +57,7 @@
       const shanghaiScan = new engine.CircleScan(viewer.context, {
         center: { lon: 121.47, lat: 31.23 },
         radius: 250_000,                       // 250 km
-        color: [1.0, 0.35, 0.15, 0.9],         // 橙红
+        color: [0.75, 0.08, 0.05, 0.95],       // Q4：深红（亮地表对比 ≥3:1）
         speed: 1.6,
         rings: 2,
       });
@@ -70,7 +70,7 @@
       function refresh() {
         result.textContent =
           `北京扫描: ${bjOn ? '开' : '关'}  (500 km, 青, 3 环 / 2.5s)\n` +
-          `上海扫描: ${shOn ? '开' : '关'}  (250 km, 橙红, 2 环 / 1.6s)\n` +
+          `上海扫描: ${shOn ? '开' : '关'}  (250 km, 深红, 2 环 / 1.6s)\n` +
           '管线: scene.effects → additive (one, one) 合成到场景之上';
       }
       const bjBtn = addBtn('北京扫描: 开', () => {
@@ -90,11 +90,10 @@
       });
       shBtn.classList.add('active');
 
-      // 初始视角覆盖北京—上海
+      // 初始视角：拉近北京圈（Q4：扫描圈主体 ≥8% 画面）
       viewer.camera.setView({
-        destination: engine.Cartesian3.fromDegrees(119.0, 35.5, 5_500_000),
+        destination: engine.Cartesian3.fromDegrees(117.6, 36.6, 2_800_000),
       });
-      refresh();
     }
 
     // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
@@ -103,7 +102,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [119.0, 35.5, 5_500_000],
+          view: [117.6, 36.6, 2_800_000],
           imagery: 'gaode-sat',
           title: '08 · 圆形扫描 CircleScan',
         }));

@@ -70,7 +70,7 @@
       for (let i = 0; i <= 200; i++) pathPts.push(spline.evaluate((i / 200) * TOTAL));
       viewer.scene.entities.add({
         name: '航线',
-        polyline: { positions: pathPts, width: 2, color: new engine.Color(0.3, 0.8, 1.0, 0.9) },
+        polyline: { positions: pathPts, width: 3, color: new engine.Color(0.2, 0.7, 1.0, 0.95) },
       });
 
       // ── 城市标记：地表点 + 文字标签 ────────────────────────────────────

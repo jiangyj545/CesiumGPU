@@ -48,7 +48,7 @@
 
       // ── ENU 局部放样器：地表锚点 + 东/北/天 单位轴偏移（米）────────
       function makeLocal(originLon, originLat) {
-        const origin = engine.Cartesian3.fromDegrees(originLon, originLat, 0);
+        const origin = engine.Cartesian3.fromDegreesNormalized(originLon, originLat, 0);
         const enu = engine.Transforms.eastNorthUpToFixedFrame(origin);
         const v = enu.values; // 列主序：col0=east, col1=north, col2=up
         const east = new engine.Cartesian3(v[0], v[1], v[2]);
@@ -148,22 +148,27 @@
       // 标注
       scene.entities.add(new engine.Entity({
         name: '金字塔',
-        position: engine.Cartesian3.fromDegreesNormalized(97.0, 40.2, 0),
+        position: engine.Cartesian3.fromDegreesNormalized(97.0, 40.2, 180_000),
         point: { pixelSize: 10, color: engine.Color.WHITE },
         label: { text: '金字塔 6 面手工法线', font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
       }));
       scene.entities.add(new engine.Entity({
         name: '波浪面',
-        position: engine.Cartesian3.fromDegreesNormalized(99.0, 39.6, 0),
+        position: engine.Cartesian3.fromDegreesNormalized(99.0, 39.6, 140_000),
         point: { pixelSize: 10, color: engine.Color.WHITE },
         label: { text: '波浪绸带 32×16', font: '14px sans-serif', fillColor: engine.Color.WHITE, show: true },
       }));
 
       addBtn('侧视低角度', () => viewer.camera.flyTo({
-        destination: { lon: 96.4, lat: 38.4, height: 900_000 },
+        destination: { lon: 96.4, lat: 38.4, height: 600_000 },
         orientation: { heading: engine.CesiumMath.toRadians(35), pitch: engine.CesiumMath.toRadians(-22) },
         duration: 2.5,
       }));
+      // 初始即斜视贴近，主体（金字塔+绸带）占画面主体
+      viewer.camera.setView({
+        destination: { lon: 96.9, lat: 39.35, height: 190_000 },
+        orientation: { heading: engine.CesiumMath.toRadians(32), pitch: engine.CesiumMath.toRadians(-45) },
+      });
       addBtn('俯视', () => viewer.camera.flyTo({
         destination: { lon: 98.0, lat: 40.5, height: 1_400_000 },
         orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-75) },
@@ -182,7 +187,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [98.0, 40.5, 1_400_000],
+          view: [98.4, 39.8, 800_000],
           imagery: 'gaode-sat',
           title: '32 · 自定义几何顶点',
         }));

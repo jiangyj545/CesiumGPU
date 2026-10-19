@@ -128,13 +128,13 @@
 
       // 相机：先俯瞰模型排，再推近选中模型
       viewer.camera.setView({
-        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.004, 2200),
+        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.003, 1200),
         orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-35) },
       });
       setTimeout(() => {
         viewer.camera.flyTo({
-          destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.0016, 900),
-          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-30) },
+          destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.001, 105),
+          orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-18) },
           duration: 2.5,
         });
       }, 1200);

@@ -58,10 +58,19 @@
       const resp = await fetch('/data/buildings.geojson');
       if (!resp.ok) throw new Error(`buildings.geojson 加载失败: HTTP ${resp.status}`);
       const geojson = await resp.json();
-      const toUnit = (lon, lat) => {
-        const m = engine.Cartesian3.fromDegrees(lon, lat, 0);
-        return new engine.Cartesian3(m.x / EARTH, m.y / EARTH, m.z / EARTH);
-      };
+      // 压扁世界放置：与 Globe 网格顶点、相机 {lon,lat,height} 落点同约定
+      //（单位球方向 × (1+h/a)，y/z 乘极半径比）。旧 fromDegrees÷EARTH 是
+      // 未压扁测地系，比压扁地表高 ~15-24km——压扁系相机下建筑整体出视锥，
+      // 即「300 栋零可见」的根因。
+      const toUnit = (lon, lat) =>
+        engine.Camera.resolveDestination({ lon, lat, height: 30 });
+      // Entity polygon 顶点会被重归一到 1+height 壳层（输入半径被丢弃），
+      // 用中心地表矢长反解 height 把面压回贴地 +30m（防与影像 z-fight）。
+      const surfR = engine.Cartesian3.magnitude(
+        engine.Camera.resolveDestination({
+          lon: CENTER.lon, lat: CENTER.lat, height: 0,
+        }));
+      const SHELL_H = surfR + 30 / EARTH - 1.0;
       const ringCenter = (ring) => {
         let sx = 0, sy = 0;
         for (const [x, y] of ring) { sx += x; sy += y; }
@@ -75,6 +84,10 @@
         .map((f) => ({ f, c: ringCenter(f.geometry.coordinates[0]) }))
         .sort((a, b) => dist2(a.c) - dist2(b.c))
         .slice(0, MAX_BUILDINGS);
+      // 相位归一化：300 栋最近建筑实际跨度远小于 RADIUS_DEG（密集城区），
+      // 旧 dPhase=dist/0.02° 全挤在 ~0.1 → 整群同闪无环带。按选取集
+      // 最大距离归一 → dPhase∈[0,1] 铺满 2 个空间周期。
+      const maxD = Math.max(...picked.map((p) => Math.sqrt(dist2(p.c)))) || RADIUS_DEG;
 
       // ── 2. 建实体：半透明面 + 轮廓描边，按距中心距离记录相位 ─────────
       const entities = viewer.scene.entities;
@@ -82,11 +95,13 @@
       for (const { f, c } of picked) {
         const ring = f.geometry.coordinates[0];
         const positions = ring.map(([lon, lat]) => toUnit(lon, lat));
-        const dPhase = Math.sqrt(dist2(c)) / RADIUS_DEG; // 0~1 相位系数
+        const dPhase = Math.sqrt(dist2(c)) / maxD; // 0~1 相位系数（按选取集归一）
         const fill = entities.add(new engine.Entity({
           name: 'building-fill',
           polygon: {
             hierarchy: { positions },
+            // 顶点壳层 1+height：压回到压扁世界地表（见 SHELL_H 注释）
+            height: SHELL_H,
             color: new engine.Color(0.25, 0.55, 1.0, 0.45),
           },
         }));
@@ -94,16 +109,16 @@
           name: 'building-outline',
           polyline: {
             positions: [...positions, positions[0]],
-            width: 1.2,
-            color: new engine.Color(0.5, 0.95, 1.0, 0.85),
+            width: 2,                      // ≥2px 实宽；压暗避免盖过波纹环
+            color: new engine.Color(0.30, 0.75, 0.95, 0.60),
           },
         }));
         buildings.push({ fill, outline, dPhase });
       }
 
       viewer.camera.flyTo({
-        destination: { lon: CENTER.lon, lat: CENTER.lat - 0.008, height: 1800 },
-        orientation: { heading: 0, pitch: -Math.PI / 3.2 },
+        destination: { lon: CENTER.lon, lat: CENTER.lat - 0.007, height: 1500 },
+        orientation: { heading: 0, pitch: -Math.PI / 3.4 },
       });
 
       // ── 3. 呼吸波纹：中心扩散的亮度波 ──────────────────────────────
@@ -120,22 +135,24 @@
       const timer = setInterval(() => {
         if (!on) return;
         tick += 1;
-        const t = tick * 0.12 * speed;
+        const t = tick * 0.18 * speed;
         for (const b of buildings) {
-          const wave = Math.max(0, Math.sin(t - b.dPhase * 5.0)); // 由近及远
-          const glow = 0.35 + 0.65 * wave;
+          // 空间 2 个整周期（dPhase*4π）：任一时刻同时存在 2 圈亮环，
+          // sin² 收窄亮带宽度——锐利环缘比宽缓渐变更易辨成「环」。
+          const wave = Math.max(0, Math.sin(t - b.dPhase * Math.PI * 4)) ** 2;
           b.fill.polygon = {
             hierarchy: b.fill.polygon.hierarchy,
+            height: SHELL_H,             // 壳层必须随色一起重申（否则弹回 1.0 壳）
             color: new engine.Color(
-              0.25 * glow + 0.15,
-              0.55 * glow + 0.1,
-              1.0 * glow,
-              0.3 + 0.4 * wave,
+              0.10 + 0.80 * wave,       // 暗端近无 → 亮端不透明白青实心环，
+              0.20 + 0.80 * wave,       // 实心峰比半透明峰可见像素 ×3（实测）
+              0.50 + 0.50 * wave,
+              0.06 + 0.94 * wave,
             ),
           };
         }
         if (tick % 20 === 0) refresh();
-      }, 120);
+      }, 150);
 
       const fxBtn = addBtn('特效: 开', () => {
         on = !on;
@@ -145,6 +162,7 @@
           for (const b of buildings) {
             b.fill.polygon = {
               hierarchy: b.fill.polygon.hierarchy,
+              height: SHELL_H,
               color: new engine.Color(0.25, 0.55, 1.0, 0.45),
             };
           }
@@ -159,7 +177,7 @@
 
       function refresh() {
         result.textContent =
-          `建筑: ${buildings.length} 个面（中心 ${RADIUS_DEG}° 范围内选取）\n` +
+          `建筑: ${buildings.length} 个面（距中心最近 ${MAX_BUILDINGS} 栋，压扁世界贴地）\n` +
           `特效: 呼吸波纹（中心扩散，速度 ×${speed.toFixed(1)}）+ 青色描边\n` +
           `数据: /data/buildings.geojson（重庆一带，10.5MB 单次加载）\n` +
           `状态: ${on ? '运行中' : '已暂停（静态基色）'}`;

@@ -164,7 +164,7 @@
         drop();
       });
       addBtn('飞至视角', () => viewer.camera.flyTo({
-        destination: { lon: LON - 3.5, lat: LAT - 2.5, height: 1_500_000 },
+        destination: { lon: LON - 0.3, lat: LAT - 0.25, height: 480_000 },
         duration: 1.6,
       }));
 
@@ -180,7 +180,7 @@
 
       // 斜俯视角看清"下落—反弹"剖面
       viewer.camera.setView({
-        destination: C3.fromDegrees(LON - 3.5, LAT - 2.5, 1_500_000),
+        destination: C3.fromDegrees(LON - 0.3, LAT - 0.25, 480_000),
       });
       refresh();
     }
@@ -191,7 +191,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [112.9, 36.3, 1_500_000],
+          view: [116.1, 38.55, 480_000],
           imagery: 'gaode-sat',
           title: '81 · 自由落体物理',
         }));

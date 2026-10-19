@@ -67,7 +67,7 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
@@ -78,7 +78,7 @@
       let sampleHeight = () => 0;
       try {
         const provider = new engine.LocalQuantizedMeshProvider({
-          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
           maximumLevel: 14,
         });
         viewer.globe.setTerrainProvider(provider);
@@ -113,6 +113,7 @@
         $(id).addEventListener('input', (e) => {
           state[key] = parseFloat(e.target.value);
           $(labelId).textContent = fmt(state[key]);
+          if (key === 'radiusKm' && refreshOrbitRing) refreshOrbitRing();
         });
       };
       bindRange('radius', 'vRadius', (v) => v.toFixed(0), 'radiusKm');
@@ -151,6 +152,7 @@
           document.querySelectorAll('.pivotBtn').forEach((b) => b.classList.remove('active'));
           btn.classList.add('active');
           state.thetaDeg = 0;
+          refreshOrbitRing();
           if (state.mode === 'engine') {
             viewer.camera.flyTo({
               destination: { lon: pivot.lon, lat: pivot.lat, height: 500_000 },
@@ -162,25 +164,66 @@
       });
 
       // ── 手动极坐标：绕 pivot 的圆周点 + 朝向 pivot ──────────────────
-      const M_PER_DEG_LAT = 110540;
-      function applyPolar(thetaDeg) {
+      // 高度沿归一化球径向计算（与 Globe 瓦片同系）：先求地表东北向偏移点，
+      // 再整体缩放到半径 1 + h/EARTH_SCALE。绕过 setView{lon,lat,height}
+      // 的压扁椭球换算（原实现 8km 滑块实测 -10.7km 钻地的根因）。
+      const ES = engine.Camera.EARTH_SCALE;
+      function polarPos(thetaDeg, hM) {
         const d = state.radiusKm * 1000;
         const th = MATH.toRadians(thetaDeg);
-        // pivot 局部东北向偏移（东 = sinθ，北 = cosθ）
-        const dEast = d * Math.sin(th);
-        const dNorth = d * Math.cos(th);
-        const cosLat = Math.cos(MATH.toRadians(pivot.lat));
-        const lon = pivot.lon + dEast / (111320 * cosLat);
-        const lat = pivot.lat + dNorth / M_PER_DEG_LAT;
-        // 视线朝向 pivot：heading = θ + 180°（从相机指向圆心）
-        const heading = MATH.toRadians((thetaDeg + 180) % 360);
-        const height = state.heightKm * 1000 + sampleHeight(pivot.lon, pivot.lat);
+        const lo = MATH.toRadians(pivot.lon), la = MATH.toRadians(pivot.lat);
+        const g = new C3(Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la));
+        const east = new C3(-g.y, g.x, 0);
+        const north = new C3(
+          g.y * east.z - g.z * east.y,
+          g.z * east.x - g.x * east.z,
+          g.x * east.y - g.y * east.x,
+        );
+        const off = d / ES;
+        const s = Math.sin(th) * off, n = Math.cos(th) * off;
+        const dir = new C3(g.x + east.x * s + north.x * n, g.y + east.y * s + north.y * n,
+          g.z + east.z * s + north.z * n);
+        const m = C3.magnitude(dir);
+        const r = 1 + hM / ES;
+        return new C3((dir.x / m) * r, (dir.y / m) * r, (dir.z / m) * r);
+      }
+      function applyPolar(thetaDeg) {
+        const hM = state.heightKm * 1000 + sampleHeight(pivot.lon, pivot.lat);
+        const p = polarPos(thetaDeg, Math.max(hM, 100));
         viewer.camera.setView({
-          destination: { lon, lat, height },
-          orientation: { heading, pitch: MATH.toRadians(state.pitchDeg) },
+          destination: new C3(p.x * ES, p.y * ES, p.z * ES), // 米制 ECEF（07 页同款路径）
+          // 视线朝向 pivot：heading = θ + 180°（从相机指向圆心）
+          orientation: { heading: MATH.toRadians((thetaDeg + 180) % 360), pitch: MATH.toRadians(state.pitchDeg) },
         });
       }
 
+      // ── 环绕轨迹可视化：pivot 周身圆环 polyline（地表上方 300m）────
+      // 顶点走 fromDegrees/S（07 页验证路径）；polarPos 的球面 r=1 坐标
+      // 实测不被 polyline 管线拾取（不可见）。
+      const S = engine.Camera.EARTH_SCALE;
+      const lonLatH = (lon, lat, hM) => {
+        const p = engine.Cartesian3.fromDegrees(lon, lat, hM);
+        return new C3(p.x / S, p.y / S, p.z / S);
+      };
+      let orbitEntity = null;
+      function refreshOrbitRing() {
+        if (orbitEntity) viewer.scene.entities.remove(orbitEntity);
+        const hM = Math.max(sampleHeight(pivot.lon, pivot.lat), 0) + 300;
+        const mPerDegLat = 110540;
+        const mPerDegLon = 111320 * Math.cos(MATH.toRadians(pivot.lat));
+        const pts = [];
+        for (let i = 0; i <= 96; i++) {
+          const a = (i / 96) * Math.PI * 2;
+          pts.push(lonLatH(
+            pivot.lon + (state.radiusKm * 1000 * Math.sin(a)) / mPerDegLon,
+            pivot.lat + (state.radiusKm * 1000 * Math.cos(a)) / mPerDegLat,
+            hM));
+        }
+        orbitEntity = viewer.scene.entities.add({
+          name: '环绕轨迹',
+          polyline: { positions: pts, width: 3, color: new engine.Color(0.35, 0.9, 1.0, 0.95) },
+        });
+      }
       // ── 巡航循环 ──────────────────────────────────────────────────
       function tick(now) {
         try {

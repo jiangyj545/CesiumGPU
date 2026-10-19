@@ -52,6 +52,15 @@
     import * as engine from '/src/index.ts';
 
     async function demo(viewer, engine) {
+
+      // ── 垫底 Mapnik（陆域细节兜底），高德卫星仍置顶 ───────────────
+      const layers = viewer.globe.layers;
+      const gaode = layers.get(0);   // startup 加载的高德卫星层
+      layers.addImageryProvider(new engine.XyzImageryProvider({
+        url: 'http://127.0.0.1:8890/tiles/Mapnik/{z}/{x}/{y}.png',
+        maximumLevel: 16, tileSize: 256,
+      }));
+      layers.raiseToTop(gaode);
       const MATH = engine.CesiumMath;
       const result = document.getElementById('result');
       const $ = (id) => document.getElementById(id);
@@ -62,6 +71,7 @@
         dirSign: 1,           // 1 向东（经度推进）/ -1 向西
         axis: 'lon',          // 'lon' 东西环绕 | 'lat' 南北环绕
         lastTs: performance.now(),
+        warmupUntil: performance.now() + 2000, // 初始视角瓦片稳定 2s 后再自转
       };
 
       $('btnPlay').addEventListener('click', () => {
@@ -103,7 +113,7 @@
         try {
           const dt = Math.max(0, Math.min((now - state.lastTs) / 1000, 0.1));
           state.lastTs = now;
-          if (state.playing) {
+          if (state.playing && now >= state.warmupUntil) {
             const delta = MATH.toRadians(state.speedDeg * state.dirSign * dt);
             if (state.axis === 'lon') viewer.camera.rotate(delta, 0);
             else viewer.camera.rotate(0, delta);

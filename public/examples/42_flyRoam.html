@@ -50,7 +50,7 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
@@ -60,7 +60,7 @@
       // ── 地形层（湖北 quantized-mesh）────────────────────────────────
       try {
         viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
-          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
           maximumLevel: 14,
         }));
       } catch (err) {
@@ -92,13 +92,25 @@
       for (let i = 0; i <= 240; i++) pathPts.push(spline.evaluate((i / 240) * TOTAL));
       viewer.scene.entities.add({
         name: 'roam-path',
-        polyline: { positions: pathPts, width: 2, color: new engine.Color(0.3, 0.8, 1.0, 0.9) },
+        polyline: { positions: pathPts, width: 2.5, color: new engine.Color(0.3, 0.8, 1.0, 0.9) },
+      });
+      // Q4 精修：当前位置标记（随巡航推进）
+      const curMarker = viewer.scene.entities.add({
+        name: '当前位置',
+        position: pathPts[0],
+        point: {
+          color: new engine.Color(1.0, 0.3, 0.2, 1.0),
+          pixelSize: 30,
+          outlineColor: new engine.Color(1, 1, 1, 0.9),
+          outlineWidth: 4,
+        },
+        label: { text: '当前位置', fillColor: new engine.Color(1, 1, 1, 1) },
       });
       WAYPOINTS.forEach((c) => {
         viewer.scene.entities.add({
           name: 'wp-' + c.name,
           position: toUnit(C3.fromDegrees(c.lon, c.lat, c.alt)),
-          point: { color: new engine.Color(1.0, 0.8, 0.2, 1.0), pixelSize: 8 },
+          point: { color: new engine.Color(1.0, 0.8, 0.2, 1.0), pixelSize: 11 },
           label: { text: c.name, fillColor: new engine.Color(1, 1, 1, 1) },
         });
       });
@@ -179,9 +191,25 @@
 
       viewer.preRender = () => {
         try {
+          const t = currentT();                      // Q4 编辑事故补修：t 未定义致 preRender 抛错
           clock.tick();                             // Clock 推进仿真时间
-          const t = currentT();
           applyCamera(t);
+          // 标记=视锥内的最近路线点：沿视轴地表交点会落到对跖侧（ChkZY2 实锤），
+          // 改从预采样 pathPts 挑与视轴夹角<25° 的最近点，保证在画且在航线上
+          {
+            const cp = viewer.camera.position, cd = viewer.camera.direction;
+            let best = null, bestD = Infinity;
+            for (const q of pathPts) {
+              const dx = q.x - cp.x, dy = q.y - cp.y, dz = q.z - cp.z;
+              const dist = Math.hypot(dx, dy, dz);
+              if (dist < 1e-4) continue;
+              const cosA = (dx * cd.x + dy * cd.y + dz * cd.z) / dist;
+              if (cosA > Math.cos(engine.CesiumMath.toRadians(25)) && dist < bestD) {
+                best = q; bestD = dist;
+              }
+            }
+            if (best) curMarker.position = best;
+          }
           $('progress').value = t.toFixed(1);
           $('vProg').textContent = t.toFixed(1);
           const p = spline.evaluate(t);

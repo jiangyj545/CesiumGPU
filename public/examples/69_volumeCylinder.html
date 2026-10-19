@@ -93,11 +93,13 @@
         // 菲涅尔边缘增亮
         let V = -rd;
         let fres = 1.0 - abs(dot(normalize(normal), V));
-        // 高度渐隐：顶部淡出，底部稍亮
-        let heightFade = pow(1.0 - v, 1.6) * 0.85 + 0.15;
-        // 上升扫描光带
-        let band = 0.55 + 0.45 * sin((v * 3.0 - u.params.x * u.params.y * 0.8) * 6.2832);
-        let a = u.color.a * heightFade * band * (0.35 + fres * 0.65);
+        // 高度渐隐：顶部淡出，底部稍亮（指数 1.6→1.2、底值 0.15→0.4，柱身中段不再融背景）
+        let heightFade = pow(1.0 - v, 1.2) * 0.6 + 0.4;
+        // 上升扫描光带（下限 0.55→0.75，减暗带）
+        let band = 0.75 + 0.25 * sin((v * 3.0 - u.params.x * u.params.y * 0.8) * 6.2832);
+        // 菲涅尔边缘增亮：基础项 0.35→0.5，fres^0.8 ×1.2 → 边缘/正面 ≈2.5x
+        let fresTerm = 0.5 + pow(fres, 0.8) * 1.2;
+        let a = u.color.a * heightFade * band * fresTerm;
         return vec4<f32>(u.color.rgb * a, a);
       }
     `;
@@ -287,7 +289,7 @@
       const cyl = new VolumeCylinderPass(viewer.context, {
         camera: viewer.camera,
         radiusKm: 30, heightKm: 12, speed: 1,
-        color: [0.2, 0.95, 0.55, 0.55], // 雷达绿
+        color: [0.2, 0.95, 0.55, 0.7], // 雷达绿（alpha 0.55→0.7）
       });
       viewer.scene.effects.add(cyl);
 

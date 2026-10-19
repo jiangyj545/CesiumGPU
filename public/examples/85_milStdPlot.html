@@ -98,9 +98,14 @@
           color: new engine.Color(rgb[0], rgb[1], rgb[2], a),
         },
       });
-      const text = (lon, lat, t, dy = -0.12) => ({
+      // Q4 精修：标签 16px + 逐符号避让偏移（防与图形叠压）
+      const text = (lon, lat, t, dy = -0.16) => ({
         position: lonLatH(lon, lat + dy, 200),
-        label: { text: t, font: '13px sans-serif', fillColor: engine.Color.WHITE },
+        label: {
+          text: t, font: '16px sans-serif',
+          fillColor: engine.Color.WHITE,
+          pixelOffset: new engine.Cartesian2(0, 14),
+        },
       });
 
       const SYMBOL_DEFS = {
@@ -184,10 +189,10 @@
       addBtn('清除全部', clearAll);
       addBtn('重置示例', () => {
         clearAll();
-        place('attack', 116.2, 38.6);
-        place('muster', 117.4, 38.2);
-        place('hq', 117.0, 39.0);
-        place('radar', 118.6, 38.7);
+        place('attack', 114.9, 38.0);
+        place('muster', 116.6, 39.4);
+        place('hq', 118.2, 38.1);
+        place('radar', 119.7, 39.5);
       });
 
       const handler = new engine.ScreenSpaceEventHandler(viewer.canvas);
@@ -214,11 +219,11 @@
         if (ll) place(selectedType, ll.lon, ll.lat);
       }, 'LEFT_CLICK');
 
-      // ── 初始示例态势 ──────────────────────────────────────────────────
-      place('attack', 116.2, 38.6);
-      place('muster', 117.4, 38.2);
-      place('hq', 117.0, 39.0);
-      place('radar', 118.6, 38.7);
+      // ── 初始示例态势（Q4：间距拉开 ≥150px @700km 视高）──────────────
+      place('attack', 114.9, 38.0);
+      place('muster', 116.6, 39.4);
+      place('hq', 118.2, 38.1);
+      place('radar', 119.7, 39.5);
 
       function refresh(note) {
         const counts = {};
@@ -234,7 +239,7 @@
       refresh();
 
       viewer.camera.setView({
-        destination: C3.fromDegrees(117.3, 37.4, 1_200_000),
+        destination: C3.fromDegrees(117.3, 38.7, 700_000),
       });
     }
 
@@ -244,7 +249,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [117.3, 37.4, 1_200_000],
+          view: [117.3, 38.7, 700_000],
           imagery: 'gaode-sat',
           title: '85 · 简版军标标绘',
         }));

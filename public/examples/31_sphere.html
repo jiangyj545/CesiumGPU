@@ -76,6 +76,7 @@
           vertices,
           indices: new Uint32Array(indices),
           position: new engine.Cartesian3(p.x / S, p.y / S, p.z / S),
+          scale: radiusM / S, // EllipsoidGeometry 输出单位球，靠 model matrix 缩放到实际半径
           color,
           translucent: !!opts.translucent,
           alpha: opts.alpha,
@@ -115,6 +116,7 @@
           vertices,
           indices: new Uint32Array(indices),
           position: new engine.Cartesian3(p.x / S, p.y / S, p.z / S),
+          scale: tubeBeadRadius / S,
           color: new engine.Color(0.75, 0.45, 0.95, 0.45),
           translucent: true,
           alpha: 0.45,

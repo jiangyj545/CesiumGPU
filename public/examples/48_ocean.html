@@ -53,17 +53,17 @@
       const ocean = new engine.DynamicWater(viewer.context, {
         positions: seaRect,
         color: [0.015, 0.10, 0.24, 0.88],      // 深海蓝
-        speed: 1.6, waveScale: 0.5, glint: 1.2,
-        sunDirection: [0.55, 0.35, 0.76],
+        speed: 1.6, waveScale: 0.6, glint: 4.0,
+        sunDirection: [0.62, 0.40, 0.67],
         camera: viewer.camera,
       });
       viewer.scene.effects.add(ocean);
 
       // ── 海况预设 ─────────────────────────────────────────────────────
       const SEA_STATES = {
-        calm:  { label: '平静', speed: 0.5, waveScale: 0.18, glint: 0.7, color: [0.02, 0.16, 0.30, 0.85] },
-        swell: { label: '涌浪', speed: 1.6, waveScale: 0.50, glint: 1.2, color: [0.015, 0.10, 0.24, 0.88] },
-        storm: { label: '风暴', speed: 3.4, waveScale: 1.0,  glint: 1.6, color: [0.05, 0.09, 0.14, 0.94] },
+        calm:  { label: '平静', speed: 0.5, waveScale: 0.20, glint: 2.2, color: [0.02, 0.16, 0.30, 0.85] },
+        swell: { label: '涌浪', speed: 1.6, waveScale: 0.60, glint: 4.0, color: [0.015, 0.10, 0.24, 0.88] },
+        storm: { label: '风暴', speed: 3.4, waveScale: 1.1,  glint: 5.0, color: [0.05, 0.09, 0.14, 0.94] },
       };
       let state = 'swell';
 
@@ -103,7 +103,7 @@
       refresh();
     }
 
-    DemoUtils.startup({ engine, title: '48 · 海洋效果 Ocean', view: [113.5, 14, 5_200_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '48 · 海洋效果 Ocean', view: [113.5, 14, 2_600_000], imagery: 'gaode-sat' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

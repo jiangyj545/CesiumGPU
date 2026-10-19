@@ -107,11 +107,11 @@
       });
       borderBtn.classList.add('active');
 
-      // 相机俯视北京周边
+      // 相机拉近北京环形墙（Q4：墙主体 ≥10% 画面，光带渐变可辨）
       viewer.camera.setView({
-        destination: engine.Cartesian3.fromDegrees(117.0, 37.5, 2_000_000),
+        destination: engine.Cartesian3.fromDegrees(116.7, 38.8, 380_000),
       });
-      refresh();
+      refresh();   // ChkZ：初始化路径未调用 refresh，#result 滞留「初始化中…」
     }
 
     // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
@@ -120,7 +120,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [117.0, 37.5, 2_000_000],
+          view: [116.7, 38.8, 380_000],
           imagery: 'gaode-sat',
           title: '08 · 动态墙 DynamicWall',
         }));

@@ -68,8 +68,7 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
-        .then(r => { if (!r.ok) throw new Error(r.status); })
+      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
             '\n⚠ 离线地形服务(8888)未启动：运行 python .omc/tmp/terrain_server.py 后刷新');
@@ -79,7 +78,7 @@
       let sampleHeight = () => 0;
       try {
         viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
-          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
+          url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
           maximumLevel: 14,
         }));
         sampleHeight = (lon, lat) => viewer.globe.terrainLayer.sampleHeight(lon, lat);
@@ -115,15 +114,15 @@
           return new engine.Cartesian3(c.x / 6378137, c.y / 6378137, c.z / 6378137);
         }),
       });
-      // 路径可视化（沿法向抬升避免没入地形）
+      // 路径可视化（沿法向抬升避免没入地形；Q4：采样加密一倍、线宽 3）
       const pathPts = [];
-      for (let i = 0; i <= 160; i++) {
-        const p = spline.evaluate((i / 160) * SEG_SEC * WAYPOINTS.length);
+      for (let i = 0; i <= 320; i++) {
+        const p = spline.evaluate((i / 320) * SEG_SEC * WAYPOINTS.length);
         pathPts.push(new engine.Cartesian3(p.x * 1.00003, p.y * 1.00003, p.z * 1.00003));
       }
       viewer.scene.entities.add({
         name: 'walk-path',
-        polyline: { positions: pathPts, width: 2, color: new engine.Color(0.4, 1.0, 0.6, 0.8) },
+        polyline: { positions: pathPts, width: 3, color: new engine.Color(0.4, 1.0, 0.6, 0.85) },
       });
 
       // ── 相机应用：经纬度 → 贴地位置 + 航向视角 ─────────────────────

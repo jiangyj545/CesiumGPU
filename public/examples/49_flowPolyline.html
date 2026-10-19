@@ -26,7 +26,7 @@
     <div id="controls">
       <button id="btnPlay" class="active">暂停</button>
       <label>流速 <input id="speed" type="range" min="0.1" max="3" step="0.1" value="1" style="width:130px"> <span id="speedVal">1.0x</span></label>
-      <label>光点数/线 <input id="count" type="range" min="1" max="8" step="1" value="4" style="width:130px"> <span id="countVal">4</span></label>
+      <label>光点数/线 <input id="count" type="range" min="1" max="12" step="1" value="8" style="width:130px"> <span id="countVal">8</span></label>
     </div>
     <div id="info">初始化中…</div>
   </div>
@@ -86,18 +86,18 @@
           flows.push(viewer.scene.entities.add({
             name: style.name + '-flow' + i,
             position: pointAt(0),
-            point: { color: new engine.Color(...style.flowColor), pixelSize: 9 },
+            point: { color: new engine.Color(...style.flowColor), pixelSize: 12 },
           }));
         }
       }
-      let count = 4;
+      let count = 8;
       setCount(count);
 
       function update(t) {
         for (let i = 0; i < flows.length; i++) {
           const s = (t * (style.speed ?? 0.12) + i / flows.length) % 1;
           flows[i].position = pointAt(s);
-          flows[i].point.pixelSize = 6 + 4 * Math.sin(Math.PI * s); // 两端小、中段大
+          flows[i].point.pixelSize = 9 + 5 * Math.sin(Math.PI * s); // 两端小、中段大
         }
       }
       return { setCount: (n) => { count = n; setCount(n); }, update, get count() { return count; } };

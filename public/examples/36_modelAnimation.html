@@ -29,7 +29,7 @@
       对齐 EV-Globe 06_modelAnimation。<b>近似说明</b>：引擎 Model 暂未暴露
       activeAnimations（glTF 骨骼/关键帧剪辑，原示例用 CesiumMan walk 剪辑演示），
       本页改用「模型矩阵沿 CatmullRomSpline 航线动画」演示同样的
-      播放 / 暂停 / 剪辑切换 / 循环 / 变速语义；CesiumMan 以静立姿态摆放作参照。
+      播放 / 暂停 / 剪辑切换 / 循环 / 变速语义；CesiumMan 与奶罐卡车以静立姿态摆放作参照。
     </div>
     <div id="controls"></div>
     <label>速度 ×<input id="speedRange" type="range" min="0.2" max="3" step="0.1" value="1"></label>
@@ -39,24 +39,27 @@
     import * as engine from '/src/index.ts';
 
     const ES = engine.Camera.EARTH_SCALE;
+    const RHO = engine.Camera.WGS84_POLAR_RATIO;
 
+    // 引擎可见世界是「线性压扁归一化 ECEF」：(cosφcosλ, ρ·cosφsinλ, ρ·sinφ)·(1+h/a)
+    // （Globe/瓦片/相机 {lon,lat} 快捷同款）。fromDegrees 米制 WGS84 ECEF 与该面
+    // 相差 ~22 km，会让模型悬空出画——这里直接按压扁公式构造世界坐标，
+    // placeMatrix 喂米制版给 eNU（内部 ÷EARTH_SCALE），平移分量正好落在可见地表。
+    function flatPos(lon, lat, hMeters) {
+      const rad = Math.PI / 180, s = 1 + hMeters / ES;
+      return new engine.Cartesian3(
+        Math.cos(lat * rad) * Math.cos(lon * rad) * s,
+        Math.cos(lat * rad) * Math.sin(lon * rad) * RHO * s,
+        Math.sin(lat * rad) * RHO * s);
+    }
     function placeMatrix(lon, lat, hMeters, headingDeg) {
-      const ecef = engine.Cartesian3.fromDegrees(lon, lat, hMeters);
+      const p = flatPos(lon, lat, hMeters);
+      const ecef = new engine.Cartesian3(p.x * ES, p.y * ES, p.z * ES);
       const enu  = engine.Transforms.eastNorthUpToFixedFrame(ecef);
       const rot  = engine.Matrix4.fromRotationZ(engine.CesiumMath.toRadians(headingDeg));
       const yUp  = engine.Matrix4.fromRotationX(Math.PI / 2);
       return engine.Matrix4.multiply(enu, engine.Matrix4.multiply(rot, yUp, new engine.Matrix4()),
                                      new engine.Matrix4());
-    }
-
-    /** 归一化 ECEF → 经纬高（度 / 米），用于反算航向角 */
-    function toLonLatHeight(p) {
-      const mag = engine.Cartesian3.magnitude(p);
-      return {
-        lon: engine.CesiumMath.toDegrees(Math.atan2(p.y, p.x)),
-        lat: engine.CesiumMath.toDegrees(Math.asin(p.z / mag)),
-        h:   (mag - 1) * ES,
-      };
     }
 
     async function demo(viewer, engine) {
@@ -78,25 +81,29 @@
         lat: CENTER.lat + dyM / 110_540,
       });
 
-      // 地面参照：静立的 CesiumMan 与奶罐卡车（骨骼动画需 activeAnimations，暂缺）
+      // 地面参照：静立的 CesiumMan 与奶罐卡车（骨骼动画需 activeAnimations，暂缺）。
+      // scale 语义是「米 / glTF 本地单位」：Man 高 1.91 单位、奶罐卡车 6.2 单位、
+      // Cesium_Air 翼展 34.4 单位，按括号内目标视觉尺寸校准。
       const c0 = rel(0, -700);
       await engine.Model.fromGltfAsync({
         url: '/data/model/CesiumMan/Cesium_Man.glb', scene: viewer.scene,
-        modelMatrix: placeMatrix(c0.lon, c0.lat, 0, 0), scale: 12 / ES,
+        modelMatrix: placeMatrix(c0.lon, c0.lat, 0, 0), scale: 6.3 / ES,   // ≈12 m
       });
       const t0 = rel(-60, -760);
       await engine.Model.fromGltfAsync({
         url: '/data/model/CesiumMilkTruck/CesiumMilkTruck.glb', scene: viewer.scene,
-        modelMatrix: placeMatrix(t0.lon, t0.lat, 0, 35), scale: 20 / ES,
+        modelMatrix: placeMatrix(t0.lon, t0.lat, 0, 35), scale: 3.2 / ES,  // ≈20 m
       });
 
       // ── 两条"动画剪辑"：环形航线 / 8 字航线（CatmullRom 样条）────────
+      // 样条在工作区局部 ENU 平面（东/北/天，米）上插值：公里级范围平地近似
+      // 足够精确，且无需从 ECEF 反解经纬高（|p|-a 是地心半径差非海拔，球面
+      // 近似纬度还会把回放位置向北挤 ~20 km）。
       function ringPoints(rM, hM) {
         const pts = [], times = [];
         for (let i = 0; i < 8; i++) {
           const a = (i / 8) * Math.PI * 2;
-          const p = rel(Math.sin(a) * rM, Math.cos(a) * rM);
-          pts.push(engine.Cartesian3.fromDegrees(p.lon, p.lat, hM));
+          pts.push(new engine.Cartesian3(Math.sin(a) * rM, Math.cos(a) * rM, hM));
           times.push(i);
         }
         return { points: pts, times };
@@ -105,8 +112,7 @@
         const pts = [], times = [];
         for (let i = 0; i <= 12; i++) {
           const u = (i / 12) * Math.PI * 2;
-          const p = rel(Math.sin(u * 2) * rM, (Math.cos(u) - 0.35) * rM);
-          pts.push(engine.Cartesian3.fromDegrees(p.lon, p.lat, hM));
+          pts.push(new engine.Cartesian3(Math.sin(u * 2) * rM, (Math.cos(u) - 0.35) * rM, hM));
           times.push(i * 1.5);
         }
         return { points: pts, times };
@@ -123,8 +129,28 @@
 
       const plane = await engine.Model.fromGltfAsync({
         url: '/data/model/CesiumAir/Cesium_Air.glb', scene: viewer.scene,
-        modelMatrix: placeMatrix(CENTER.lon, CENTER.lat, 250, 0), scale: 50 / ES,
+        modelMatrix: placeMatrix(CENTER.lon, CENTER.lat, 250, 0), scale: 1.46 / ES,  // ≈50 m
       });
+
+      // ── 轨迹环：把当前剪辑的样条路径画出来（64 段采样）────────────
+      const pathEnt = viewer.scene.entities.add(new engine.Entity({
+        name: '航线轨迹',
+        polyline: {
+          positions: [],
+          width: 2,
+          color: new engine.Color(0.3, 0.85, 1.0, 0.9),
+        },
+      }));
+      function drawPath() {
+        const period = CLIP_PERIOD[clipName], pts = [];
+        for (let i = 0; i <= 64; i++) {
+          const p = clip.evaluate((i / 64) * period);
+          const ll = rel(p.x, p.y);
+          pts.push(flatPos(ll.lon, ll.lat, p.z));
+        }
+        pathEnt.polyline = { positions: pts, width: 2, color: new engine.Color(0.3, 0.85, 1.0, 0.9) };
+      }
+      drawPath();
 
       // ── 播放控制（对应 EV 的 activeAnimations add/remove + loop）───
       let playing = true, loop = true, t = 0, lastNow = performance.now();
@@ -137,21 +163,19 @@
           t += dt * Number(speedR.value);
           if (t >= period) t = loop ? t % period : period;
         }
-        // 位置 + 朝向：由样条切线方向反算 heading
-        const pos  = clip.evaluate(t);
+        // 位置 + 朝向：局部 ENU 偏移 → 经纬度；样条切线反算 heading
+        const pos   = clip.evaluate(t);
         const ahead = clip.evaluate(Math.min(t + 0.05, period));
-        const a = toLonLatHeight(pos), b = toLonLatHeight(ahead);
-        const dLon = (b.lon - a.lon) * Math.cos(a.lat * Math.PI / 180);
-        const dLat = b.lat - a.lat;
-        const heading = Math.atan2(dLon, dLat) * 180 / Math.PI;
+        const ll = rel(pos.x, pos.y);
+        const heading = Math.atan2(ahead.x - pos.x, ahead.y - pos.y) * 180 / Math.PI;
 
-        plane.modelMatrix = placeMatrix(a.lon, a.lat, a.h, heading);
+        plane.modelMatrix = placeMatrix(ll.lon, ll.lat, pos.z, heading);
         plane.applyModelMatrix();
 
         result.textContent =
           `剪辑: ${clipName}   状态: ${playing ? '播放中' : '已暂停'}   循环: ${loop ? 'REPEAT' : 'ONCE'}\n` +
           `进度: ${(t / period * 100).toFixed(1)}%   速度: ×${Number(speedR.value).toFixed(1)}\n` +
-          `飞机位置: ${a.lon.toFixed(5)}°E, ${a.lat.toFixed(5)}°N, ${a.h.toFixed(0)} m   航向: ${((heading % 360) + 360) % 360 | 0}°`;
+          `飞机位置: ${ll.lon.toFixed(5)}°E, ${ll.lat.toFixed(5)}°N, ${pos.z.toFixed(0)} m   航向: ${((heading % 360) + 360) % 360 | 0}°`;
         requestAnimationFrame(step);
       }
 
@@ -165,6 +189,7 @@
       for (const name of Object.keys(CLIPS)) {
         const btn = addBtn(name, () => {
           clipName = name; clip = CLIPS[name]; t = 0;   // 切换剪辑并回到起点
+          drawPath();                                   // 轨迹环跟随新剪辑
           controls.querySelectorAll('[data-clip]').forEach(b => b.classList.remove('active'));
           btn.classList.add('active');
         });
@@ -180,8 +205,8 @@
       loopBtn.classList.add('active');
 
       viewer.camera.setView({
-        destination: engine.Cartesian3.fromDegrees(CENTER.lon, CENTER.lat - 0.008, 2800),
-        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-30) },
+        destination: { lon: CENTER.lon - 0.0015, lat: CENTER.lat - 0.010, height: 1000 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-58) },
       });
       requestAnimationFrame(step);
     }

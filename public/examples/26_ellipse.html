@@ -71,7 +71,7 @@
         polygon: {
           hierarchy: { positions: ellipsePositions(CENTER.lon, CENTER.lat, 180_000, 180_000) },
           height: 2000 / engine.Camera.EARTH_SCALE,
-          color: new engine.Color(0.2, 0.6, 1.0, 0.22),
+          color: new engine.Color(0.2, 0.6, 1.0, 0.32),
         },
       })));
       // 中圆：通勤圈（半径 80 km）
@@ -80,7 +80,7 @@
         polygon: {
           hierarchy: { positions: ellipsePositions(CENTER.lon, CENTER.lat, 80_000, 80_000) },
           height: 3000 / engine.Camera.EARTH_SCALE,
-          color: new engine.Color(0.2, 0.9, 0.5, 0.30),
+          color: new engine.Color(0.2, 0.9, 0.5, 0.42),
         },
       })));
       // 内圆：核心区（半径 25 km）
@@ -89,7 +89,7 @@
         polygon: {
           hierarchy: { positions: ellipsePositions(CENTER.lon, CENTER.lat, 25_000, 25_000) },
           height: 4000 / engine.Camera.EARTH_SCALE,
-          color: new engine.Color(1, 0.75, 0.1, 0.45),
+          color: new engine.Color(1, 0.75, 0.1, 0.55),
         },
       })));
       // 旋转椭圆：机场噪声带（300km × 90km，旋转 -35°）
@@ -98,7 +98,7 @@
         polygon: {
           hierarchy: { positions: ellipsePositions(117.6, 39.4, 300_000, 90_000, -35) },
           height: 1500 / engine.Camera.EARTH_SCALE,
-          color: new engine.Color(0.95, 0.25, 0.3, 0.28),
+          color: new engine.Color(0.95, 0.25, 0.3, 0.40),
         },
       })));
       // 中心点
@@ -134,7 +134,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [116.4, 38.5, 3_200_000],
+          view: [117.0, 39.4, 700_000],
           imagery: 'gaode-sat',
           title: '26 · 椭圆与圆面',
         }));

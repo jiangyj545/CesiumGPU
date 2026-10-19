@@ -47,7 +47,7 @@
 
       // ── 编辑会话状态 ──────────────────────────────────────────────
       const session = { shape: null, type: null, handles: [], dragIdx: -1 };
-      const HANDLE_SIZE = 12;
+      const HANDLE_SIZE = 16;
 
       // 归一化 ECEF → 经纬（度）
       function toLonLat(p) {
@@ -198,7 +198,7 @@
         refresh('已清除。点击「绘制多边形 / 折线」新建。');
       });
       addBtn('复位视角', () => viewer.camera.flyTo({
-        destination: { lon: 116.4, lat: 39.6, height: 900_000 }, duration: 2,
+        destination: { lon: 116.4, lat: 39.88, height: 130_000 }, duration: 2,
       }));
 
       function refresh(extra) {
@@ -220,7 +220,7 @@
       try {
         ({ viewer } = await DemoUtils.startup({
           engine,
-          view: [116.4, 39.6, 900_000],
+          view: [116.4, 39.88, 130_000],
           imagery: 'gaode-sat',
           title: '34 · 几何顶点编辑',
         }));

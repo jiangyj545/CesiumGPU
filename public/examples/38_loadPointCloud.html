@@ -183,7 +183,7 @@
       // 相机：东南侧斜视点云山体
       viewer.camera.setView({
         destination: engine.Cartesian3.fromDegrees(CENTER.lon + 0.005, CENTER.lat - 0.005, 1100),
-        orientation: { heading: engine.CesiumMath.toRadians(35), pitch: engine.CesiumMath.toRadians(-32) },
+        orientation: { heading: engine.CesiumMath.toRadians(-37), pitch: engine.CesiumMath.toRadians(-32) },
       });
 
       lastBuild = buildCloudColored(...DENSITIES[densityIdx]);

@@ -72,7 +72,10 @@
       // pitch 对准模型（atan2(1200, 390) ≈ -1.2568）：滚轮是锚定缩放，
       // 只保持「视线中心点」的画位——模型必须居中，拉近时才恒在画面内
       viewer.camera.flyTo({
-        destination: { lon: 114.3, lat: 30.4965, height: 1200 },
+        // Cartesian3(米) 分支仅 ÷EARTH_SCALE → 真 WGS84 ECEF 系，与 3DTiles
+        // 瓦片同系；{lon,lat,height} 快捷形式走压扁世界系（30.5°N 偏差 ~18km，
+        // 整树会被视锥剔除 drawn=0），此处必须用 Cartesian3
+        destination: engine.Cartesian3.fromDegrees(114.3, 30.4965, 1200),
         orientation: { heading: 0, pitch: -1.2568 },
       });
 
