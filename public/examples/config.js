@@ -93,6 +93,7 @@ window.EXAMPLES_CONFIG = {
         { name: '场景截图', fileName: '73_screenCapture.html' },
         { name: '快捷键', fileName: '74_shortcutKey.html' },
         { name: '场景时间与昼夜', fileName: '75_sceneTime.html' },
+        { name: '低空指挥大屏', fileName: '97_dashboard.html' },
       ],
     },
     {

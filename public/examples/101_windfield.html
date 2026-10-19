@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>三维风场箭头场 · CesiumGPU 示例</title>
+  <script src="./js/demo-utils.js"></script>
+  <style>
+    .cg-panel{position:absolute;top:12px;left:12px;z-index:9000;min-width:300px;max-width:420px;
+      background:rgba(8,20,36,.82);border:1px solid rgba(90,160,255,.35);border-radius:10px;
+      padding:12px 14px;color:#dce8f8;font-size:12px;backdrop-filter:blur(4px);}
+    .cg-panel h1{font-size:15px;color:#8ecafc;margin-bottom:4px;font-weight:600;}
+    .cg-panel .desc{font-size:12px;line-height:1.6;color:#9db4d0;margin-bottom:8px;}
+    .cg-panel #result{font:12px/1.7 Consolas,Monaco,monospace;color:#b5e3a8;
+      white-space:pre-wrap;background:rgba(0,0,0,.25);border-radius:6px;padding:6px 8px;margin-bottom:8px;}
+    /* 8 档速度色带图例（与 WindFieldBuilder.BUCKET_COLORS 同源） */
+    #legend{display:flex;flex-direction:column;gap:3px;}
+    #legend .row{display:flex;align-items:center;gap:8px;}
+    #legend .sw{width:34px;height:12px;border-radius:3px;border:1px solid rgba(255,255,255,.25);}
+    #legend .lb{font:11px/1.4 Consolas,Monaco,monospace;color:#9db4d0;}
+    #legend .hd{font-size:11px;color:#8ecafc;margin-bottom:2px;letter-spacing:.05em;}
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="cg-panel">
+    <h1>101 · 三维风场箭头场（wind-field/v1）</h1>
+    <div class="desc">
+      B2 借鉴点引擎侧落地：读平台 wind-field/v1 JSON（格点 ENU 位置 + ENU
+      风矢量），WindFieldBuilder 按水平风向放置 3D 箭头（长度 ∝ 风速，
+      8..45 m），速度分 8 档配色（蓝→青→绿→黄→橙→红），每档一个
+      Primitive 合批单 draw。URL 参数：<code>?field=&lt;url&gt;</code> 换
+      风场、<code>?rtc=1</code> 开 RTC origin（实验，默认关——引擎多 RTC
+      图元组合空片元缺陷，见 90 页同款处置）。
+    </div>
+    <div id="result">加载中…</div>
+    <div id="legend"></div>
+  </div>
+  <script type="module">
+    import * as engine from '/src/index.ts';
+
+    // ── 风场来源：缺省读平台仓工具产出（vite /@fs 跨仓，97 页先例）────
+    const DEFAULT_FIELD = '/@fs/D:/work/仿真/dataset-tools/examples/windfield/guanggu-windfield.json';
+    const qs = new URLSearchParams(location.search);
+    const FIELD_URL = qs.get('field') || DEFAULT_FIELD;
+    // RTC 实验开关：缺省关（引擎多 RTC 图元组合「全帧空片元」未定因缺陷，
+    // 见下方 builder 注释与 90 页 :463-466）；?rtc=1 显式启用。
+    const RTC_ON = qs.get('rtc') === '1';
+
+    // 8 档色带（与引擎 BUCKET_COLORS 一致，图例同源渲染）
+    const RAMP = engine.WindFieldBuilder.BUCKET_COLORS;
+    const cssRGB = (c) => `rgb(${c.map((v) => Math.round(v * 255)).join(',')})`;
+
+    async function demo(viewer, engine) {
+      const result = document.getElementById('result');
+      const r = await fetch(FIELD_URL);
+      if (!r.ok) throw new Error(`风场 JSON 读取失败 HTTP ${r.status}: ${FIELD_URL}`);
+      const field = await r.json();
+      if (field.schema && field.schema !== 'wind-field/v1') {
+        throw new Error(`schema 不支持: ${field.schema}（期望 wind-field/v1）`);
+      }
+
+      // ── 构建箭头场：压扁世界（与 Globe/影像共面）────────────────────
+      // RTC（Primitive origin）默认关：引擎侧多 RTC 图元组合存在「全帧空片元」
+      // 未定因缺陷（零 GPU 错误、UBO/数学逐项验证正确，见 90_sensorCam.html
+      // :463-466 waRtcCity 同款处置）——本页实测同签名（?rtc=1 数据/球心/相机
+      // 全部正确仍零片元，绝对坐标路径完美），故照 90 页先例实验开关化。
+      const builder = new engine.WindFieldBuilder(field, {
+        flattened: true,
+        ...(RTC_ON ? {} : { rtcOrigin: null }),
+      });
+      const prims = builder.build(viewer.context);
+      for (const p of prims) viewer.scene.addPrimitive(p);   // 必须经 addPrimitive（补 bind group）
+
+      // ── 图例面板：8 档色带 + 速度范围（speed_max→45m 长度映射注记）──
+      const legend = document.getElementById('legend');
+      const sMin = builder.speedMin, sMax = builder.speedMax;
+      const step = (sMax - sMin) / RAMP.length;
+      legend.innerHTML = '<div class="hd">风速 m/s（长度 8–45 m 线性）</div>' +
+        RAMP.map((c, i) => {
+          const lo = sMin + step * i;
+          const hi = i === RAMP.length - 1 ? sMax : sMin + step * (i + 1);
+          return `<div class="row"><span class="sw" style="background:${cssRGB(c)}"></span>` +
+            `<span class="lb">${lo.toFixed(2)} – ${hi.toFixed(2)}</span></div>`;
+        }).join('');
+
+      const o = field.origin || builder.origin;
+      result.textContent =
+        `来源: ${FIELD_URL.split('/').pop()}\n` +
+        `schema: ${field.schema || 'wind-field/v1'}\n` +
+        `origin: ${(+o.lon).toFixed(3)}°E, ${(+o.lat).toFixed(3)}°N, ${(+((o.alt_m ?? 0))).toFixed(0)} m\n` +
+        `格点: ${field.grid ? `${field.grid.nx}×${field.grid.ny}×${(field.grid.heights_m || []).length}` : '-'} = ${field.arrows.length}\n` +
+        `箭头: ${builder.arrowCount}（跳过 ${builder.skippedCount}）\n` +
+        `速度: ${sMin.toFixed(2)} – ${sMax.toFixed(2)} m/s\n` +
+        `Primitive: ${prims.length}（每速度档 1 个合批 draw）\n` +
+        `RTC origin: ${RTC_ON && builder.rtcOrigin ? '开（实验）' : '关（默认）'}`;
+
+      // ── 相机飞到风场 origin 上空（压扁系 {lon,lat,height} 目的地）────
+      // 南偏 ~700m 使 1.6km 场居中（pitch −60° 视心落在相机北方 ~1km 处）
+      const latOff = 700 / 111320;
+      viewer.camera.setView({
+        destination: { lon: builder.origin.lon, lat: builder.origin.lat - latOff, height: 1900 },
+        orientation: { heading: 0, pitch: engine.CesiumMath.toRadians(-60), roll: 0 },
+      });
+
+      // 探针钩子（headless 自验用）
+      window.__viewer = viewer;   // CDP 探相机/驱动相机（97 页 __DASH 同例）
+      window.__WF = {
+        primCount: prims.length,
+        arrowCount: builder.arrowCount,
+        skippedCount: builder.skippedCount,
+        speedMin: sMin, speedMax: sMax,
+        bucketCount: prims.length,
+        schema: field.schema || 'wind-field/v1',
+      };
+    }
+
+    // ── 标准启动模板 ────────────────────────────────────────────────
+    (async () => {
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [114.405, 30.501, 30000],
+          imagery: 'gaode-sat',
+          title: '101 · 三维风场箭头场',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示
+      }
+      try {
+        await demo(viewer, engine);
+        DemoUtils.showCode(demo, '101 三维风场箭头场 · 核心代码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
+  </script>
+</body>
+</html>

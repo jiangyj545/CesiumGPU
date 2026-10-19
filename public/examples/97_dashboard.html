@@ -32,8 +32,8 @@
     .scn:hover { border-color: var(--accent); }
     .scn.on { border-color: var(--accent); background: rgba(76,194,255,.10); }
     .scn .nm { font-size: 13px; display: flex; align-items: center; gap: 6px; }
-    .scn .meta { font-size: 11px; color: var(--dim); margin-top: 1px; }
-    .scn .n { font-size: 10px; padding: 0 6px; border-radius: 8px;
+    .scn .meta { font-size: 12px; color: var(--dim); margin-top: 1px; }
+    .scn .n { font-size: 12px; padding: 0 6px; border-radius: 8px;
       background: #1b3a55; color: var(--accent); flex: none; }
     /* 右栏：遥测面板 */
     #telemetry { top: 12px; right: 12px; width: 292px; padding: 12px;
@@ -41,15 +41,15 @@
     .vcard { border: 1px solid var(--line); border-radius: 8px;
       padding: 8px 10px; margin-bottom: 8px; background: rgba(9,14,21,.6); }
     .vcard .hd { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
-    .vcard .id { font: 11px Consolas, monospace; padding: 0 7px; border-radius: 8px;
+    .vcard .id { font: 12px Consolas, monospace; padding: 0 7px; border-radius: 8px;
       background: #46202a; color: #ff8d97; flex: none; }
     .vcard.id0 .id { background: #12414f; color: var(--accent); }
-    .vcard .st { margin-left: auto; font-size: 11px; color: var(--dim); }
+    .vcard .st { margin-left: auto; font-size: 12px; color: var(--dim); }
     .vcard .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px;
-      font: 11.5px/1.55 Consolas, monospace; color: #b9c7d6; }
+      font: 12px/1.55 Consolas, monospace; color: #b9c7d6; }
     .vcard .grid2 b { color: var(--text); font-weight: 500; }
     .socRow { display: flex; align-items: center; gap: 7px; margin-top: 5px;
-      font: 11px Consolas, monospace; color: var(--dim); }
+      font: 12px Consolas, monospace; color: var(--dim); }
     .socBar { flex: 1; height: 8px; border-radius: 4px; background: #0d1420;
       border: 1px solid var(--line); overflow: hidden; }
     .socBar i { display: block; height: 100%; background: var(--ok); width: 0%; }
@@ -57,7 +57,7 @@
     .socBar i.low { background: var(--danger); }
     /* 底部告警条 */
     #alertBar { left: 12px; right: 12px; bottom: 12px; height: 118px; padding: 10px 12px; }
-    #alertList { overflow: auto; height: 82px; font: 11.5px/1.75 Consolas, monospace; }
+    #alertList { overflow: auto; height: 82px; font: 12px/1.75 Consolas, monospace; }
     .ev { white-space: nowrap; color: var(--dim); }
     .ev b { font-weight: 600; }
     .ev-red { color: #ffb3ba; background: rgba(255,92,106,.10); border-radius: 4px; }
@@ -66,7 +66,7 @@
     .ev-orange b { color: var(--warn); }
     /* 状态自检角 */
     #statusCorner { top: 12px; left: 50%; transform: translateX(-50%);
-      padding: 6px 14px; font: 11.5px/1.7 Consolas, monospace; color: #b9c7d6;
+      padding: 6px 14px; font: 12.5px/1.7 Consolas, monospace; color: #b9c7d6;
       display: flex; gap: 16px; align-items: center; }
     .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger);
       box-shadow: 0 0 7px var(--danger); flex: none; }
@@ -78,6 +78,11 @@
       background: rgba(40,80,140,.55); color: var(--text);
       border: 1px solid rgba(120,180,255,.35); border-radius: 6px; }
     #camBtns button.on { background: rgba(30,140,90,.85); border-color: var(--ok); }
+    /* 风场图例小条（101 页 8 档色带精简横排：色带 + min–max；行样式复用 .socRow） */
+    #wfLegend { display: none; align-items: center; gap: 2px; margin-top: 5px; }
+    #wfLegend .sw { width: 20px; height: 9px; border-radius: 2px;
+      border: 1px solid rgba(255,255,255,.22); }
+    #wfLegend .lb { font: 11px/1.4 Consolas, monospace; color: var(--dim); margin-left: 7px; }
   </style>
 </head>
 <body>
@@ -97,6 +102,8 @@
 
   <div class="hud" id="telemetry">
     <h2>遥测 <span id="tlCount" style="color:var(--dim);font-weight:400"></span></h2>
+    <div class="socRow" id="wfLine" style="display:none">风场 <b id="wfMeta" style="color:var(--text)">—</b></div>
+    <div id="wfLegend"></div>
     <div id="tcards"></div>
   </div>
 
@@ -120,6 +127,14 @@
     const INIT_FILE = urlQ.get('scenario') || 'guanggu-swarm-echelon.json';
     const INIT_SEED = urlQ.get('seed') || '42';
     const SPEC_DIR = 'D:\\work\\仿真\\scenario\\examples\\';   // 引导页同款：经 vite /@fs 读平台仓场景 JSON
+    // 风场箭头层（B2-3 多机态势+风场同屏）：?windfield=1|<url>。空/0/缺省 =
+    // 不加载（默认大屏零回归红线）；1 = 缺省光谷走廊风场（vite /@fs 跨仓读
+    // 平台仓工具产出，fetchSpec 先例同款）；其余值按 URL 处理。
+    const WF_RAW = urlQ.get('windfield');
+    const WF_URL = (!WF_RAW || WF_RAW === '0') ? null
+      : WF_RAW === '1'
+        ? '/@fs/D:/work/仿真/dataset-tools/examples/windfield/guanggu-windfield.json'
+        : WF_RAW;
 
     // 左栏场景清单：官方 swarm 族 8 个（与 /scenes 引导页一致）
     const SCENARIOS = [
@@ -148,6 +163,56 @@
         specCache[file] = null;
       }
       return specCache[file];
+    }
+
+    // ── 风场箭头层（?windfield=；101 页参考实现的大屏精简版）──────────
+    // 坐标同系保证（否则飘 13km）：builder `flattened:true` 的 _place 与本页
+    // flatFromLonLat 同公式（归一化 ECEF，y/z×ρ=b/a），ENU→经纬同为 WGS84
+    // 精确系数（97 enuToLonLatAlt 同款）；guanggu-windfield.json 与 swarm 族
+    // 场景 origin 一致（114.39°E/30.5°N/35m）→ 箭头绝对坐标与机标/轨迹同世界。
+    // RTC 关（rtcOrigin:null，101 页实测绝对坐标路径完美；引擎多 RTC 图元
+    // 组合有「全帧空片元」未定因缺陷，90 页 :463-466 waRtcCity 同款处置）。
+    const WF_RAMP = engine.WindFieldBuilder.BUCKET_COLORS;
+    const wfCssRGB = (c) => `rgb(${c.map((v) => Math.round(v * 255)).join(',')})`;
+    window.__WF = { primCount: 0, arrowCount: 0, skipped: 0, loaded: false };
+    async function loadWindField(viewer) {
+      const r = await fetch(WF_URL);
+      if (!r.ok) throw new Error(`风场 JSON 读取失败 HTTP ${r.status}: ${WF_URL}`);
+      const field = await r.json();
+      if (field.schema && field.schema !== 'wind-field/v1') {
+        throw new Error(`schema 不支持: ${field.schema}（期望 wind-field/v1）`);
+      }
+      // 走 WindFieldBuilder 类而非一步式 buildWindField：__WF 探针需要
+      // builder 的 arrowCount/skippedCount/speedMin/Max 统计出口。
+      const builder = new engine.WindFieldBuilder(field, {
+        flattened: true,
+        rtcOrigin: null,
+      });
+      const prims = builder.build(viewer.context);
+      for (const p of prims) viewer.scene.addPrimitive(p);   // 必经 addPrimitive（补 bind group）
+      // 面板行 + 8 档色带小条（101 页图例精简为横排：色带悬停档区间 + min–max）
+      const step = (builder.speedMax - builder.speedMin) / WF_RAMP.length;
+      document.getElementById('wfMeta').textContent =
+        `${(+field.origin.lon).toFixed(3)}°E ${(+field.origin.lat).toFixed(3)}°N · ` +
+        `${field.arrows.length} 格点 · ${builder.speedMin.toFixed(2)}–${builder.speedMax.toFixed(2)} m/s`;
+      document.getElementById('wfLegend').innerHTML = WF_RAMP.map((c, i) => {
+        const lo = builder.speedMin + step * i;
+        const hi = i === WF_RAMP.length - 1 ? builder.speedMax : builder.speedMin + step * (i + 1);
+        return `<span class="sw" title="${lo.toFixed(2)}–${hi.toFixed(2)} m/s" ` +
+          `style="background:${wfCssRGB(c)}"></span>`;
+      }).join('') +
+        `<span class="lb">${builder.speedMin.toFixed(1)}–${builder.speedMax.toFixed(1)} m/s</span>`;
+      document.getElementById('wfLine').style.display = 'flex';
+      document.getElementById('wfLegend').style.display = 'flex';
+      // 探针钩子（headless 自验断言源，101 页 __WF 同例）
+      window.__WF = {
+        primCount: prims.length,
+        arrowCount: builder.arrowCount,
+        skipped: builder.skippedCount,
+        speedMin: builder.speedMin, speedMax: builder.speedMax,
+        url: WF_URL, loaded: true,
+      };
+      return prims.length;
     }
 
     // ── ENU(米)→经纬度：WGS84 精确系数（90 页 W10 修复同款）──
@@ -666,6 +731,19 @@
       }
       const prims = builder.build(viewer.context);
       for (const p of prims) viewer.scene.addPrimitive(p);
+
+      // 1b) 风场箭头层（?windfield=1|<url>；缺省不加载——默认大屏零回归）。
+      //     异步 fire-and-forget：失败只 warn + 面板提示，不阻塞机标/相机/SSE。
+      if (WF_URL) {
+        loadWindField(viewer).catch((err) => {
+          console.warn('[97] 风场层加载失败（大屏其余功能不受影响）:',
+            (err && err.message) || err);
+          window.__WF.error = String((err && err.message) || err);
+          const meta = document.getElementById('wfMeta');
+          if (meta) meta.textContent = `加载失败：${(err && err.message) || err}`;
+          document.getElementById('wfLine').style.display = 'flex';
+        });
+      }
 
       // 2) 多机标记：90 页 wingman 同款预建盒（渲染循环中途动态 addPrimitive 会
       //    静默卡死——必须渲染前入场；instanceIds 路径绕 PickPass 非实例分支缺陷）

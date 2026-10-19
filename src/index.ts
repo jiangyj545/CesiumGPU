@@ -82,6 +82,23 @@ export type {
   LonLatPoint,
 } from './geometry/ExtrudedGeometry';
 export { CityBlockBuilder } from './geometry/CityBlockBuilder';
+// B2 三维风场箭头场（wind-field/v1 分桶合批渲染）
+export { WindArrowGeometry, WIND_ARROW_VERTEX_COUNT, WIND_ARROW_INDEX_COUNT } from './geometry/WindArrowGeometry';
+export type { CreateArrowOptions } from './geometry/WindArrowGeometry';
+export {
+  WindFieldBuilder, buildWindField,
+} from './geometry/WindFieldBuilder';
+export type {
+  WindFieldData, WindFieldOrigin, WindFieldArrow, WindFieldStats,
+  WindFieldBucket, WindFieldBuilderOptions, WindFieldBuildOptions,
+} from './geometry/WindFieldBuilder';
+// P3 多图层逐瓦片合成（底图+注记双层渲染缺陷修复）
+export {
+  CompositeImageryProvider,
+  blendSourceOver,
+  fetchChildTiles,
+} from './imagery/CompositeImageryProvider';
+export type { ChildTileResult } from './imagery/CompositeImageryProvider';
 export type {
   CityBlockBuilderOptions,
   CityBlockChunk,
@@ -340,10 +357,10 @@ export { GoogleTiles3D } from './tileset/GoogleTilesProvider';
 export type { GoogleTiles3DOptions } from './tileset/GoogleTilesProvider';
 export {
   fetchTilesetJson,
-
   parseTileset,
   TILESET_EARTH_SCALE,
 } from './tileset/TilesetContentLoader';
+
 
 // P1-E 3DTiles feature 挑拣（b3dm _BATCHID + batchTable）
 export {
