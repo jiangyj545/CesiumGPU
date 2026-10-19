@@ -368,6 +368,10 @@ viewer.scene.entities.add(new Entity({
 
 `model: { uri, scale?, minimumPixelSize? }`：`Model.fromGltfAsync` 只加载一次，之后每帧按 `position` + `orientation` 重算世界矩阵（`composeEntityModelMatrix` = ENU × 四元数 × Y-up 修正 × scale，复用 `Model.modelMatrix` 的既有惯例）。`minimumPixelSize`（CSS px）按相机距离放大模型保证最小屏幕尺寸。
 
+`Entity.show` 每帧写入 `Model.show`——后者是**传播属性**：setter 同步全部子图元
+（opaque + translucent），异步加载期建出的图元继承当前值（CesiumJS 同语义；
+真机 GPU 亚像素坍缩与 show 传播背景见 `docs/decisions/0006-real-gpu-model-visibility.md`）。
+
 ### Entity.path（轨迹线）
 
 `path: { leadTime?, trailTime?, width?, color?, resolution? }`：过去位置进 `PathHistory` 环形缓冲并按 `trailTime` 裁剪；`leadTime` 秒的未来位置由动态 position Property 在 `now + t` 采样（`sampleLeadPositions`）；整体渲成半透明 polyline（默认黄色 2 px）。采样/裁剪均为纯函数/纯类，node 可测（`tests/scene/entityPath.spec.ts`）。

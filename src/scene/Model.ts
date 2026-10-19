@@ -78,8 +78,18 @@ export interface ModelFromGltfOptions {
 export class Model {
   // ── Public properties (Cesium-compatible) ──────────────────────────────────
 
-  /** Show or hide the whole model. */
-  show: boolean;
+  /**
+   * Show or hide the whole model. Setter propagates to every sub-primitive
+   * (G-Buffer / transparent / pick loops gate on the per-primitive `show`
+   * field — a bare data field here never reached them, so `model.show=false`
+   * silently kept rendering; CesiumJS `Model.show` hides the whole model).
+   * Primitives created later by the async load inherit the current value.
+   */
+  get show(): boolean { return this._show; }
+  set show(v: boolean) {
+    this._show = v;
+    for (const p of this._primitives) p.show = v;
+  }
 
   /**
    * The model's world-space transform matrix (normalised ECEF).
@@ -95,6 +105,9 @@ export class Model {
   readonly readyPromise: Promise<Model>;
 
   // ── Private state ──────────────────────────────────────────────────────────
+
+  /** Backing field of {@link show} (propagation source for sub-primitives). */
+  private _show: boolean;
 
   /** GPU textures created for this model's materials (must be destroyed with the model). */
   private _textures: GPUTexture[] = [];
@@ -112,6 +125,8 @@ export class Model {
   private _context: Context;
   private _isReady = false;
   private _scale: number;
+  /** Model-space bounds in glTF units (absent when the GLB declares no accessor min/max). */
+  private _bounds: { center: number[]; radius: number } | null = null;
 
   // ── Constructor (private – use fromGltfAsync) ──────────────────────────────
 
@@ -124,7 +139,7 @@ export class Model {
   ) {
     this._scene      = scene;
     this._context    = context;
-    this.show        = show;
+    this._show      = show;
     this.modelMatrix = modelMatrix;
     this._scale      = scale;
 
@@ -172,6 +187,21 @@ export class Model {
   /** Number of GLTF mesh primitives making up this model. */
   get primitiveCount(): number { return this._primitives.length; }
 
+  /**
+   * Model-space bounding sphere in glTF units (center + radius), or `null`
+   * when the GLB declares no POSITION accessor min/max. Consumers use it for
+   * CesiumJS-style `minimumPixelSize` distance scaling.
+   */
+  get bounds(): { center: number[]; radius: number } | null { return this._bounds; }
+
+  /** Uniform scale (engine-normalized multiplier). Setter recomputes sub-primitive matrices. */
+  get scale(): number { return this._scale; }
+  set scale(v: number) {
+    if (!Number.isFinite(v) || v <= 0 || v === this._scale) return;
+    this._scale = v;
+    this.applyModelMatrix();
+  }
+
   // ── Public methods ─────────────────────────────────────────────────────────
 
   /**
@@ -208,6 +238,13 @@ export class Model {
     for (const meshPrim of parsed.primitives) {
       await this._createPrimitive(meshPrim);
     }
+    if (parsed.bounds) {
+      const { min, max } = parsed.bounds;
+      this._bounds = {
+        center: [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2],
+        radius: Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2,
+      };
+    }
   }
 
   private async _createPrimitive(meshPrim: ParsedMeshPrimitive): Promise<void> {
@@ -227,6 +264,9 @@ export class Model {
 
     // Apply the combined model × node matrix
     prim.modelMatrix = this._combinedMatrix(meshPrim.nodeMatrix);
+
+    // Async load may finish after the app toggled `show` — inherit current state
+    prim.show = this._show;
 
     // Upload base-colour texture if available
     if (mat.baseColorTexture) {

@@ -157,6 +157,12 @@ export interface ParsedMeshPrimitive {
 /** The full result of parsing a GLTF/GLB file. */
 export interface ParsedGltfModel {
   primitives: ParsedMeshPrimitive[];
+  /**
+   * Model-space axis-aligned bounds (glTF units), accumulated from every
+   * mesh primitive's POSITION accessor min/max transformed by its node world
+   * matrix. Absent when no accessor declares min/max.
+   */
+  bounds?: { min: number[]; max: number[] };
 }
 
 // ── Component-type constants ──────────────────────────────────────────────────
@@ -424,7 +430,70 @@ export class GltfLoader {
       GltfLoader._visitNode(json, buffers, images, ktx2Sources, nodeIndex, identityMatrix, result);
     }
 
+    GltfLoader._accumulateBounds(json, result);
+
     return result;
+  }
+
+  /**
+   * Accumulate model-space AABB bounds from each mesh primitive's POSITION
+   * accessor min/max (transformed by the primitive's node world matrix).
+   * glTF accessor min/max is optional — primitives without it are skipped;
+   * when nothing declares min/max, `bounds` stays undefined.
+   */
+  private static _accumulateBounds(json: GltfJson, result: ParsedGltfModel): void {
+    let min: number[] | undefined;
+    let max: number[] | undefined;
+    let p = 0;
+    for (const nodeIndex of (json.scenes?.[json.scene ?? 0]?.nodes ?? [])) {
+      const stack: Array<{ idx: number; parent: Float32Array }> = [{ idx: nodeIndex, parent: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]) }];
+      while (stack.length) {
+        const { idx, parent } = stack.pop()!;
+        const node = json.nodes?.[idx];
+        if (!node) continue;
+        const local = node.matrix
+          ? new Float32Array(node.matrix)
+          : GltfLoader._trsToMatrix(node.translation ?? [0,0,0], node.rotation ?? [0,0,0,1], node.scale ?? [1,1,1]);
+        const world = GltfLoader._multiplyMat4(parent, local);
+        if (node.mesh !== undefined) {
+          const mesh = json.meshes?.[node.mesh];
+          if (mesh) {
+            for (const prim of mesh.primitives) {
+              void p;
+              const posIdx = prim.attributes.POSITION;
+              const acc = posIdx !== undefined ? json.accessors?.[posIdx] : undefined;
+              if (!acc || !acc.min || !acc.max) continue;
+              // 8 个角点经 worldMatrix 变换后并入 AABB
+              for (let c = 0; c < 8; c++) {
+                const v = [
+                  (c & 1) ? acc.max[0] : acc.min[0],
+                  (c & 2) ? acc.max[1] : acc.min[1],
+                  (c & 4) ? acc.max[2] : acc.min[2],
+                  1,
+                ];
+                const t = [
+                  world[0]*v[0] + world[4]*v[1] + world[8]*v[2]  + world[12],
+                  world[1]*v[0] + world[5]*v[1] + world[9]*v[2]  + world[13],
+                  world[2]*v[0] + world[6]*v[1] + world[10]*v[2] + world[14],
+                ];
+                if (!min || !max) { min = [t[0], t[1], t[2]]; max = [t[0], t[1], t[2]]; }
+                else {
+                  for (let k = 0; k < 3; k++) {
+                    if (t[k] < min[k]) min[k] = t[k];
+                    if (t[k] > max[k]) max[k] = t[k];
+                  }
+                }
+              }
+            }
+          }
+        }
+        p++;
+        for (const childIndex of (node.children ?? [])) {
+          stack.push({ idx: childIndex, parent: world });
+        }
+      }
+    }
+    if (min && max) result.bounds = { min, max };
   }
 
   private static _visitNode(
