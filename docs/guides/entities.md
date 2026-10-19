@@ -429,24 +429,27 @@ viewer.scene.entities.add(new Entity({
 
 ### FlowArrow 流动箭头线（P2-6）
 
-`polyline.material = { type: 'flow', ... }`（对齐 hexapod flightManager / waypointEditor 的航线可视化）：
+`polyline.material = { type: 'flow', ... }`（对齐 hexapod flightManager / waypointEditor 的航线可视化；设置后该 polyline 不再走普通 ribbon 图元，改由 FlowArrow 特效渲染）：
 
 ```typescript
 viewer.scene.entities.add(new Entity({
   polyline: {
     positions: route, // 静态或 CallbackProperty 动态
-    width: 8,
+    width: 6,                             // 恒定屏幕 CSS 像素（CesiumJS 语义）
     material: {
       type: 'flow',
-      color: [0.1, 0.45, 0.85, 0.35],     // 半透明底线
-      arrowColor: [0.35, 0.95, 1.0, 0.95], // 箭头
-      speed: 0.35,                          // 周期/秒
-      gap: 24,                              // 每单位弧长箭头数
+      color: [0, 1, 1, 0.25],           // 半透明底线（hexapod 青色航线）
+      arrowColor: [0, 1, 1, 0.95],      // 箭头
+      speed: 1 / 3,                       // 周期/秒（hexapod duration=3 s）
+      // repeatCount: 60,                 // 整条线箭头数（默认自适应）
     },
   },
 }));
 ```
 
-- **几何**：顶点携带累计弧长（`buildFlowArrowGeometry`，[x,y,z,arc,v] 布局）；相位 `fract(arc·gap − t·speed)` 在 GPU 上滚动——时间驱动零几何重算，箭头朝向恒指 s 增大方向（相位只依赖标量弧长，天然不随段方向翻转）。
+- **repeatCount**：hexapod `FlowArrowMaterialProperty` 对齐语义——**整条线上的箭头数**（≥1）；默认自适应 `max(1, round(线长_m / 100))`，即约每 100 m 一支箭头。`gap`（每归一化弧长单位的箭头数）保留为高级覆盖项，优先级高于 repeatCount。
+- **width**：恒定**屏幕 CSS 像素**（CesiumJS polyline 语义）——顶点着色器按透视正确的屏幕空间展开；每段用本段切向的 side 逐段 butt 拼接（拐角外侧留小缺口，CesiumJS 同观感，拐角不膨胀），缩放视距不再改变线宽。
+- **几何**：顶点携带累计弧长与展开基（`buildFlowArrowGeometry`，[x,y,z,arc,v,side.xyz] 布局，位置 = 纯中心线，side = 本段方向）；相位 `fract(arc·gap − t·speed)` 在 GPU 上滚动——时间驱动零几何重算，箭头朝向恒指 s 增大方向（相位只依赖标量弧长，天然不随段方向翻转）。
 - **形状**：渐亮尾 + 三角头（常数与 hexapod FLOW_ARROW_SHADER 同值）。
+- **深度遮挡**：特效采样 GBuffer 场景深度（`sceneDepthView`），被地形/地球遮住的片元丢弃——与 CesiumJS 折线的遮挡观感一致。
 - **渲染**：EntityVisualizer 检测 `material.type === 'flow'`，改挂 `FlowArrowPolyline` IPass（EffectManager）；动态 positions 引用变化即重建几何（version 计数 → P2-5 按需渲染脏源）。特效挂载期间 requestRenderMode 自动持续渲染。

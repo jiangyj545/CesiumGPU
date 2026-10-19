@@ -1,4 +1,5 @@
 import { Cartesian3 } from '../math/Cartesian3';
+import { Measure } from '../analysis/Measure';
 
 /**
  * FlowArrowMath – 流动箭头线的纯函数层（P2-6，对齐 hexapod flowArrowMaterial
@@ -61,90 +62,139 @@ export interface FlowArrowPolylineMaterial {
   type: 'flow';
   /** 底线颜色（半透明带）。 */
   color?: [number, number, number, number];
-  /** 箭头颜色（默认亮青）。 */
+  /** 箭头颜色（默认青色，hexapod waypointEditor 航线）。 */
   arrowColor?: [number, number, number, number];
-  /** 流速：周期/秒（默认 0.35，对齐 hexapod 默认观感）。 */
+  /** 流速：周期/秒（hexapod duration=3.0 s → 默认 1/3）。 */
   speed?: number;
-  /** 箭头密度：每单位弧长箭头数（默认 24，配合引擎归一化弧长 ≈ 每 266 km 一支）。 */
+  /**
+   * 箭头密度（hexapod 语义）：整条线上的箭头数（≥1）；默认自适应
+   * ~每 100 m 一支（ARROW_INTERVAL=100，见 effectiveFlowArrowGap）。
+   */
+  repeatCount?: number;
+  /**
+   * 高级覆盖：每归一化弧长单位的箭头数（优先级高于 repeatCount）。
+   * 引擎归一化单位 = 地球赤道半径，直接给定 gap 时注意量级（1/单位 ≈
+   * 每 6378 km 一支）。
+   */
   gap?: number;
 }
 
 export const FLOW_ARROW_DEFAULTS = {
-  color: [0.1, 0.45, 0.85, 0.35] as [number, number, number, number],
-  arrowColor: [0.35, 0.95, 1.0, 0.95] as [number, number, number, number],
-  speed: 0.35,
-  gap: 24,
+  color: [0, 1, 1, 0.25] as [number, number, number, number],
+  arrowColor: [0, 1, 1, 0.95] as [number, number, number, number],
+  /** hexapod duration = 3.0 s → 每秒 1/3 周期。 */
+  speed: 1 / 3,
 };
 
 /**
+ * 解析实际生效的箭头密度 gap（每归一化弧长单位箭头数）：
+ * `material.gap` 显式给定 → 原样；否则按 hexapod repeatCount 语义换算
+ * `gap = repeatCount / totalArcNorm`，repeatCount 默认自适应
+ * `max(1, round(线长_m / 100))`（约每 100 m 一支箭头）。
+ */
+export function effectiveFlowArrowGap(
+  material: Partial<FlowArrowPolylineMaterial>,
+  totalArcNorm: number
+): number {
+  if (!(totalArcNorm > 0) || !Number.isFinite(totalArcNorm)) return 1;
+  if (material.gap !== undefined) return material.gap;
+  const repeatCount =
+    material.repeatCount ??
+    Math.max(1, Math.round((totalArcNorm * Measure.EARTH_SCALE) / 100));
+  return repeatCount / totalArcNorm;
+}
+
+/**
  * 构建流动箭头线几何（CPU，重建仅当 positions 引用变化）：
- * 每段四角 [L0,R0,L1,R1]，顶点布局 [x,y,z, arcLen, v]（v ∈ {0,1} 横向）。
- * 侧向偏移 = normalize(cross(tangent, radial)) × halfWidth（PolylineGeometry
- * 同款惯例）。返回 null 当 positions 退化（<2 点）。
+ * 每段独立四边形 [L0,R0,L1,R1]，顶点布局 [x,y,z, arc, v, side.x, side.y, side.z]
+ * （8 floats）。位置 = **纯中心线点**（无侧向偏移）——宽度由顶点着色器按
+ * 屏幕空间恒定像素展开（side 即展开方向）。side 单位向量 =
+ * normalize(cross(tangent, radial))（radial = normalize(p)，PolylineGeometry
+ * 同款惯例），tangent 取**本段两端点连线方向**：同一折点在相邻两段各自的
+ * quad 中使用各自段的 side（CesiumJS polyline 的逐段 butt 拼接语义——
+ * 拐角外侧留小缺口、拐角不膨胀；实测 CesiumJS 1.120 拐角无 miter 膨胀，
+ * 直段线宽与本引擎一致）。返回 null 当 positions 退化（<2 点）。
  */
 export function buildFlowArrowGeometry(
-  positions: readonly Cartesian3[],
-  halfWidth: number
+  positions: readonly Cartesian3[]
 ): { vertices: Float32Array; indices: Uint32Array; arcLength: number } | null {
   const n = positions.length;
   if (n < 2) return null;
 
-  // 每点切向（内点取相邻段平均）与累计弧长。
-  const tangents: Cartesian3[] = new Array(n);
+  // 每段切向 + 累计弧长。
+  const segTangents: Cartesian3[] = new Array(n - 1);
   const arc = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    const prev = positions[Math.max(0, i - 1)];
-    const next = positions[Math.min(n - 1, i + 1)];
-    const t = new Cartesian3(next.x - prev.x, next.y - prev.y, next.z - prev.z);
+  for (let i = 0; i < n - 1; i++) {
+    const a = positions[i];
+    const b = positions[i + 1];
+    const t = new Cartesian3(b.x - a.x, b.y - a.y, b.z - a.z);
     const len = Cartesian3.magnitude(t);
-    if (len < 1e-12) {
-      tangents[i] = i > 0 ? tangents[i - 1] : new Cartesian3(0, 0, 1);
+    segTangents[i] =
+      len < 1e-12
+        ? new Cartesian3(0, 0, 1)
+        : new Cartesian3(t.x / len, t.y / len, t.z / len);
+    arc[i + 1] = arc[i] + Cartesian3.distance(a, b);
+  }
+
+  // 每段展开方向 side（本段切向求值；同一折点在相邻两段 quad 中 side 不同
+  // → butt 拼接，拐角外侧小缺口，CesiumJS 同观感）。
+  const segSides: Cartesian3[] = new Array(n - 1);
+  for (let i = 0; i < n - 1; i++) {
+    const p = positions[i];
+    const pr = Cartesian3.magnitude(p) || 1;
+    const radial = new Cartesian3(p.x / pr, p.y / pr, p.z / pr);
+    const t = segTangents[i];
+    const s = new Cartesian3(
+      t.y * radial.z - t.z * radial.y,
+      t.z * radial.x - t.x * radial.z,
+      t.x * radial.y - t.y * radial.x
+    );
+    const sLen = Cartesian3.magnitude(s);
+    if (sLen > 1e-12) {
+      segSides[i] = new Cartesian3(s.x / sLen, s.y / sLen, s.z / sLen);
     } else {
-      tangents[i] = new Cartesian3(t.x / len, t.y / len, t.z / len);
+      // 切向 ∥ 径向（径向竖线）：改用与切向正交的坐标轴再叉积。
+      const ax = Math.abs(t.z) < 0.9;
+      const axis = ax ? new Cartesian3(0, 0, 1) : new Cartesian3(1, 0, 0);
+      const f = new Cartesian3(
+        t.y * axis.z - t.z * axis.y,
+        t.z * axis.x - t.x * axis.z,
+        t.x * axis.y - t.y * axis.x
+      );
+      const fLen = Cartesian3.magnitude(f);
+      segSides[i] =
+        fLen > 1e-12
+          ? new Cartesian3(f.x / fLen, f.y / fLen, f.z / fLen)
+          : new Cartesian3(1, 0, 0);
     }
-    if (i > 0) arc[i] = arc[i - 1] + Cartesian3.distance(positions[i - 1], positions[i]);
   }
 
   const segmentCount = n - 1;
-  const FLOATS = 5;
+  const FLOATS = 8;
   const vertices = new Float32Array(segmentCount * 4 * FLOATS);
   const indices = new Uint32Array(segmentCount * 6);
 
   let vi = 0;
   let ii = 0;
+  const writeCorner = (pi: number, side: Cartesian3, v: number): void => {
+    const p = positions[pi];
+    vertices[vi] = p.x;
+    vertices[vi + 1] = p.y;
+    vertices[vi + 2] = p.z;
+    vertices[vi + 3] = arc[pi];
+    vertices[vi + 4] = v;
+    vertices[vi + 5] = side.x;
+    vertices[vi + 6] = side.y;
+    vertices[vi + 7] = side.z;
+    vi += FLOATS;
+  };
   for (let seg = 0; seg < segmentCount; seg++) {
-    const i0 = seg;
-    const i1 = seg + 1;
+    const side = segSides[seg];
     const base = seg * 4;
-    const corners: Array<[number, number]> = []; // [顶点索引 0/1, side −1/+1]
-    corners.push([i0, -1], [i0, 1], [i1, -1], [i1, 1]);
-    for (let c = 0; c < 4; c++) {
-      const [pi, side] = corners[c];
-      const p = positions[pi];
-      // radial = normalize(p)（球面外法向）；side 向量 = normalize(cross(t, radial))。
-      const pr = Cartesian3.magnitude(p) || 1;
-      const radial = new Cartesian3(p.x / pr, p.y / pr, p.z / pr);
-      const t = tangents[pi];
-      const s = new Cartesian3(
-        t.y * radial.z - t.z * radial.y,
-        t.z * radial.x - t.x * radial.z,
-        t.x * radial.y - t.y * radial.x
-      );
-      const sLen = Cartesian3.magnitude(s);
-      if (sLen > 1e-12) {
-        const k = (side * halfWidth) / sLen;
-        vertices[vi] = p.x + s.x * k;
-        vertices[vi + 1] = p.y + s.y * k;
-        vertices[vi + 2] = p.z + s.z * k;
-      } else {
-        vertices[vi] = p.x;
-        vertices[vi + 1] = p.y;
-        vertices[vi + 2] = p.z;
-      }
-      vertices[vi + 3] = arc[pi];
-      vertices[vi + 4] = side > 0 ? 1 : 0;
-      vi += FLOATS;
-    }
+    writeCorner(seg, side, 0); // L0
+    writeCorner(seg, side, 1); // R0
+    writeCorner(seg + 1, side, 0); // L1
+    writeCorner(seg + 1, side, 1); // R1
     // (L0,R0,L1) + (R0,R1,L1)。
     indices[ii++] = base;
     indices[ii++] = base + 1;

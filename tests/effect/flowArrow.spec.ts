@@ -1,13 +1,16 @@
 /**
  * flowArrow.spec.ts – P2-6 FlowArrow 纯函数层：
  * 相位（弧长参数化 + 时间滚动）、箭头形状不变量（朝向不随段方向翻转、
- * 周期性、尾亮头收敛）、几何构建（累计弧长 / 侧向偏移 / 退化输入）。
+ * 周期性、尾亮头收敛）、几何构建（8-float 布局 / 累计弧长 / 中心线 +
+ * 本段 side 展开、逐段 butt 拼接、退化输入）、箭头密度解析（repeatCount
+ * 自适应语义）。
  */
 import { describe, expect, it } from 'vitest';
 import {
   flowArrowPhase,
   flowArrowMask,
   buildFlowArrowGeometry,
+  effectiveFlowArrowGap,
   FLOW_ARROW_SHAPE,
   type FlowArrowPolylineMaterial,
 } from '../../src/effect/FlowArrowMath';
@@ -76,48 +79,125 @@ describe('flowArrowMask（渐亮尾 + 三角头）', () => {
   });
 });
 
-describe('buildFlowArrowGeometry', () => {
+describe('buildFlowArrowGeometry（中心线 + 本段 side 展开，逐段 butt 拼接）', () => {
   const p0 = new Cartesian3(1, 0, 0);
   const p1 = new Cartesian3(0, 1, 0);
   const p2 = new Cartesian3(-1, 0, 0);
 
-  it('每段 4 顶点 / 6 索引；累计弧长写入顶点属性', () => {
-    const geo = buildFlowArrowGeometry([p0, p1, p2], 1e-4);
+  it('每段 4 顶点 / 6 索引，8-float 布局；累计弧长写入顶点属性', () => {
+    const geo = buildFlowArrowGeometry([p0, p1, p2]);
     expect(geo).not.toBeNull();
     expect(geo!.indices.length).toBe(2 * 6);
-    expect(geo!.vertices.length).toBe(2 * 4 * 5);
-    // 段 0 顶点 arc=0；段 1 顶点 arc=√2。
-    const arc00 = geo!.vertices[3];
-    const arc10 = geo!.vertices[5 * 2 + 3];
-    expect(arc00).toBeCloseTo(0, 9);
-    expect(arc10).toBeCloseTo(Math.SQRT2, 6); // Float32 顶点属性精度
+    expect(geo!.vertices.length).toBe(2 * 4 * 8);
+    // 段 0 L0 顶点 arc=0；段 0 L1 / 段 1 L0 顶点（共享点 p1）arc=√2。
+    expect(geo!.vertices[3]).toBeCloseTo(0, 9);
+    expect(geo!.vertices[8 * 2 + 3]).toBeCloseTo(Math.SQRT2, 6); // Float32 精度
+    expect(geo!.vertices[8 * 4 + 3]).toBeCloseTo(Math.SQRT2, 6);
     expect(geo!.arcLength).toBeCloseTo(2 * Math.SQRT2, 6);
   });
 
-  it('顶点横向 v ∈ {0,1}；侧向偏移沿切向×径向法向', () => {
-    const geo = buildFlowArrowGeometry([p0, p1], 1e-4)!;
-    const l = new Cartesian3(geo.vertices[0], geo.vertices[1], geo.vertices[2]);
-    const r = new Cartesian3(geo.vertices[5], geo.vertices[6], geo.vertices[7]);
-    expect(geo.vertices[4]).toBe(0); // L0 v=0
-    expect(geo.vertices[9]).toBe(1); // R0 v=1
-    // 中心点仍在 p0：L/R 关于 p0 对称。
-    expect((l.x + r.x) / 2).toBeCloseTo(p0.x, 9);
-    expect((l.y + r.y) / 2).toBeCloseTo(p0.y, 9);
-    expect(Cartesian3.distance(l, r)).toBeCloseTo(2e-4, 9); // 全宽 = 2×halfWidth
+  it('直线：side ⟂ tangent 且 ⟂ radial、L/R 位置 == 中心线、v∈{0,1}', () => {
+    const geo = buildFlowArrowGeometry([p0, p1])!;
+    const tangent = new Cartesian3(-1 / Math.SQRT2, 1 / Math.SQRT2, 0);
+    for (let c = 0; c < 4; c++) {
+      const o = c * 8;
+      const pos = new Cartesian3(geo.vertices[o], geo.vertices[o + 1], geo.vertices[o + 2]);
+      const side = new Cartesian3(geo.vertices[o + 5], geo.vertices[o + 6], geo.vertices[o + 7]);
+      const center = c < 2 ? p0 : p1; // (L0,R0)=p0，(L1,R1)=p1
+      expect(Cartesian3.dot(side, tangent)).toBeCloseTo(0, 9);
+      expect(Cartesian3.dot(side, center)).toBeCloseTo(0, 9); // radial = normalize(p)
+      // 无侧向偏移：L/R 顶点 == 中心线点（宽度由 VS 屏幕空间展开）。
+      expect(Cartesian3.distance(pos, center)).toBeCloseTo(0, 9);
+      expect(geo.vertices[o + 4]).toBe(c % 2); // v ∈ {0,1}：L=0 / R=1
+    }
+  });
+
+  it('直角折线：共享点在两段 quad 中 side 各为本段方向（butt 拼接，无 miter）', () => {
+    // a→b 沿 +x，b→c 沿 +y，radial≈+z：两段 side 分别为 −y 与 +x（互相垂直）。
+    const a = new Cartesian3(-1, 0, 1);
+    const b = new Cartesian3(0, 0, 1);
+    const c = new Cartesian3(0, 1, 1);
+    const geo = buildFlowArrowGeometry([a, b, c])!;
+    const sideAt = (corner: number) =>
+      new Cartesian3(
+        geo.vertices[corner * 8 + 5],
+        geo.vertices[corner * 8 + 6],
+        geo.vertices[corner * 8 + 7]
+      );
+    // 段 0（a→b，tangent=+x，radial≈+z）side ≈ −y。
+    for (const corner of [0, 1, 2, 3]) {
+      expect(Cartesian3.dot(sideAt(corner), new Cartesian3(0, -1, 0))).toBeCloseTo(1, 6);
+    }
+    // 段 1（b→c，tangent=+y，radial≈+z）side ≈ +x。
+    for (const corner of [4, 5, 6, 7]) {
+      expect(Cartesian3.dot(sideAt(corner), new Cartesian3(1, 0, 0))).toBeCloseTo(1, 6);
+    }
+    // 共享点 b：两段 quad 中 side 不同（butt 拼接——拐角外侧小缺口，
+    // CesiumJS 同观感，拐角不膨胀）。
+    const s0 = sideAt(2); // 段 0 L1 @ b
+    const s1 = sideAt(4); // 段 1 L0 @ b
+    expect(Cartesian3.distance(s0, s1)).toBeCloseTo(Math.SQRT2, 6);
+  });
+
+  it('全部顶点位置 == 中心线（无侧向偏移，含拐角共享点）', () => {
+    const a = new Cartesian3(-1, 0, 1);
+    const b = new Cartesian3(0, 0, 1);
+    const c = new Cartesian3(0, 1, 1);
+    const geo = buildFlowArrowGeometry([a, b, c])!;
+    // 每段 quad 顶点序 (L0,R0,L1,R1)：段0 用 a,a,b,b；段1 用 b,b,c,c。
+    const centers = [a, a, b, b, b, b, c, c];
+    for (let corner = 0; corner < 8; corner++) {
+      const o = corner * 8;
+      const pos = new Cartesian3(geo.vertices[o], geo.vertices[o + 1], geo.vertices[o + 2]);
+      // Float32 顶点属性精度：绝对误差 ~1e-7。
+      expect(Cartesian3.distance(pos, centers[corner])).toBeCloseTo(0, 5);
+    }
   });
 
   it('退化输入（<2 点）返回 null', () => {
-    expect(buildFlowArrowGeometry([p0], 1e-4)).toBeNull();
-    expect(buildFlowArrowGeometry([], 1e-4)).toBeNull();
+    expect(buildFlowArrowGeometry([p0])).toBeNull();
+    expect(buildFlowArrowGeometry([])).toBeNull();
+  });
+});
+
+describe('effectiveFlowArrowGap（hexapod repeatCount → gap 换算）', () => {
+  const EARTH = 6378137;
+  const arcNorm = 3000 / EARTH; // 3000 m 线的归一化弧长
+
+  it('默认自适应：~每 100 m 一支 → repeatCount = round(len_m/100)', () => {
+    expect(effectiveFlowArrowGap({}, arcNorm)).toBeCloseTo(30 / arcNorm, 9);
+    expect(effectiveFlowArrowGap({ type: 'flow' }, arcNorm)).toBeCloseTo(30 / arcNorm, 9);
+  });
+
+  it('repeatCount 覆盖自适应', () => {
+    expect(effectiveFlowArrowGap({ repeatCount: 60 }, arcNorm)).toBeCloseTo(60 / arcNorm, 9);
+  });
+
+  it('gap 优先于 repeatCount（高级覆盖）', () => {
+    expect(effectiveFlowArrowGap({ repeatCount: 60, gap: 2.5 }, arcNorm)).toBe(2.5);
+    expect(effectiveFlowArrowGap({ gap: 24 }, arcNorm)).toBe(24);
+  });
+
+  it('totalArcNorm ≤ 0 或非有限 → 1', () => {
+    expect(effectiveFlowArrowGap({}, 0)).toBe(1);
+    expect(effectiveFlowArrowGap({}, -arcNorm)).toBe(1);
+    expect(effectiveFlowArrowGap({}, Number.NaN)).toBe(1);
+    expect(effectiveFlowArrowGap({}, Number.POSITIVE_INFINITY)).toBe(1);
+  });
+
+  it('极短线 clamp 到 ≥1 支箭头', () => {
+    const tiny = 1 / EARTH; // 1 m
+    expect(effectiveFlowArrowGap({}, tiny)).toBeCloseTo(1 / tiny, 9);
   });
 });
 
 describe('Entity polyline.material 接线', () => {
-  it('type 判别 + 动态 positions（CallbackProperty）', () => {
+  it('type 判别 + repeatCount 透传 + 动态 positions（CallbackProperty）', () => {
     const material: FlowArrowPolylineMaterial = {
       type: 'flow',
       speed: 0.5,
       gap: 16,
+      repeatCount: 30,
       arrowColor: [1, 1, 0, 0.9],
     };
     const e = new Entity({
@@ -128,6 +208,8 @@ describe('Entity polyline.material 接线', () => {
     });
     expect(e.polyline?.material?.type).toBe('flow');
     expect(e.polyline?.material?.speed).toBe(0.5);
+    expect(e.polyline?.material?.repeatCount).toBe(30);
+    expect(e.polyline?.material?.gap).toBe(16);
     const positions = e.polyline?.positions;
     expect(typeof positions?.getValue).toBe('function');
   });

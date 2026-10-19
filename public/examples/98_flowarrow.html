@@ -24,52 +24,98 @@
     }
 
     async function demo(viewer) {
-      // ── ① 静态航线：material.type = 'flow'（EntityVisualizer 自动挂特效） ──
-      const route = [ll(116.4, 39.9), ll(114.3, 30.6), ll(121.47, 31.23)];
+      // demo-utils startup 的 setView 走 fromDegrees(米)÷ES 未压扁分支，与页面
+      // ll() 压扁系（y,z×ρ）在 30.5°N 相差 ~13km——相机悬空、2km 航线只占极小
+      // 角域。这里用 {lon,lat,height} 目的地（引擎压扁分支，与 ll() 同映射）
+      // 重设视角到航线中心（覆盖 startup 视角，仅本页生效）。
+      viewer.camera.setView({
+        destination: { lon: 114.396, lat: 30.519, height: 2400 },
+      });
+
+      // ── ① hexapod waypointEditor 航线本体：光谷 5 航点（间距 ~200-600 m，
+      //       高度 80-160 m），width 6，不传色/密度 → 青色默认 + 自适应
+      //       ~每 100 m 一支箭头（repeatCount 语义对齐 hexapod）──
+      const route = [
+        ll(114.390, 30.520, 80),
+        ll(114.394, 30.523, 100),
+        ll(114.398, 30.522, 120),
+        ll(114.401, 30.518, 140),
+        ll(114.396, 30.515, 160),
+      ];
       viewer.scene.entities.add(
         new engine.Entity({
           polyline: {
             positions: route,
+            width: 6, // CSS 像素（屏幕空间恒定宽，CesiumJS 语义）
+            material: { type: 'flow' },
+          },
+        }),
+      );
+
+      // ── ② flightManager 直线段风格：北京→武汉→上海，width 8 橙色 ──
+      const cities = [[116.4, 39.9], [114.3, 30.6], [121.47, 31.23]];
+      viewer.scene.entities.add(
+        new engine.Entity({
+          polyline: {
+            positions: cities.map(([lon, lat]) => ll(lon, lat, 300_000)),
             width: 8,
             material: {
               type: 'flow',
-              color: [0.1, 0.45, 0.85, 0.35],
-              arrowColor: [0.35, 0.95, 1.0, 0.95],
-              speed: 0.35, // 周期/秒
-              gap: 24, // 每单位弧长箭头数
+              color: [1, 0.55, 0, 0.30],
+              arrowColor: [1, 0.5, 0, 0.95],
+              repeatCount: 90, // 整条线 90 支箭头（hexapod repeatCount 语义；Q4 加密）
             },
           },
         }),
       );
 
-      // ── ② 动态航线：CallbackProperty（每帧新数组 → 箭头跟随重建） ──
+      // ── ③ 动态航线（CallbackProperty 拖拽跟随模拟）：3 点在光谷航线上
+      //       小幅移动（每帧新数组 → 几何逐帧重建），speed 0.5 周期/秒 ──
       let t = 0;
       const dynamicRoute = new engine.CallbackProperty(() => {
         t += 0.016;
-        const k = (Math.sin(t * 0.5) + 1) / 2;
-        const lon = 113 + 6 * k;
-        const lat = 34 + 4 * Math.sin(t * 0.3);
-        return [ll(lon - 1, lat - 0.5), ll(lon, lat), ll(lon + 1, lat + 0.5)];
+        const wob = (i) => Math.sin(t * 0.6 + i * 2.1) * 0.0015; // ~160 m 摆动
+        return [
+          ll(114.390 + wob(0), 30.520 + wob(1) * 0.5, 90),
+          ll(114.396 + wob(2), 30.521 + wob(3) * 0.5, 120),
+          ll(114.402 + wob(4), 30.517 + wob(5) * 0.5, 150),
+        ];
       });
       viewer.scene.entities.add(
         new engine.Entity({
           polyline: {
             positions: dynamicRoute,
             width: 6,
-            material: { type: 'flow', arrowColor: [1.0, 0.85, 0.2, 0.95], speed: 0.6, gap: 40 },
+            material: { type: 'flow', arrowColor: [1.0, 0.85, 0.2, 0.95], speed: 0.5 },
           },
         }),
       );
-      DemoUtils.toast('FlowArrow ×2 已挂载（静态三城航线 + 动态正弦航线）');
+      DemoUtils.toast('FlowArrow ×3（hexapod 航线 / 三城段线 / 动态跟随）');
     }
 
-    const { viewer } = await DemoUtils.startup({
-      engine,
-      view: [115, 33, 3_500_000],
-      title: '98 FlowArrow 流动箭头线',
-    });
-    await demo(viewer);
-    DemoUtils.showCode(demo, '示例源码');
+    // ── 标准启动模板（异步 IIFE + __DEMO_OK 探针：module 顶层不允许 return）──
+    (async () => {
+      window.__DEMO_OK = false;
+      let viewer;
+      try {
+        ({ viewer } = await DemoUtils.startup({
+          engine,
+          view: [114.38, 30.52, 2400], // 武汉光谷本地视角（hexapod GCS 真实用例）
+          title: '98 FlowArrow 流动箭头线',
+        }));
+      } catch (err) {
+        window.__DEMO_OK = false;
+        return; // 错误面板已由 DemoUtils 显示（无 WebGPU 环境属正常降级）
+      }
+      try {
+        await demo(viewer);
+        DemoUtils.showCode(demo, '示例源码');
+        window.__DEMO_OK = true;
+      } catch (err) {
+        window.__DEMO_OK = false;
+        DemoUtils.showError('示例逻辑执行失败', err);
+      }
+    })();
   </script>
 </body>
 </html>
