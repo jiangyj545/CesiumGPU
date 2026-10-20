@@ -180,7 +180,9 @@ export class ImageryLayer {
     if (this._destroyed) return;
     this._destroyed = true;
     this._cache.clear();
-    for (const item of this._uploadQueue) item.bitmap.close();
+    for (const item of this._uploadQueue) {
+      if ('close' in item.bitmap) item.bitmap.close();
+    }
     this._uploadQueue.length = 0;
     this._selected = [];
     this._inflight.clear();
@@ -328,14 +330,17 @@ export class ImageryLayer {
       void this.provider.requestTile(tile).then(bitmap => {
         this._inflight.delete(key);
         if (this._destroyed) {
-          bitmap?.close();
+          if (bitmap && 'close' in bitmap) bitmap.close();
           return;
         }
         if (bitmap !== null) {
           // Bound the backlog: drop (and free) the oldest entries when the
           // camera has outrun the uploader.
           while (this._uploadQueue.length >= MAX_UPLOAD_QUEUE) {
-            this._uploadQueue.shift()?.bitmap.close();
+            {
+        const dropped = this._uploadQueue.shift();
+        if (dropped && 'close' in dropped.bitmap) dropped.bitmap.close();
+      }
           }
           this._uploadQueue.push({ key, bitmap, distance: item.distance });
         } else {
@@ -381,7 +386,10 @@ export class ImageryLayer {
         this._inflight.add(key);
         void this.provider.requestTile(new TileKey(rootLevel, x, y)).then(bitmap => {
           this._inflight.delete(key);
-          if (this._destroyed) { bitmap?.close(); return; }
+          if (this._destroyed) {
+            if (bitmap && 'close' in bitmap) bitmap.close();
+            return;
+          }
           if (bitmap !== null) {
             this._uploadQueue.push({ key, bitmap, distance: 0 });
           } else {
@@ -413,8 +421,9 @@ export class ImageryLayer {
         this._cache.put(item.key, this._createTileTexture(device, item.key, source));
       }
       // 位图统一在此释放（create/canvas 绘制均为同步操作，关闭安全；
-      // 整张黑路径也已跳过上传，同样需要释放）。
-      item.bitmap.close();
+      // 整张黑路径也已跳过上传，同样需要释放）。canvas 源无 close，
+      // 交给 GC（无 GPU 资源持有）。
+      if ('close' in item.bitmap) item.bitmap.close();
       uploaded++;
     }
   }
@@ -432,7 +441,7 @@ export class ImageryLayer {
    * 南极底行（y === 2^z - 1）数据完全干净，不做任何处理。
    * 开销：仅 y === 0 瓦片上传时各执行一次（每级 2^z 张），逐行隔列采样。
    */
-  private _prepareTopRowTile(key: string, bitmap: ImageBitmap): ImageBitmap | CanvasSurface | null {
+  private _prepareTopRowTile(key: string, bitmap: ImageBitmap | CanvasSurface): ImageBitmap | CanvasSurface | null {
     if (TileKey.fromKey(key).y !== 0) return bitmap;
 
     const rowMeans = readBitmapRowMeans(bitmap);
@@ -550,10 +559,11 @@ interface SelectedTile {
   distance: number;
 }
 
-/** @internal Fetched bitmap awaiting its frame-budgeted GPU upload. */
+/** @internal Fetched bitmap/canvas awaiting its frame-budgeted GPU upload. */
 interface UploadItem {
   key: string;
-  bitmap: ImageBitmap;
+  /** Canvas 源来自合成层（见 CompositeImageryProvider.requestTile 注）。 */
+  bitmap: ImageBitmap | CanvasSurface;
   distance: number;
 }
 

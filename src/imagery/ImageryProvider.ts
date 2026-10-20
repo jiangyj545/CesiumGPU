@@ -1,4 +1,5 @@
 import { TileKey } from './TileKey';
+import type { CanvasSurface } from './TopRowBlackFill';
 
 /**
  * ImageryProvider - Source of imagery tiles.
@@ -37,11 +38,18 @@ export interface ImageryProvider {
   resolveUrl(key: TileKey): string;
 
   /**
-   * Fetch one tile. Resolves with the decoded bitmap, or `null` on any
+   * Fetch one tile. Resolves with the decoded bitmap or a 2D canvas surface
+   * (both upload directly via copyExternalImageToTexture), or `null` on any
    * failure (network error, non-2xx status, decode error). Never rejects —
    * callers treat `null` as "skip this tile and render the parent instead".
+   *
+   * Canvas sources matter for composition paths: Chrome's
+   * copyExternalImageToTexture silently produces an all-zero texture for
+   * ImageBitmaps re-created from an OffscreenCanvas (verified on main:
+   * composite tiles uploaded black while the same bitmap reads back healthy
+   * through a 2D canvas) — handing the canvas itself up avoids that path.
    */
-  requestTile(key: TileKey): Promise<ImageBitmap | null>;
+  requestTile(key: TileKey): Promise<ImageBitmap | CanvasSurface | null>;
 }
 
 /**

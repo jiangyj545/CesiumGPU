@@ -119,7 +119,7 @@ export function createCanvasSurface(width: number, height: number): CanvasSurfac
  * 不阻塞上传）。注意：这会把位图整幅读回 CPU，仅对 y === 0 顶行瓦片调用
  * （每级 2^z 张、每张一次），见文件头性能注释。
  */
-export function readBitmapRowMeans(bitmap: ImageBitmap): number[] | null {
+export function readBitmapRowMeans(bitmap: ImageBitmap | CanvasSurface): number[] | null {
   const surface = createCanvasSurface(bitmap.width, bitmap.height);
   if (surface === null) return null;
   // OffscreenCanvasRenderingContext2D 与 CanvasRenderingContext2D 的
@@ -140,7 +140,7 @@ export function readBitmapRowMeans(bitmap: ImageBitmap): number[] | null {
  * 语义：83°~85.05°N 显示 83° 处影像内容的拉伸（消除黑带）。
  * 返回 null 表示环境不支持 canvas（调用方回退现状路径）。
  */
-export function cropTopRows(bitmap: ImageBitmap, leadRows: number): CanvasSurface | null {
+export function cropTopRows(bitmap: ImageBitmap | CanvasSurface, leadRows: number): CanvasSurface | null {
   const width  = bitmap.width;
   const height = bitmap.height;
   const lead   = Math.min(leadRows, height - 1); // 至少保留 1 行有效源，避免 0 高源矩形

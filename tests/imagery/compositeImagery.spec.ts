@@ -175,6 +175,61 @@ describe('fetchChildTiles（单子层失败跳过不阻塞）', () => {
     const out = await fetchChildTiles([a, b], key);
     expect(out.every((c) => !c.ok)).toBe(true);
   });
+
+  it('慢子层超时（永不 settle 的挂起源）→ ok:false，其余子层照常出图', async () => {
+    // 回归闸门：真机叠加模式黑屏——大陆网络 OSM 瓦片 TCP 超时 ~45s，
+    // allSettled 等全部 settle 把每块合成瓦片拖死；超时截断为子层失败后
+    // 慢源只留透明洞，不拖其余子层。
+    const bottom = layerWith(async () => bitmap);
+    const dead = layerWith(
+      () => new Promise<ImageBitmap | null>(() => {}) // 永不 settle（挂起的 TCP 连接）
+    );
+    const out = await fetchChildTiles([bottom, dead], key, 50);
+    expect(out[0].ok).toBe(true);
+    expect(out[1].ok).toBe(false);
+  });
+
+  it('全部子层超时 → 全 ok:false（计瓦片失败走父级回退）', async () => {
+    const hang = () => new Promise<ImageBitmap | null>(() => {});
+    const out = await fetchChildTiles(
+      [layerWith(hang), layerWith(hang)],
+      key,
+      50
+    );
+    expect(out.every((c) => !c.ok)).toBe(true);
+  });
+
+  it('慢源超时 1 次 → 冷却窗口内后续瓦片直接跳过（不陪跑 race）', async () => {
+    // 回归闸门：真机叠加模式 45s 黑屏——每块瓦片陪慢源跑满 10s race，
+    // 并发上限 10 钳制吞吐 ~10 块/10s；冷却后慢源秒 skip。
+    let calls = 0;
+    const dead = layerWith(() => {
+      calls++;
+      return new Promise<ImageBitmap | null>(() => {});
+    });
+    const fast = layerWith(async () => bitmap);
+    const first = await fetchChildTiles([fast, dead], key, 50);
+    expect(first[0].ok).toBe(true);
+    expect(first[1].ok).toBe(false);
+    expect(calls).toBe(1); // 第一次真的发了请求
+    const second = await fetchChildTiles([fast, dead], new TileKey(3, 2, 2), 50);
+    expect(second[1].ok).toBe(false);
+    expect(calls).toBe(1); // 冷却：第二次没再发（不陪跑）
+    expect(second[0].ok).toBe(true); // 其余子层照常
+  });
+
+  it('快速失败（reject）不触发源冷却——下次仍发请求', async () => {
+    let calls = 0;
+    const flaky = layerWith(async () => {
+      calls++;
+      throw new Error('404');
+    });
+    const out1 = await fetchChildTiles([flaky], key, 50);
+    const out2 = await fetchChildTiles([flaky], new TileKey(3, 2, 2), 50);
+    expect(out1[0].ok).toBe(false);
+    expect(out2[0].ok).toBe(false);
+    expect(calls).toBe(2); // 瓦片级失败≠源级故障：两次都真发了
+  });
 });
 
 describe('ImageryLayerCollection.renderLayer（合成路径解析）', () => {
