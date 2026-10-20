@@ -135,7 +135,7 @@
       refresh(true);
     }
 
-    DemoUtils.startup({ engine, title: '54 · 3D 热力柱 Heatmap3D', view: [113.5, 28, 7_500_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '54 · 3D 热力柱 Heatmap3D', view: [113.5, 28, 7_500_000], imagery: 'tianditu' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

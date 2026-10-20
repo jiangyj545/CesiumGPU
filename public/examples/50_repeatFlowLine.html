@@ -169,7 +169,7 @@
       refresh();
     }
 
-    DemoUtils.startup({ engine, title: '50 · 重复流线 RepeatFlowLine', view: [120.15, 29.9, 1_100_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '50 · 重复流线 RepeatFlowLine', view: [120.15, 29.9, 1_100_000], imagery: 'tianditu' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

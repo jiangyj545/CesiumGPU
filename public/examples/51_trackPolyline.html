@@ -294,7 +294,7 @@
       refresh(0);
     }
 
-    DemoUtils.startup({ engine, title: '51 · 航迹线回放 TrackPolyline', view: [131.4, 31.6, 320_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '51 · 航迹线回放 TrackPolyline', view: [131.4, 31.6, 320_000], imagery: 'tianditu' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

@@ -118,7 +118,7 @@
       refresh();
     }
 
-    DemoUtils.startup({ engine, title: '47 · 动态水面 DynamicWater', view: [120.3, 30.6, 900_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '47 · 动态水面 DynamicWater', view: [120.3, 30.6, 900_000], imagery: 'tianditu' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

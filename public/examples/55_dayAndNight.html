@@ -125,7 +125,7 @@
       });
     }
 
-    DemoUtils.startup({ engine, title: '55 · 昼夜交替 DayAndNight', view: [105, 25, 22_000_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '55 · 昼夜交替 DayAndNight', view: [105, 25, 22_000_000], imagery: 'tianditu' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

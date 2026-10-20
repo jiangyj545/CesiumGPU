@@ -141,7 +141,7 @@
       });
     }
 
-    DemoUtils.startup({ engine, title: '58 · 城市光柱 WeiboLight', view: [112, 33, 4_200_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '58 · 城市光柱 WeiboLight', view: [112, 33, 4_200_000], imagery: 'tianditu' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

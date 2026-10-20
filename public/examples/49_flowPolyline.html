@@ -165,7 +165,7 @@
       refresh();
     }
 
-    DemoUtils.startup({ engine, title: '49 · 流动线 FlowPolyline', view: [119.8, 30.9, 1_400_000], imagery: 'gaode-sat' })
+    DemoUtils.startup({ engine, title: '49 · 流动线 FlowPolyline', view: [119.8, 30.9, 1_400_000], imagery: 'tianditu' })
       .then(({ viewer }) => demo(viewer, engine))
       .then(() => { window.__DEMO_OK = true; return DemoUtils.showCode(demo); })
       .catch(e => DemoUtils.showError?.(e?.message || String(e)) ?? console.error(e));

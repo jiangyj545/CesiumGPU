@@ -27,7 +27,7 @@
  *     const { viewer } = await DemoUtils.startup({
  *       engine,                                   // 必填: import * as engine
  *       view: [116.39, 39.9, 1_500_000],          // 可选: 初始视角 [经度, 纬度, 高度m]
- *       imagery: 'gaode-sat',                     // 可选: 'gaode-sat'|'gaode-vec'|'osm'|'none'
+ *       imagery: 'tianditu',                      // 可选: 'tianditu'|'gaode-sat'|'gaode-vec'|'osm'|'none'
  *       title: 'XYZ 瓦片图层',                     // 可选: 右下角示例名徽标
  *     });
  *     await demo(viewer, engine);
@@ -55,6 +55,13 @@
 
   /** 影像图层预设（与 src/spikes/*.ts 中已验证的 provider 参数一致） */
   var IMAGERY_PRESETS = {
+    // 天地图卫星影像（默认：官方服务、大陆网络稳定；key 与 01_imagery 页同款）
+    tianditu: {
+      url: 'https://t{s}.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={y}&l={z}&tk=1006be64546f4c8fe11ea687163c54f7',
+      subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'],
+      maximumLevel: 18,
+      tileSize: 256,
+    },
     // 高德卫星影像
     'gaode-sat': {
       url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
@@ -352,7 +359,7 @@
    * @param {object} [options]
    * @param {object} options.engine        必填：`import * as engine from '/src/index.ts'` 的命名空间
    * @param {string|HTMLElement} [options.container='#cesiumContainer'] viewer 容器
-   * @param {'gaode-sat'|'gaode-vec'|'osm'|'none'} [options.imagery='gaode-sat'] 底图预设
+   * @param {'tianditu'|'gaode-sat'|'gaode-vec'|'osm'|'none'} [options.imagery='tianditu'] 底图预设
    * @param {number[]|null} [options.view=DEFAULT_VIEW] 初始视角 [经度,纬度,高度m]，传 null 跳过
    * @param {boolean} [options.fps=true] 是否注入 FPS HUD
    * @param {string} [options.title] 右下角示例名徽标
@@ -417,10 +424,10 @@
       }
     } catch (gpuHookErr) { /* device 访问失败不阻塞示例 */ }
 
-    // 底图
-    var imagery = opts.imagery === undefined ? 'gaode-sat' : opts.imagery;
+    // 底图（默认天地图：官方服务在大陆网络最稳；高德/OSM 仍可显式指定）
+    var imagery = opts.imagery === undefined ? 'tianditu' : opts.imagery;
     if (imagery !== 'none') {
-      var preset = IMAGERY_PRESETS[imagery] || IMAGERY_PRESETS['gaode-sat'];
+      var preset = IMAGERY_PRESETS[imagery] || IMAGERY_PRESETS['tianditu'];
       if (typeof engine.XyzImageryProvider !== 'function') {
         console.error('[DemoUtils] engine.XyzImageryProvider 缺失，跳过底图加载');
       } else if (!viewer.globe || !viewer.globe.layers) {
