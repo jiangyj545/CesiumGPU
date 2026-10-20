@@ -399,7 +399,17 @@
       viewer = new engine.Viewer(container);
       await viewer.initialize();
     } catch (err) {
-      showError('引擎初始化失败：需要支持 WebGPU 的浏览器（Chrome/Edge 113+）', err);
+      // adapter 拿不到 ≠ 浏览器太旧：Chrome 在 GPU 进程反复崩溃/驱动异常后会
+      // 静默禁用硬件加速（WebGPU 随之失效），真机现象与旧浏览器一模一样。
+      // 按错误内容分流给出一键可执行的指引（2026-10-20 真机排障一天的经验）。
+      var msg = String(err && err.message || err);
+      var hint = /adapter|适配器/i.test(msg)
+        ? '引擎初始化失败：拿不到 WebGPU 适配器。\n' +
+          '最常见原因：浏览器 GPU 加速被禁用（Chrome 在 GPU 崩溃/更新后会自动关闭）。\n' +
+          '▸ 打开 chrome://settings/system → 开启「使用图形加速模式（如果可用）」→ 重启浏览器\n' +
+          '▸ 仍无效则访问 chrome://gpu 查看 Graphics Feature Status，或更新显卡驱动'
+        : '引擎初始化失败：需要支持 WebGPU 的浏览器（Chrome/Edge 113+）';
+      showError(hint, err);
       throw err;
     }
     global.viewer = viewer; // console 调试钩子
