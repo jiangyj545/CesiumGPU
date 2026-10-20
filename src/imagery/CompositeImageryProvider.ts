@@ -213,13 +213,12 @@ export class CompositeImageryProvider implements ImageryProvider {
    * 拉取并合成一块瓦片：任一子层失败跳过；全部失败 → null（调用方按
    * 父级回退处理）。合成主线程 OffscreenCanvas + 纯函数像素数学。
    *
-   * 产物经 blob 中转（canvas.convertToBlob → createImageBitmap(blob)）：
-   * copyExternalImageToTexture 对「canvas 引用」与「canvas 再创建的
-   * ImageBitmap」在软件渲染（headless）与 GPU 加速（真机）环境下各有
-   * 一侧静默拷出全零纹理（真机实证：canvas 直传上传黑、bitmap 路径
-   * 健康；headless 反之）。blob 解码产物与 fetch 瓦片解码 bitmap 完全
-   * 同构——两类环境下自始健康（fetch 路径长期稳定）。代价：每瓦片一次
-   * PNG 编码+解码（256²约 2-4ms，一次性加载，可接受）。
+   * 产物 createImageBitmap(canvas)（06f426b 原版语义）：真机 GPU 环境
+   * 实证唯一健康的路径——canvas 直传与 blob 中转在同一真机浏览器上引擎
+   * 管线输出黑球（该环境独立诊断页四路径全部健康，唯引擎实际渲染黑，
+   * 疑在 _createTileTexture 的 MipmapGenerator render-pass blit 与上传
+   * 源的组合行为，独立诊断无 mip 生成测不到）。同浏览器同 profile A/B
+   * 铁证：8def4b0（本路径）正常 / f2a86d6（blob）黑球。
    */
   async requestTile(key: TileKey): Promise<ImageBitmap | HTMLCanvasElement | OffscreenCanvas | null> {
     const children = await fetchChildTiles(this.layers, key);
@@ -255,10 +254,6 @@ export class CompositeImageryProvider implements ImageryProvider {
     }
     if (!acc) return null;
     ctx.putImageData(new ImageData(new Uint8ClampedArray(acc), size, size), 0, 0);
-    // blob 中转（两栖健康，见方法注释）；无 convertToBlob 的环境退回
-    // canvas 直传（软件 canvas 环境该路径健康）。
-    if (typeof canvas.convertToBlob !== 'function') return canvas;
-    const blob = await canvas.convertToBlob();
-    return createImageBitmap(blob);
+    return createImageBitmap(canvas);
   }
 }
