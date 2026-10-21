@@ -1139,14 +1139,16 @@ function tileRadiusScale(_level: number): number {
  * （掠射瓦片量化残差根除，2026-10-18）。
  */
 /**
- * 瓦片 RTC 开关：缺省开（verify-depth 3 集 0.06% 过闸配置：瓦片 RTC 开 +
- * 城市 legacy——城市墙掠射 f32 量化是残差主体，瓦片为陡角入射几乎不放大；
- * 城市 RTC 单开虽 0/0 集，但与瓦片 RTC 同开的游离残差族随航线段波动，
- * 落地取实测最优组合）。?waRtcTiles=0 可关瓦片 RTC 对照。
+ * 瓦片 RTC 开关：**缺省关**（2026-10-21 回归修复）。b40bea4 起缺省开的主渲
+ * 染路径在真机 GPU 上把全球瓦片 mesh 变换错位——视锥/深度只放过 L2 顶行
+ * （85°N~66.5°N ≈ 北极圈），画面即"只渲染北极圈"（?waRtcTiles=0 对照 A/B
+ * 实证：关=完整地球，开=北极圈；纹理/上传/合成管线全部无辜）。深度收益主
+ * 体本是城市墙掠射（瓦片为陡角入射几乎不放大），关闭瓦片 RTC 不损
+ * verify-depth 结论；矩阵 bug 修复后可恢复缺省开。?waRtcTiles=1 显式开。
  */
 function tileRTCEnabled(): boolean {
-  return typeof location === 'undefined'
-    || new URLSearchParams(location.search).get('waRtcTiles') !== '0';
+  if (typeof location === 'undefined') return false;
+  return new URLSearchParams(location.search).get('waRtcTiles') === '1';
 }
 
 function tileRTCOrigin(tile: TileKey): [number, number, number] {
