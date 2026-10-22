@@ -47,6 +47,20 @@
     import * as engine from '/src/index.ts';
 
     async function demo(viewer, engine) {
+
+      // ── 地形层（湖北 7777 内网 quantized-mesh；断网降级 0 高椭球）──────
+      fetch('http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/layer.json', { method: 'HEAD' })
+        .then(r => { if (!r.ok) throw new Error(r.status); })
+        .catch(() => console.warn('[demo] 内网地形服务(192.168.0.200:7777)不可达，运行在 0 高椭球'));
+      try {
+        if (typeof engine.TerrainLayer === 'function') {
+          viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
+            url: 'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 12, // 构建范围 max_zoom=12;14 会请求 z13/14 触发服务 429 限流→地形周期闪
+          }));
+        }
+      } catch (err) { console.warn('[demo] terrain init failed:', err.message); }
+
       const scene = viewer.scene;
       const result = document.getElementById('result');
       const controls = document.getElementById('controls');

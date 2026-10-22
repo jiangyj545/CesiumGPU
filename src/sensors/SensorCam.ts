@@ -159,6 +159,22 @@ export interface SensorFrame {
    * = 实例像素。全分辨率，与 seg/depth 同尺寸同序——RLE 导出的数据源。
    */
   instanceSegIds?: Uint32Array;
+  /**
+   * 双目立体通道（可选，SensorCamOptions.stereo 开启才有；Wave1-B1）。
+   * 右目 = 左目 pose 沿 body-left 反向平移 baselineM 的同姿态平行光轴渲染，
+   * 语义对齐 dataset-tools schema vision.stereo（uri 编码在 SensorRecorder
+   * 落 FrameRecord 时组装）。
+   */
+  stereo?: {
+    baselineM: number;
+    mode: 'rgb' | 'full';
+    /** 右目 RGB（PNG dataURL，与 frame.rgb 同导出路径）。 */
+    rightRgb: string;
+    /** 右目深度（米，与 depth 同构；mode='full' 才渲染/读回）。 */
+    rightDepth?: Float32Array;
+    /** 右目 meta（camPosEcefM=平移后光心；camQuat 与左目相同——平行光轴）。 */
+    rightMeta: SensorFrameMeta;
+  };
   meta: SensorFrameMeta;
 }
 
@@ -172,11 +188,24 @@ export type PickIdToSemantic = (pickId: number) => number;
  */
 export const PICK_INSTANCE_FLAG = 0x800000;
 
+/** 双目立体选项（Wave1-B1）。 */
+export interface StereoOptions {
+  /** 左右目基线（米，>0）。右目 = 左目沿 body-left 反方向平移 baselineM。 */
+  baselineM: number;
+  /**
+   * 'rgb'（缺省）：右目仅 RGB（立体匹配/视差训练默认档，跳过右目深度读回
+   * 省带宽）；'full'：右目另含 depth 深度通道（与左目 vision.depth 同构）。
+   */
+  mode?: 'rgb' | 'full';
+}
+
 export interface SensorCamOptions extends SensorCamParams {
   /** pickId→语义映射，缺省全 0（全画面视作背景）。 */
   pickIdToSemantic?: PickIdToSemantic;
   /** 调色板（缺省 {@link DEFAULT_PALETTE}）。 */
   palette?: Readonly<Record<number, readonly [number, number, number]>>;
+  /** 双目立体（可选，缺省不渲染右目——单目行为与历史版本逐位一致）。 */
+  stereo?: StereoOptions;
 }
 
 /**
@@ -226,6 +255,37 @@ export function quatFromFLU(
   return [(m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, s / 4];
 }
 
+/**
+ * 双目右目光心（米制 ECEF）：p_right = p_left − baselineM · R(q)·[0,1,0]。
+ *
+ * body-left = R(q)·[0,1,0]（cam_quat 列 = [forward,left,up]，见
+ * {@link quatFromFLU}）；右目在机体坐标 -X 侧（body-left 反向平移），
+ * 与 dataset-tools schema `vision.stereo` 约定逐字对齐——两目 cam_quat
+ * 相同（同姿态平行光轴），仅光心平移。ECEF 米制直接平移（引擎归一化
+ * 世界中 setView x/y/z 分支自行 ×1/EARTH_SCALE，本函数不掺缩放）。
+ * 纯函数（单测锚点）：q=[1,0,0,0] 时 FLU 恰对齐 ENU，右目沿 -Y 平移。
+ */
+export function stereoRightEyeEcefM(
+  pLeftEcefM: readonly [number, number, number],
+  camQuat: readonly [number, number, number, number],
+  baselineM: number,
+): [number, number, number] {
+  const [qw, qx, qy, qz] = camQuat;
+  // R(q)·v 标准式：v' = v + w·t + cross(q.xyz, t)，t = 2·cross(q.xyz, v)
+  const vx = 0, vy = 1, vz = 0;
+  const tx = 2 * (qy * vz - qz * vy);          // cross(q.xyz,[0,1,0]) ×2
+  const ty = 2 * (qz * vx - qx * vz);
+  const tz = 2 * (qx * vy - qy * vx);
+  const leftX = vx + qw * tx + (qy * tz - qz * ty);
+  const leftY = vy + qw * ty + (qz * tx - qx * tz);
+  const leftZ = vz + qw * tz + (qx * ty - qy * tx);
+  return [
+    pLeftEcefM[0] - baselineM * leftX,
+    pLeftEcefM[1] - baselineM * leftY,
+    pLeftEcefM[2] - baselineM * leftZ,
+  ];
+}
+
 /** pickId（24bit，RGBA 低 3 字节）→ 语义 id → 调色板查色。纯函数（单测锚点）。 */
 export function decodeSegPixel(
   r: number, g: number, b: number,
@@ -270,6 +330,7 @@ export class SensorCam {
   private readonly _params: SensorCamParams;
   private readonly _pickIdToSemantic: PickIdToSemantic;
   private readonly _palette: Readonly<Record<number, readonly [number, number, number]>>;
+  private readonly _stereo: { baselineM: number; mode: 'rgb' | 'full' } | null;
 
   constructor(scene: Scene, options: SensorCamOptions) {
     this._scene = scene;
@@ -282,6 +343,9 @@ export class SensorCam {
     };
     this._pickIdToSemantic = options.pickIdToSemantic ?? (() => 0);
     this._palette = options.palette ?? DEFAULT_PALETTE;
+    this._stereo = options.stereo && options.stereo.baselineM > 0
+      ? { baselineM: options.stereo.baselineM, mode: options.stereo.mode ?? 'rgb' }
+      : null;
   }
 
   get params(): Readonly<SensorCamParams> { return this._params; }
@@ -292,16 +356,17 @@ export class SensorCam {
   }
 
   /**
-   * 以给定位姿渲染一帧并导出三通道。渲染前保存相机状态、渲染后原样还原
-   * （position/direction/up/right/frustum 全量），主循环渲染不受污染。
+   * 以给定位姿渲染一帧并导出三通道（stereo 开启时额外渲染右目）。
+   * 渲染前保存相机状态、渲染后原样还原（position/direction/up/right/frustum
+   * 全量），主循环渲染不受污染。单目路径行为与历史版本逐位一致（重构自
+   * 原 capture 主体，见 {@link renderEye}）。
    */
   async capture(pose: SensorPose, tCaptureSim?: number): Promise<SensorFrame> {
     const scene = this._scene;
     if (!this.isReady()) throw new Error('SensorCam.capture: scene 尚未 initialize（G-Buffer 不存在）');
 
     const cam = scene.camera;
-    const context = scene.context;
-    // ── 保存相机 ──
+    // ── 保存相机（左右目共用一次保存/还原）──
     const saved = {
       position: Cartesian3.clone(cam.position),
       direction: Cartesian3.clone(cam.direction),
@@ -313,48 +378,186 @@ export class SensorCam {
       far: cam.frustum.far,
     };
 
-    const pickPass = scene.createPickPass();
+    try {
+      const tSim = tCaptureSim ?? performance.now() / 1000;
+
+      // ── 左目：原单目全通道路径（depth + seg）──
+      const left = await this.renderEye({
+        pose,
+        tCaptureSim: tSim,
+        wantDepth: true,
+        wantSeg: true,
+      });
+
+      // ── 右目（stereo 开启时）：平行光轴矩形对 ──
+      // 光心 = 左目光心沿 body-left 反向平移 baselineM（ECEF 米制，见
+      // stereoRightEyeEcefM）；orientation（heading/pitch/roll）不变 →
+      // 两目 cam_quat 相同。右目 meta 用右目 render 时刻快照
+      // （"渲染用什么记什么"；camQuat 与左目重算值应逐位一致）。
+      const st = this._stereo;
+      let stereo: SensorFrame['stereo'];
+      if (st) {
+        const rightPose: SensorPose = {
+          ...pose,
+          posEcefM: stereoRightEyeEcefM(left.meta.camPosEcefM, left.meta.camQuat, st.baselineM),
+        };
+        const right = await this.renderEye({
+          pose: rightPose,
+          tCaptureSim: tSim,
+          // mode='rgb'：跳过右目深度读回省带宽；契约 stereo.right 无 seg
+          wantDepth: st.mode === 'full',
+          wantSeg: false,
+          // 两目深度基准同帧：右目锁定左目 render 时刻 near/far（见
+          // renderEye lockNearNorm 注释）
+          lockNearNorm: left.nearNorm,
+          lockFarNorm: left.farNorm,
+        });
+        stereo = {
+          baselineM: st.baselineM,
+          mode: st.mode,
+          rightRgb: right.rgb,
+          rightDepth: right.depth,
+          rightMeta: right.meta,
+        };
+      }
+
+      return {
+        width: left.w,
+        height: left.h,
+        rgb: left.rgb,
+        depth: left.depth!,
+        seg: left.seg!,
+        segIds: left.segIds!,
+        instanceSegIds: left.instanceSegIds!,
+        ...(stereo ? { stereo } : {}),
+        meta: left.meta,
+      };
+    } finally {
+      // ── 还原相机（无论成败；renderEye 自有资源由其自身 finally 清理）──
+      cam.position.x = saved.position.x;
+      cam.position.y = saved.position.y;
+      cam.position.z = saved.position.z;
+      cam.direction.x = saved.direction.x;
+      cam.direction.y = saved.direction.y;
+      cam.direction.z = saved.direction.z;
+      cam.up.x = saved.up.x;
+      cam.up.y = saved.up.y;
+      cam.up.z = saved.up.z;
+      cam.right.x = saved.right.x;
+      cam.right.y = saved.right.y;
+      cam.right.z = saved.right.z;
+      // 视矩阵脏标记：位置/基向量已整体回写，标记后主循环按原值重建
+      (cam as unknown as { _viewDirty: boolean })._viewDirty = true;
+      cam.frustum.fov = saved.fov;
+      cam.frustum.near = saved.near;
+      cam.frustum.far = saved.far;
+      cam.setAspectRatio(saved.aspect);
+    }
+  }
+
+  /**
+   * 单目渲染一轮（capture 的核心，左右目共用）。相机保存/还原由调用方
+   * （capture 层）一次成对，本方法只负责：设位姿 → render → render 时刻
+   * 快照（W10）→ 读回 rgb/depth/seg → meta。
+   *
+   * @param opts.wantDepth 建 G-Buffer 深度读回缓冲 + 一次性帧钩子并线性化
+   *   （右目 mode='rgb' 关——省带宽）。
+   * @param opts.wantSeg 建 pick pass 全幅编码并解码 seg（契约 stereo.right
+   *   无 seg 通道，右目恒关）。
+   * @param opts.lockNearNorm/lockFarNorm 渲染前锁定动态 near/far（stereo
+   *   右目传左目 render 时刻快照值）。背景：引擎 near/far 由海拔动态收紧
+   *   （Camera._updateProjMatrix：near=min(0.005, max(alt·0.1, 3e-7))、far 同
+   *   式），投影矩阵 getter 按 `_projDirty || 位置快照不匹配` 按需重算并
+   *   **覆盖** near/far——右目 setView 改了位置必然触发重算，b=0.12m 基线在
+   *   120m 高度下两目 near 差 ~12mm（0.1% 深度基准漂移，立体匹配不可接受）。
+   *   锁定做法：写回左目 near/far 后清 _projDirty 并同步 _projPos 位置快照
+   *   （与还原路径的 _viewDirty 直写同私有字段惯例），render 的 getter 判定
+   *   "无变化"跳过重算——右目复用左目投影矩阵（fov/aspect/near/far 全同 →
+   *   矩阵逐位一致），两目深度基准严格同帧。
+   */
+  private async renderEye(opts: {
+    pose: SensorPose;
+    tCaptureSim: number;
+    wantDepth: boolean;
+    wantSeg: boolean;
+    lockNearNorm?: number;
+    lockFarNorm?: number;
+  }): Promise<{
+    w: number;
+    h: number;
+    rgb: string;
+    depth?: Float32Array;
+    seg?: Uint8Array;
+    segIds?: Uint32Array;
+    instanceSegIds?: Uint32Array;
+    meta: SensorFrameMeta;
+    nearNorm: number;
+    farNorm: number;
+  }> {
+    const scene = this._scene;
+    const cam = scene.camera;
+    const context = scene.context;
+
+    const pickPass = opts.wantSeg ? scene.createPickPass() : null;
     const depthTex = scene.getDepthTexture()!;
     const w = depthTex.width;
     const h = depthTex.height;
     const device = context.device;
 
-    // 深度读回缓冲（bytesPerRow 256 对齐；depth32float 每像素 4B）
+    // 深度读回缓冲（bytesPerRow 256 对齐；depth32float 每像素 4B；wantDepth 才建）
     const depthBytesPerRow = Math.ceil((w * 4) / 256) * 256;
-    const depthBuf = device.createBuffer({
-      label: 'SensorCam.DepthReadback',
-      size: depthBytesPerRow * h,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
+    const depthBuf = opts.wantDepth
+      ? device.createBuffer({
+          label: 'SensorCam.DepthReadback',
+          size: depthBytesPerRow * h,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        })
+      : null;
 
     // 一次性帧钩子：把 G-Buffer 深度全幅拷进读回缓冲（同帧、同投影）
-    const depthHook = (encoder: GPUCommandEncoder): void => {
-      encoder.copyTextureToBuffer(
-        { texture: depthTex },
-        { buffer: depthBuf, bytesPerRow: depthBytesPerRow },
-        { width: w, height: h },
-      );
-    };
-    scene.frameHooks.push(depthHook);
+    const depthHook = depthBuf
+      ? (encoder: GPUCommandEncoder): void => {
+          encoder.copyTextureToBuffer(
+            { texture: depthTex },
+            { buffer: depthBuf, bytesPerRow: depthBytesPerRow },
+            { width: w, height: h },
+          );
+        }
+      : null;
+    if (depthHook) scene.frameHooks.push(depthHook);
 
     // 全幅 id 纹理模式：本次 render 编码的 pick view 不做 1×1 scissor
-    const savedDebugFull = pickPass.debugFullViewport;
-    pickPass.debugFullViewport = true;
+    const savedDebugFull = pickPass ? pickPass.debugFullViewport : null;
+    if (pickPass) pickPass.debugFullViewport = true;
 
     try {
       // ── 设传感器位姿（fov/aspect 变更需经 setAspectRatio 触发 proj 重算）──
       // destination 走米制 ECEF（真椭球，城市/SSE pos_ecef 同约定）——
       // 不走 setView 的 {lon,lat,height} 压扁世界分支（见 sensorCamEcefDestination）。
       cam.setView({
-        destination: sensorCamEcefDestination(pose),
-        orientation: { heading: pose.headingRad, pitch: pose.pitchRad, roll: pose.rollRad },
+        destination: sensorCamEcefDestination(opts.pose),
+        orientation: {
+          heading: opts.pose.headingRad,
+          pitch: opts.pose.pitchRad,
+          roll: opts.pose.rollRad,
+        },
       });
       cam.frustum.fov = CesiumMath.toRadians(this._params.fovYDeg);
       cam.setAspectRatio(w / h);
+      if (opts.lockNearNorm != null && opts.lockFarNorm != null) {
+        cam.frustum.near = opts.lockNearNorm;
+        cam.frustum.far = opts.lockFarNorm;
+        // 抑制 render 时 proj getter 的动态重算（见方法注释 lockNearNorm）
+        (cam as unknown as { _projDirty: boolean })._projDirty = false;
+        const projPos = (cam as unknown as { _projPos: Cartesian3 })._projPos;
+        projPos.x = cam.position.x;
+        projPos.y = cam.position.y;
+        projPos.z = cam.position.z;
+      }
 
       // 注册 pending pick：本次 render 的帧钩子会全幅编码 id 平面
-      const pickPromise = scene.pick(0, 0);
-      // W4 TEMP DEBUG: render-time camera snapshot（诊断后移除）
+      const pickPromise = opts.wantSeg ? scene.pick(0, 0) : null;
+      // W4 TEMP DEBUG: render-time camera snapshot（诊断后移除；双目各记一条）
       const w4log = (window as unknown as { __W4_CAMLOG?: unknown[] }).__W4_CAMLOG
         ?? ((window as unknown as { __W4_CAMLOG?: unknown[] }).__W4_CAMLOG = []);
       if (Array.isArray(w4log)) {
@@ -389,53 +592,60 @@ export class SensorCam {
       // RAF 的每一帧都会重复编码 copy → depthBuf，与下方 mapAsync 的
       // mapped 生命周期交错 → "used in submit while mapped" validation
       // error → 整帧 submit 作废 → 录制态渐进黑帧（深度采样归零）。
-      const hookIdx = scene.frameHooks.indexOf(depthHook);
-      if (hookIdx !== -1) scene.frameHooks.splice(hookIdx, 1);
+      if (depthHook) {
+        const hookIdx = scene.frameHooks.indexOf(depthHook);
+        if (hookIdx !== -1) scene.frameHooks.splice(hookIdx, 1);
+      }
 
       // ── RGB：主 canvas 原生导出（同帧已呈现）──
       const rgb = context.canvas.toDataURL('image/png');
 
-      // ── seg：全幅 id 纹理读回 ──
-      const dump = await pickPass.debugDumpPickTexture();
+      // ── seg：全幅 id 纹理读回（wantSeg 才有）──
+      const dump = pickPass ? await pickPass.debugDumpPickTexture() : null;
       void pickPromise; // pick 结果本身不消费（取整幅 id 纹理）
 
-      // ── depth：map + 剥离行 stride + 线性化 ──
-      await depthBuf.mapAsync(GPUMapMode.READ);
-      const raw = new Uint8Array(depthBuf.getMappedRange());
-      const tightlyPacked = destrideBytes(raw, w, h, depthBytesPerRow, 4);
-      depthBuf.unmap();
-      const f32 = new Float32Array(tightlyPacked.buffer);
-      const nearNorm = camSnap.near;
-      const farNorm = camSnap.far;
-      const depthM = new Float32Array(w * h);
-      for (let i = 0; i < f32.length; i++) {
-        depthM[i] = linearizeDepthMeters(f32[i], nearNorm, farNorm);
+      // ── depth：map + 剥离行 stride + 线性化（wantDepth 才有）──
+      let depthM: Float32Array | undefined;
+      if (depthBuf) {
+        await depthBuf.mapAsync(GPUMapMode.READ);
+        const raw = new Uint8Array(depthBuf.getMappedRange());
+        const tightlyPacked = destrideBytes(raw, w, h, depthBytesPerRow, 4);
+        depthBuf.unmap();
+        const f32 = new Float32Array(tightlyPacked.buffer);
+        depthM = new Float32Array(w * h);
+        for (let i = 0; i < f32.length; i++) {
+          depthM[i] = linearizeDepthMeters(f32[i], camSnap.near, camSnap.far);
+        }
       }
 
       // ── seg 解码：pickId → 语义 → 调色板（F12：同轮填充实例段平面）──
-      const segData = dump ?? { w, h, data: new Uint8Array(w * h * 4) };
-      const seg = new Uint8Array(w * h * 4);
-      const segIds = new Uint32Array(w * h);
-      const instanceSegIds = new Uint32Array(w * h);
-      const sw = Math.min(segData.w, w);
-      const sh = Math.min(segData.h, h);
-      for (let y = 0; y < sh; y++) {
-        for (let x = 0; x < sw; x++) {
-          const si = (y * segData.w + x) * 4;
-          const di = y * w + x;
-          const rawId =
-            segData.data[si] | (segData.data[si + 1] << 8) | (segData.data[si + 2] << 16);
-          const dec = decodeSegPixel(
-            segData.data[si], segData.data[si + 1], segData.data[si + 2],
-            this._pickIdToSemantic, this._palette,
-          );
-          seg[di * 4]     = dec.rgba[0];
-          seg[di * 4 + 1] = dec.rgba[1];
-          seg[di * 4 + 2] = dec.rgba[2];
-          seg[di * 4 + 3] = dec.rgba[3];
-          segIds[di] = dec.semanticId;
-          // F12：bit23 置位 = 建筑实例像素，原值保留（含序号）；其余归 0
-          instanceSegIds[di] = (rawId & PICK_INSTANCE_FLAG) !== 0 ? rawId : 0;
+      let seg: Uint8Array | undefined;
+      let segIds: Uint32Array | undefined;
+      let instanceSegIds: Uint32Array | undefined;
+      if (dump) {
+        seg = new Uint8Array(w * h * 4);
+        segIds = new Uint32Array(w * h);
+        instanceSegIds = new Uint32Array(w * h);
+        const sw = Math.min(dump.w, w);
+        const sh = Math.min(dump.h, h);
+        for (let y = 0; y < sh; y++) {
+          for (let x = 0; x < sw; x++) {
+            const si = (y * dump.w + x) * 4;
+            const di = y * w + x;
+            const rawId =
+              dump.data[si] | (dump.data[si + 1] << 8) | (dump.data[si + 2] << 16);
+            const dec = decodeSegPixel(
+              dump.data[si], dump.data[si + 1], dump.data[si + 2],
+              this._pickIdToSemantic, this._palette,
+            );
+            seg[di * 4]     = dec.rgba[0];
+            seg[di * 4 + 1] = dec.rgba[1];
+            seg[di * 4 + 2] = dec.rgba[2];
+            seg[di * 4 + 3] = dec.rgba[3];
+            segIds[di] = dec.semanticId;
+            // F12：bit23 置位 = 建筑实例像素，原值保留（含序号）；其余归 0
+            instanceSegIds[di] = (rawId & PICK_INSTANCE_FLAG) !== 0 ? rawId : 0;
+          }
         }
       }
 
@@ -450,53 +660,38 @@ export class SensorCam {
       const pos = camSnap.pos;
 
       return {
-        width: w,
-        height: h,
+        w,
+        h,
         rgb,
-        depth: depthM,
-        seg,
-        segIds,
-        instanceSegIds,
+        ...(depthM ? { depth: depthM } : {}),
+        ...(seg && segIds && instanceSegIds
+          ? { seg, segIds, instanceSegIds }
+          : {}),
         meta: {
           intrinsics: { fx, fy: fx, cx: w / 2, cy: h / 2 },
           hfovDeg: CesiumMath.toDegrees(hfovRad),
-          tCaptureSim: tCaptureSim ?? performance.now() / 1000,
+          tCaptureSim: opts.tCaptureSim,
           camPosEcefM: [pos.x * EARTH_SCALE, pos.y * EARTH_SCALE, pos.z * EARTH_SCALE],
           camQuat: quat,
-          nearM: nearNorm * EARTH_SCALE,
-          farM: farNorm * EARTH_SCALE,
+          nearM: camSnap.near * EARTH_SCALE,
+          farM: camSnap.far * EARTH_SCALE,
           requestedNearM: this._params.nearM,
           requestedFarM: this._params.farM,
           fovYDeg: this._params.fovYDeg,
           width: this._params.width,
           height: this._params.height,
         },
+        nearNorm: camSnap.near,
+        farNorm: camSnap.far,
       };
     } finally {
-      // ── 还原相机与全局状态（无论成败）──
-      const hookIdx = scene.frameHooks.indexOf(depthHook);
-      if (hookIdx !== -1) scene.frameHooks.splice(hookIdx, 1);
-      pickPass.debugFullViewport = savedDebugFull;
-
-      cam.position.x = saved.position.x;
-      cam.position.y = saved.position.y;
-      cam.position.z = saved.position.z;
-      cam.direction.x = saved.direction.x;
-      cam.direction.y = saved.direction.y;
-      cam.direction.z = saved.direction.z;
-      cam.up.x = saved.up.x;
-      cam.up.y = saved.up.y;
-      cam.up.z = saved.up.z;
-      cam.right.x = saved.right.x;
-      cam.right.y = saved.right.y;
-      cam.right.z = saved.right.z;
-      // 视矩阵脏标记：位置/基向量已整体回写，标记后主循环按原值重建
-      (cam as unknown as { _viewDirty: boolean })._viewDirty = true;
-      cam.frustum.fov = saved.fov;
-      cam.frustum.near = saved.near;
-      cam.frustum.far = saved.far;
-      cam.setAspectRatio(saved.aspect);
-      depthBuf.destroy();
+      // ── 清理 renderEye 自有资源（无论成败）──
+      if (depthHook) {
+        const hookIdx = scene.frameHooks.indexOf(depthHook);
+        if (hookIdx !== -1) scene.frameHooks.splice(hookIdx, 1);
+      }
+      if (pickPass && savedDebugFull !== null) pickPass.debugFullViewport = savedDebugFull;
+      depthBuf?.destroy();
     }
   }
 }
@@ -533,6 +728,20 @@ export interface FrameRecord {
       grid32?: number[];
     };
     bbox2d: Array<{ cls: string; track_id: number; x1: number; y1: number; x2: number; y2: number }>;
+    /**
+     * 双目立体（可选通道，Wave1-B1；字段名严格对齐 dataset-tools/schema
+     * frame-record.ts L149-166）：右目 = 左目 pose 沿 body-left 反方向平移
+     * baseline_m 的同姿态平行光轴；mode='rgb' 右目仅 RGB，'full' 另含
+     * depth（与左目 vision.depth 同构）。未携带 stereo 的旧帧完全向后兼容。
+     */
+    stereo?: {
+      baseline_m: number;
+      mode: 'rgb' | 'full';
+      right: {
+        rgb: FrameRecord['vision']['rgb'];
+        depth?: FrameRecord['vision']['depth'];
+      };
+    };
   };
   command: {
     mode: 'waypoint' | 'velocity' | 'attitude' | 'rc';
@@ -597,6 +806,18 @@ export interface FrameRecordInput {
   /** 本机局部 ENU 位置（米，Phase 0 = 位姿源真值）。 */
   posEnu: [number, number, number];
   paletteMapRef?: string;
+  /**
+   * 双目通道（可选；SensorCam.stereo 开启时由 SensorRecorder._tick 组装）。
+   * 右目附件 uri 编码固定走 default 路径（rgb=dataURL、depth=inline
+   * f32-base64，与 defaultEncodeUris 同构）——自定义 encodeUris 仅作用于
+   * 左目（Phase 0 简化；mode 暂只 'rgb'，rightDepthUri 现实不触发）。
+   */
+  stereo?: {
+    baselineM: number;
+    mode: 'rgb' | 'full';
+    rightRgbUri: string;
+    rightDepthUri?: string;
+  };
 }
 
 /** 4×4 单位阵（cam_T_body：Phase 0 相机与机体重合）。 */
@@ -644,6 +865,38 @@ export function buildFrameRecord(input: FrameRecordInput): FrameRecord {
       },
       seg: { uri: input.segUri, palette_map_ref: input.paletteMapRef ?? PALETTE_MAP_VERSION },
       bbox2d: [],
+      // 双目（可选通道）：右目 rgb 内参/近远取右目 render 时刻 meta（平行
+      // 光轴下与左目同值，但"渲染用什么记什么"）；mode='rgb' 无 right.depth
+      ...(input.stereo && input.frame.stereo ? {
+        stereo: {
+          baseline_m: input.stereo.baselineM,
+          mode: input.stereo.mode,
+          right: {
+            rgb: {
+              uri: input.stereo.rightRgbUri,
+              w: frame.width,
+              h: frame.height,
+              fx: input.frame.stereo.rightMeta.intrinsics.fx,
+              fy: input.frame.stereo.rightMeta.intrinsics.fy,
+              cx: input.frame.stereo.rightMeta.intrinsics.cx,
+              cy: input.frame.stereo.rightMeta.intrinsics.cy,
+              distortion: [0, 0, 0, 0, 0],
+              hfov_deg: input.frame.stereo.rightMeta.hfovDeg,
+            },
+            ...(input.stereo.mode === 'full' && input.stereo.rightDepthUri
+              ? {
+                  depth: {
+                    uri: input.stereo.rightDepthUri,
+                    fmt: 'f32' as const,
+                    near_m: input.frame.stereo.rightMeta.nearM,
+                    far_m: input.frame.stereo.rightMeta.farM,
+                    unit: 'm' as const,
+                  },
+                }
+              : {}),
+          },
+        },
+      } : {}),
     },
 
     command: {
@@ -829,6 +1082,18 @@ export class SensorRecorder {
         rgbUri: uris.rgbUri,
         depthUri: uris.depthUri,
         segUri: uris.segUri,
+        // 双目右目附件编码固定走 default 路径（dataURL / inline f32-base64，
+        // 与 defaultEncodeUris 同构——见 FrameRecordInput.stereo 注释）
+        stereo: frame.stereo
+          ? {
+              baselineM: frame.stereo.baselineM,
+              mode: frame.stereo.mode,
+              rightRgbUri: frame.stereo.rightRgb,
+              rightDepthUri: frame.stereo.rightDepth
+                ? `inline:f32-base64;${f32ToBase64(frame.stereo.rightDepth)}`
+                : undefined,
+            }
+          : undefined,
         commandTargetEnu: mock.targetEnu,
         commandSetpoint: mock.setpoint,
         velEnu: mock.velEnu,

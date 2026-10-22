@@ -25,7 +25,7 @@ export class LocalQuantizedMeshProvider extends HttpTerrainProviderBase {
     super({
       url: options.url ?? DEFAULT_URL,
       tilingScheme: 'geographic',
-      maximumLevel: options.maximumLevel ?? 14,
+      maximumLevel: options.maximumLevel ?? 12, // 7777 terrain_hubei 构建范围 max_zoom=12(z13+ 429 限流)
       headers: options.headers,
     });
   }

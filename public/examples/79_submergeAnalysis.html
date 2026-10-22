@@ -50,7 +50,7 @@
     <div id="modeLine">模式：待分析</div>
     <div id="result">初始化中…</div>
     <p class="warn">⚠ 后台空间分析服务：<code>http://localhost:8892</code>（ASTER GDEM 高程阈值），
-      离线时自动回退前端近似。前端近似还需要本地地形服务 <code>http://localhost:8888</code>
+      离线时自动回退前端近似。前端近似还需要本地地形服务 <code>http://192.168.0.200:7777</code>
       （terrain_hubei）在线，否则地形为 0 高，任意水位即全淹。</p>
   </div>
   <div id="waterHud">
@@ -65,24 +65,24 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
-            '\n⚠ 离线地形服务(8888)未启动：运行 python .omc/tmp/terrain_server.py 后刷新');
+            '\n⚠ 内网地形服务(192.168.0.200:7777)不可达');
         });
       const levelSlider = document.getElementById('levelSlider');
       const levelVal = document.getElementById('levelVal');
       const waterLevel = document.getElementById('waterLevel');
       const waterSub = document.getElementById('waterSub');
 
-      // ── 1. 地形层（湖北 8888；离线降级 0 高）────────────────────────
+      // ── 1. 地形层（湖北 7777 内网；断网降级 0 高）────────────────────────
       let terrainOk = false;
       try {
         if (typeof engine.TerrainLayer === 'function') {
           viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
-            url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
-            maximumLevel: 14,
+            url: 'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 12, // 构建范围 max_zoom=12;14 会请求 z13/14 触发服务 429 限流→地形周期闪
           }));
           terrainOk = true;
         }

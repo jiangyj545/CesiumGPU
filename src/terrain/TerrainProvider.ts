@@ -137,9 +137,17 @@ export function webmercatorTileBounds(
 }
 
 /**
- * Unit-ellipsoid ECEF direction for lon/lat (degrees), scaled radially by a
- * height in meters — identical normalisation to
- * `EllipsoidGeometry.createRegion` (y/z squashed by the WGS84 polar ratio).
+ * Normalised-ECEF position for lon/lat (degrees) at a height in meters —
+ * TRUE WGS84 ellipsoid parameterisation, bit-identical to
+ * `EllipsoidGeometry.createRegion` / `Cartesian3.fromDegrees ÷ a`
+ * (x = n·cosφcosλ, y = n·cosφsinλ, z = n(1−e²)·sinφ; height scales radially).
+ *
+ * 2026-10-22: the legacy squash convention `[nx, ny·ρ, nz·ρ]` diverged from
+ * the imagery geometry (moved to the true-ellipsoid system on 2026-10-18) by
+ * 21–25 km TANGENTIALLY at mid-latitudes — terrain meshes sat permanently
+ * depth-inside the imagery shell, so terrain relief was invisible wherever
+ * imagery was drawn. Both systems share nearly the same radial envelope
+ * (Δ≈64 m at 32°N), which is why ocean/cloud effects never looked wrong.
  */
 export function ecefFromLonLatHeight(
   lon: number,
@@ -149,13 +157,16 @@ export function ecefFromLonLatHeight(
 ): void {
   const rad = Math.PI / 180.0;
   const cosLat = Math.cos(lat * rad);
+  const sinLat = Math.sin(lat * rad);
   const nx = cosLat * Math.cos(lon * rad);
   const ny = cosLat * Math.sin(lon * rad);
-  const nz = Math.sin(lat * rad);
+  const nz = sinLat;
+  const e2 = 1.0 - WGS84_POLAR_RATIO * WGS84_POLAR_RATIO;
+  const nLat = 1.0 / Math.sqrt(1.0 - e2 * sinLat * sinLat);
   const scale = 1.0 + heightMeters / WGS84_SEMI_MAJOR;
-  out[0] = nx * scale;
-  out[1] = ny * WGS84_POLAR_RATIO * scale;
-  out[2] = nz * WGS84_POLAR_RATIO * scale;
+  out[0] = nLat * nx * scale;
+  out[1] = nLat * ny * scale;
+  out[2] = nLat * (1.0 - e2) * nz * scale;
 }
 
 /** Full-scale ECEF meters of the ellipsoid surface point at lon/lat (degrees). */

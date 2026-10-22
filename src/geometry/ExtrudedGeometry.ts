@@ -1,4 +1,5 @@
 import { Cartesian3 } from '../math/Cartesian3';
+import { ecefFromLonLatHeight } from '../terrain/TerrainProvider';
 import { Matrix4 } from '../math/Matrix4';
 import { Transforms } from '../math/Transforms';
 import { GeometryPipeline } from './GeometryPipeline';
@@ -108,18 +109,13 @@ export class ExtrudedGeometry {
     const topM = baseM + Math.max(0, options.heightM);
     const extrude = options.heightM > 0;
     // 放置映射:默认未压扁 WGS84(fromDegreesNormalized);flattened 时走引擎
-    // 地表同款线性压扁(与 Globe/影像瓦片共面)。ENU 投影(求 winding)两系通用。
-    const RHO = 6356752.3142 / 6378137.0;
+    // 地表同款 TRUE 椭球参数化(ecefFromLonLatHeight,2026-10-22 与 Globe/影像
+    // 瓦片共面;旧线性压扁式已随坐标系统一淘汰)。ENU 投影(求 winding)两系通用。
     const pt = (lonDeg: number, latDeg: number, hM: number): Cartesian3 => {
       if (!options.flattened) return Cartesian3.fromDegreesNormalized(lonDeg, latDeg, hM);
-      const lon = (lonDeg * Math.PI) / 180, lat = (latDeg * Math.PI) / 180;
-      const s = 1.0 + hM / 6378137.0;
-      const cosLat = Math.cos(lat);
-      return new Cartesian3(
-        cosLat * Math.cos(lon) * s,
-        cosLat * Math.sin(lon) * RHO * s,
-        Math.sin(lat) * RHO * s,
-      );
+      const tmp: [number, number, number] = [0, 0, 0];
+      ecefFromLonLatHeight(lonDeg, latDeg, hM, tmp);
+      return new Cartesian3(tmp[0], tmp[1], tmp[2]);
     };
 
     // ENU 投影（footprint 尺度 << 地球半径，质心经纬度均值即足够）

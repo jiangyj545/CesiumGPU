@@ -318,7 +318,11 @@ describe('OCEAN_FFT_RENDER_SHADER 岸线泡沫源串', () => {
     expect(s).toContain('@binding(13)varseabedTex:texture_2d<f32>');
     expect(s).toContain('shoreParams:vec4<f32>');
     expect(s).toContain('seabedUv:vec4<f32>');
-    expect(OCEAN_RENDER_PARAMS_UBO_BYTES).toBe(128);
+    // 2026-10-22 T-TROPICAL 观感档扩容 128→224B（R2 208→R3 224 加 lookParamsC）：
+    // 前 128B（shoreParams@96 / seabedUv@112）偏移不变，尾部追加 lookShallow
+    // 等 6 个 vec4——行为等价更新。
+    expect(OCEAN_RENDER_PARAMS_UBO_BYTES).toBe(224);
+    expect(s).toContain('lookShallow:vec4<f32>');
   });
 
   it('破碎带 smoothstep + Jacobian 打 5 折 + 浅水 alpha 收边', () => {

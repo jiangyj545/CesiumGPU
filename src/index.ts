@@ -138,6 +138,7 @@ export {
   SEMANTIC,
   linearizeDepthMeters,
   quatFromFLU,
+  stereoRightEyeEcefM,
   decodeSegPixel,
   f32ToBase64,
   defaultEncodeUris,
@@ -146,6 +147,7 @@ export {
 export type {
   SensorCamParams,
   SensorCamOptions,
+  StereoOptions,
   SensorPose,
   SensorFrame,
   SensorFrameMeta,

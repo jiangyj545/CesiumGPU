@@ -48,7 +48,7 @@
     </div>
     <div id="modeLine">模式：初始化中</div>
     <div id="result">初始化中…</div>
-    <p class="warn">⚠ 本地地形服务 <code>http://127.0.0.1:8888</code>
+    <p class="warn">⚠ 本地地形服务 <code>http://192.168.0.200:7777</code>
       （terrain_hubei）离线时自动切换合成盆地 DEM；后台对照
       <code>http://127.0.0.1:8892</code> 失败时显示「—」。</p>
   </div>
@@ -79,7 +79,7 @@
       let terrainOk = false;
       try {
         const r = await fetch(
-          'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json',
+          'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/layer.json',
           { method: 'HEAD' });
         terrainOk = r.ok;
       } catch { terrainOk = false; }
@@ -89,8 +89,8 @@
       const deg = { ...DEFAULT_DEG };
 
       const provider = new engine.LocalQuantizedMeshProvider({
-        url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
-        maximumLevel: 14,
+        url: 'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/{z}/{x}/{y}.terrain',
+        maximumLevel: 12, // 构建范围 max_zoom=12;14 会请求 z13/14 触发服务 429 限流→地形周期闪
       });
       // 独立 TerrainLayer 供分析预载（不与视锥调度争抢同一份 LRU）
       const terrainLayer = new engine.TerrainLayer({ provider, cacheCapacity: 96 });

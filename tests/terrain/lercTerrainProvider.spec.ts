@@ -76,15 +76,22 @@ describe('LercTerrainProvider', () => {
     expect(mesh!.indices.length).toBe(3 * 3 * 6);
     expect(mesh!.minHeight).toBeCloseTo(100, 3);
     expect(mesh!.maxHeight).toBeCloseTo(133, 3);
-    // 高程折算：|pos| − 引擎地表矢长（Camera.surfaceRadius，压扁系）
-    // ≈ h/6378137（全部顶点，任一纬度成立）。
+    // 高程折算（真椭球约定，ecefFromLonLatHeight 2026-10-22）：
+    // hypot(x, y, z/(1−e²))/n − 1 ≈ h/6378137（全部顶点，任一纬度成立）。
+    const PR = 6356752.3142 / 6378137;
+    const E2 = 1 - PR * PR;
+    const dirScale = (p: Cartesian3): number => {
+      const lat = Math.atan2(p.z / (1 - E2), Math.hypot(p.x, p.y));
+      const n = 1 / Math.sqrt(1 - E2 * Math.sin(lat) * Math.sin(lat));
+      return Math.hypot(p.x, p.y, p.z / (1 - E2)) / n;
+    };
     for (let i = 0; i < 16; i++) {
       const p3 = new Cartesian3(
         mesh!.positions[i * 3],
         mesh!.positions[i * 3 + 1],
         mesh!.positions[i * 3 + 2]
       );
-      const h = (Cartesian3.magnitude(p3) - Camera.surfaceRadius(p3)) * 6378137;
+      const h = (dirScale(p3) - 1) * 6378137;
       expect(h).toBeGreaterThanOrEqual(99.9);
       expect(h).toBeLessThanOrEqual(133.1);
     }

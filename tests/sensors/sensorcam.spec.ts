@@ -8,6 +8,7 @@ import {
   linearizeDepthMeters,
   quatFromFLU,
   sensorCamEcefDestination,
+  stereoRightEyeEcefM,
 } from '../../src/sensors/SensorCam';
 import type {
   FrameRecordInput,
@@ -17,6 +18,7 @@ import type {
 } from '../../src/sensors/SensorCam';
 import { Cartesian3 } from '../../src/math/Cartesian3';
 import { Cartographic } from '../../src/math/Cartographic';
+import { Quaternion } from '../../src/math/Quaternion';
 import { Camera } from '../../src/scene/Camera';
 
 const EARTH_SCALE = 6378137;
@@ -49,14 +51,16 @@ describe('sensorCamEcefDestination（采集相机=真椭球 ECEF，与城市/SSE
     expect(d.z).toBeCloseTo(metres.z, 6);
   });
 
-  it('不走 resolveDestination 压扁分支：31.14°N 两约定地表矢长差 ≈ 11km（回归特征签名）', () => {
+  it('resolveDestination 已统一真椭球：31.14°N 与传感器 ECEF 地表矢长一致 <50m（2026-10-22 坐标系统一签名）', () => {
+    // 历史（febba8d）：resolveDestination 走压扁线性分支，与真椭球 ECEF 在
+    // 121.65°E/31.14°N 地表矢长差 ~11.3km——彼时的「回归特征签名」。
+    // 2026-10-22 影像/地形/相机全链统一真椭球后差归零：本测试守护「不再分裂」。
     const truth = Cartesian3.fromDegrees(121.65, 31.14, 0);
     const truthR = Math.hypot(truth.x, truth.y, truth.z) / EARTH_SCALE;
     const flat = Camera.resolveDestination({ lon: 121.65, lat: 31.14, height: 0 });
     const flatR = Math.hypot(flat.x, flat.y, flat.z);
-    const gapKm = (Math.abs(truthR - flatR) * EARTH_SCALE) / 1000;
-    expect(gapKm).toBeGreaterThan(8);    // febba8d 提交记录：121.65°E/31.14°N 实测 ~11.3km
-    expect(gapKm).toBeLessThan(14);
+    const gapM = Math.abs(truthR - flatR) * EARTH_SCALE;
+    expect(gapM).toBeLessThan(50);
   });
 });
 
@@ -169,6 +173,52 @@ describe('quatFromFLU（body(FLU)→ENU，[w,x,y,z]）', () => {
       { x: 0, y: -1, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 },
     );
     expect(Math.hypot(q[0], q[1], q[2], q[3])).toBeCloseTo(1, 12);
+  });
+});
+
+// ── 双目右目位姿（Wave1-B1）──────────────────────────────────────────────────
+
+describe('stereoRightEyeEcefM（p_right = p_left − b·R(q)·[0,1,0]，米制 ECEF）', () => {
+  const B = 0.12;
+  const P: [number, number, number] = [-2165334.1, 4733056.5, 3575300.2];
+
+  it('q=[1,0,0,0]（FLU 恰对齐 ENU，上方 quatFromFLU 组已锚定）：left=[0,1,0]，右目沿 ENU -Y 平移 b', () => {
+    expect(stereoRightEyeEcefM(P, [1, 0, 0, 0], B))
+      .toEqual([P[0], P[1] - B, P[2]]);
+  });
+
+  it('绕 up 轴 90°（东向飞行，quatFromFLU=[√2/2,0,0,√2/2]）：left=西，右目沿 +东 平移 b', () => {
+    const q = quatFromFLU(
+      { x: 0, y: 1, z: 0 },   // forward = 东
+      { x: -1, y: 0, z: 0 },  // left = 西
+      { x: 0, y: 0, z: 1 },   // up = 天
+    );
+    const pRight = stereoRightEyeEcefM(P, q, B);
+    expect(pRight[0]).toBeCloseTo(P[0] + B, 9);   // 西的反向 = 东
+    expect(pRight[1]).toBeCloseTo(P[1], 9);
+    expect(pRight[2]).toBeCloseTo(P[2], 9);
+  });
+
+  it('任意轴旋转（绕 [1,1,1]/√3 转 120°，右手置换 X→Y→Z→X）：R·[0,1,0]=[0,0,1]，右目沿 -Z 平移 b', () => {
+    const s = 1 / Math.sqrt(3);
+    const q = Quaternion.fromAxisAngle(new Cartesian3(s, s, s), 2 * Math.PI / 3);
+    const pRight = stereoRightEyeEcefM(P, [q.w, q.x, q.y, q.z], B);
+    expect(pRight[0]).toBeCloseTo(P[0], 9);
+    expect(pRight[1]).toBeCloseTo(P[1], 9);
+    expect(pRight[2]).toBeCloseTo(P[2] - B, 9);
+  });
+
+  it('往返一致：quatFromFLU 斜向正交基 → q → 反解 left 与输入基重合（立体对仅平移差、姿态不变）', () => {
+    const s = Math.SQRT1_2;
+    const q = quatFromFLU(
+      { x: s, y: s, z: 0 },    // forward：东北斜向
+      { x: -s, y: s, z: 0 },   // left = up×forward
+      { x: 0, y: 0, z: 1 },    // up = 天
+    );
+    const pRight = stereoRightEyeEcefM(P, q, B);
+    expect(pRight[0]).toBeCloseTo(P[0] - B * (-s), 9);
+    expect(pRight[1]).toBeCloseTo(P[1] - B * s, 9);
+    expect(pRight[2]).toBeCloseTo(P[2], 9);
   });
 });
 
@@ -395,5 +445,90 @@ describe('buildFrameRecord 字段完整性', () => {
     const parsed = JSON.parse(json) as { seed: string; frame_id: string };
     expect(parsed.seed).toBe('42');
     expect(parsed.frame_id).toBe('guanggu/ep001/000007');
+  });
+});
+
+// ── vision.stereo 组装（Wave1-B1，对齐 dataset-tools/schema L149-166）────────
+
+describe('buildFrameRecord vision.stereo 组装', () => {
+  // 本 describe 自带 baseInput（上方同名 helper 是另一 describe 的局部常量）
+  const baseInput = (): FrameRecordInput => ({
+    frame: makeMockFrame(12.5),
+    scenarioId: 'guanggu',
+    episodeId: 'ep001',
+    stepIndex: 7,
+    simTimeS: 12.5,
+    seed: 42n,
+    rgbUri: 'data:image/png;base64,MOCK',
+    depthUri: 'inline:f32-base64;AAAA',
+    segUri: 'inline:rgba-base64',
+    commandTargetEnu: [500, 0, -120],
+    commandSetpoint: { vx: 8, vy: 0, vz: 0, yawRate: 0 },
+    velEnu: [8, 0, 0],
+    posEnu: [100, 50, 120],
+  });
+
+  /** mock 帧的 stereo 变体（右目 meta 仅 camPosEcefM 沿 body-left 反向平移 b）。 */
+  const stereoFrame = (): SensorFrame => {
+    const f = makeMockFrame(12.5);
+    return {
+      ...f,
+      stereo: {
+        baselineM: 0.12,
+        mode: 'rgb',
+        rightRgb: 'data:image/png;base64,RIGHT',
+        rightMeta: {
+          ...f.meta,
+          camPosEcefM: [-2165334.1, 4733056.5 - 0.12, 3575300.2],
+        },
+      },
+    };
+  };
+
+  it("mode='rgb'：right.rgb 与左目 rgb 同构全字段（内参取右目 meta），无 right.depth 键", () => {
+    const rec = buildFrameRecord({
+      ...baseInput(),
+      frame: stereoFrame(),
+      stereo: {
+        baselineM: 0.12,
+        mode: 'rgb',
+        rightRgbUri: 'data:image/png;base64,RIGHT',
+      },
+    });
+    const st = rec.vision.stereo!;
+    expect(st.baseline_m).toBe(0.12);
+    expect(st.mode).toBe('rgb');
+    expect(Object.keys(st.right.rgb).sort()).toEqual([
+      'cx', 'cy', 'distortion', 'fx', 'fy', 'h', 'hfov_deg', 'uri', 'w',
+    ]);
+    expect(st.right.rgb.uri).toBe('data:image/png;base64,RIGHT');
+    expect(st.right.rgb.fx).toBeCloseTo(3.621, 2);  // 右目 meta 内参（平行光轴同左目值）
+    expect(st.right.rgb.w).toBe(4);
+    expect('depth' in st.right).toBe(false);        // 'rgb' 只出 RGB
+  });
+
+  it("mode='full' + rightDepthUri：right.depth 与左目 depth 同构（near/far 取右目 meta）", () => {
+    const rec = buildFrameRecord({
+      ...baseInput(),
+      frame: stereoFrame(),
+      stereo: {
+        baselineM: 0.12,
+        mode: 'full',
+        rightRgbUri: 'data:image/png;base64,RIGHT',
+        rightDepthUri: 'inline:f32-base64;AAAA',
+      },
+    });
+    const d = rec.vision.stereo!.right.depth!;
+    expect(Object.keys(d).sort()).toEqual(['far_m', 'fmt', 'near_m', 'unit', 'uri']);
+    expect(d.fmt).toBe('f32');
+    expect(d.unit).toBe('m');
+    expect(d.near_m).toBeCloseTo(63.78137, 4);
+    expect(d.far_m).toBeCloseTo(145421.5236, 3);
+    expect(d.uri).toBe('inline:f32-base64;AAAA');
+  });
+
+  it('无 stereo 输入：vision 不含 stereo 键（旧帧向后兼容）', () => {
+    const rec = buildFrameRecord(baseInput());
+    expect('stereo' in rec.vision).toBe(false);
   });
 });

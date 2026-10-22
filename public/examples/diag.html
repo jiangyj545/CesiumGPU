@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>渲染路径自诊断</title>
+<style>
+  body { background: #05080d; color: #d8e0e8; font: 15px/1.8 Consolas, monospace; padding: 28px; }
+  h1 { color: #8ee6ff; font-size: 20px; }
+  .row { margin: 10px 0; padding: 12px 16px; border: 1px solid rgba(92,207,255,.25); border-radius: 8px; }
+  .ok { border-color: #4caf50; } .bad { border-color: #ff5252; background: rgba(255,82,82,.08); }
+  .name { color: #8ee6ff; font-weight: 700; }
+  .val { color: #ffb86c; }
+  .hint { color: #7a8a99; font-size: 13px; margin-top: 16px; }
+  #err { color: #ff8f94; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>WebGPU 瓦片上传三路径自诊断（15 页黑球定位）</h1>
+<div id="out">检测中…（需 WebGPU）</div>
+<div id="err"></div>
+<div class="hint">把本页截图发我，或照抄每行「路径 → 像素」结果。绿色=该路径健康，红色=该路径在你的 GPU 上拷出全零纹理。</div>
+<script type="module">
+const $ = s => document.querySelector(s);
+function row(name, ok, detail) {
+  const d = document.createElement('div');
+  d.className = 'row ' + (ok ? 'ok' : 'bad');
+  d.innerHTML = `<span class="name">${name}</span> → ${ok ? '✅ 健康' : '❌ 全零/异常'} <span class="val">${detail}</span>`;
+  $('#out').appendChild(d);
+}
+async function readback(device, tex) {
+  const w = 4, h = 1;
+  const bpr = Math.ceil(4 * w / 256) * 256;
+  const buf = device.createBuffer({ size: bpr * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = device.createCommandEncoder();
+  enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: h }, { width: w, height: h });
+  device.queue.submit([enc.finish()]);
+  await buf.mapAsync(GPUMapMode.READ);
+  const a = new Uint8Array(buf.getMappedRange());
+  const px = [a[0], a[1], a[2], a[3]];
+  buf.unmap(); buf.destroy();
+  return px;
+}
+async function main() {
+  if (!navigator.gpu) { $('#out').textContent = '❌ 无 WebGPU（navigator.gpu 不存在）'; return; }
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) { $('#out').textContent = '❌ 无可用 GPU 适配器'; return; }
+  const device = await adapter.requestDevice();
+  const info = adapter.info ? (adapter.info.vendor || '?') + '/' + (adapter.info.architecture || '?') : '?';
+  row('GPU 适配器', true, info);
+
+  // 构造一张非零测试图：红绿蓝白 4 段
+  const SIZE = 16;
+  const mkCanvas = () => {
+    const cv = new OffscreenCanvas(SIZE, SIZE);
+    const cx = cv.getContext('2d');
+    const cols = ['#ff0000', '#00ff00', '#0000ff', '#ffffff'];
+    for (let i = 0; i < 4; i++) {
+      cx.fillStyle = cols[i];
+      cx.fillRect(i * SIZE / 4, 0, SIZE / 4, SIZE);
+    }
+    return cv;
+  };
+  const mkTex = () => device.createTexture({
+    size: { width: SIZE, height: SIZE }, format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+  });
+  const healthy = px => px[0] > 200 || px[1] > 200 || px[3] > 200; // 左上角应为纯红(255,0,0,255)
+
+  // 路径 R：回读自检（copyBufferToTexture 正向写入红色再回读——验证回读方法本身）
+  try {
+    const tex = mkTex();
+    const src = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
+    new Uint8Array(src.getMappedRange()).set([255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255]);
+    src.unmap();
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToTexture({ buffer: src, bytesPerRow: 16 }, { texture: tex }, { width: 4, height: 1 });
+    device.queue.submit([enc.finish()]);
+    const px = await readback(device, tex);
+    row('R. 回读自检（正向写入红色）', healthy(px), 'px=' + px.join(','));
+  } catch (e) { row('R. 回读自检', false, '抛错 ' + e.message); }
+
+  // 路径 A：fetch blob → bitmap（与普通瓦片同构的基线）
+  try {
+    const cv = mkCanvas();
+    const blob = await cv.convertToBlob();
+    const bm = await createImageBitmap(blob);
+    const tex = mkTex();
+    device.queue.copyExternalImageToTexture({ source: bm }, { texture: tex }, { width: SIZE, height: SIZE });
+    const px = await readback(device, tex);
+    row('A. blob→bitmap（fetch 瓦片同构基线）', healthy(px), 'px=' + px.join(','));
+  } catch (e) { row('A. blob→bitmap', false, '抛错 ' + e.message); }
+
+  // 路径 B：canvas 直传
+  try {
+    const cv = mkCanvas();
+    const tex = mkTex();
+    device.queue.copyExternalImageToTexture({ source: cv }, { texture: tex }, { width: SIZE, height: SIZE });
+    const px = await readback(device, tex);
+    row('B. canvas 直传（f43d6f4 方案）', healthy(px), 'px=' + px.join(','));
+  } catch (e) { row('B. canvas 直传', false, '抛错 ' + e.message); }
+
+  // 路径 C：canvas → createImageBitmap（06f426b 原方案）
+  try {
+    const cv = mkCanvas();
+    const bm = await createImageBitmap(cv);
+    const tex = mkTex();
+    device.queue.copyExternalImageToTexture({ source: bm }, { texture: tex }, { width: SIZE, height: SIZE });
+    const px = await readback(device, tex);
+    row('C. canvas→bitmap（06f426b 原方案）', healthy(px), 'px=' + px.join(','));
+  } catch (e) { row('C. canvas→bitmap', false, '抛错 ' + e.message); }
+
+  // D. 15 页合成层实际产物
+  try {
+    const { TileKey } = await import('/src/imagery/TileKey.ts');
+    const { XyzImageryProvider } = await import('/src/imagery/XyzImageryProvider.ts');
+    const { CompositeImageryProvider } = await import('/src/imagery/CompositeImageryProvider.ts');
+    const { ImageryLayer } = await import('/src/imagery/ImageryLayer.ts');
+    const TK = '1006be64546f4c8fe11ea687163c54f7';
+    const img = new ImageryLayer({ provider: XyzImageryProvider.tianditu(TK, 'img') });
+    const cva = new ImageryLayer({ provider: XyzImageryProvider.tianditu(TK, 'cva') });
+    const comp = new CompositeImageryProvider([img, cva]);
+    const t0 = performance.now();
+    const prod = await comp.requestTile(new TileKey(2, 1, 1));
+    const ms = Math.round(performance.now() - t0);
+    if (!prod) { row('D. 合成层实际产物', false, ms + 'ms 返回 null'); }
+    else {
+      const tex = mkTex();
+      device.queue.copyExternalImageToTexture({ source: prod }, { texture: tex }, { width: Math.min(SIZE, prod.width), height: Math.min(SIZE, prod.height) });
+      const px = await readback(device, tex);
+      row('D. 合成层实际产物上传（' + prod.constructor.name + '）', healthy(px), ms + 'ms px=' + px.join(','));
+    }
+  } catch (e) { row('D. 合成层实际产物', false, '抛错 ' + e.message); }
+
+  document.title = '诊断完成';
+}
+main().catch(e => { $('#err').textContent = '致命错误: ' + (e && e.message); document.title = '诊断出错'; });
+</script>
+</body>
+</html>

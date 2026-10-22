@@ -48,7 +48,7 @@
     <div id="mode" class="mode">模式: 初始化…</div>
     <p class="warn">⚠ 分析优先请求后台 DEM 剖面 API（localhost:8892，湖北 ASTER
       GDEM 30m）；失败或超时（30s）回退为前端近似，该模式需要本地地形服务在线：
-      <code>http://127.0.0.1:8888</code>（terrain_hubei），离线时剖面退化为平线。
+      <code>http://192.168.0.200:7777</code>（terrain_hubei），离线时剖面退化为平线。
       默认示例路径（宜昌→荆门）位于 DEM 覆盖区 108-116E/29-34N。</p>
   </div>
   <canvas id="profileChart" height="220"></canvas>
@@ -60,11 +60,11 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
-            '\n⚠ 离线地形服务(8888)未启动：运行 python .omc/tmp/terrain_server.py 后刷新');
+            '\n⚠ 内网地形服务(192.168.0.200:7777)不可达');
         });
       const nSlider = document.getElementById('nSlider');
       const nVal = document.getElementById('nVal');
@@ -72,13 +72,13 @@
       const canvas = document.getElementById('profileChart');
       const ctx = canvas.getContext('2d');
 
-      // ── 1. 地形层（湖北 8888；离线降级 0 高）────────────────────────
+      // ── 1. 地形层（湖北 7777；离线降级 0 高）────────────────────────
       let terrainOk = false;
       try {
         if (typeof engine.TerrainLayer === 'function') {
           viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
-            url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
-            maximumLevel: 14,
+            url: 'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 12, // 构建范围 max_zoom=12;14 会请求 z13/14 触发服务 429 限流→地形周期闪
           }));
           terrainOk = true;
         }

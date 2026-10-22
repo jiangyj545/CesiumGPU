@@ -28,7 +28,7 @@
       贴地渲染，量测经 Measure 钩子计算贴地距离/面积。</p>
     <div id="controls"></div>
     <div id="result">初始化中…</div>
-    <p class="warn">⚠ 需要本地地形服务在线：<code>http://localhost:8888</code>
+    <p class="warn">⚠ 需要本地地形服务在线：<code>http://192.168.0.200:7777</code>
       （terrain_hubei 服务）。离线时自动降级为 0 高椭球，功能不报错但无地形起伏。</p>
   </div>
   <script src="./js/demo-utils.js"></script>
@@ -47,13 +47,13 @@
       }
       function log(text) { result.textContent = text; }
 
-      // ── 1. 地形层：LocalQuantizedMeshProvider（本地 8888 服务）────────
+      // ── 1. 地形层：LocalQuantizedMeshProvider（内网 7777 地形服务）────────
       let terrainOk = false;
       try {
         const provider = new engine.LocalQuantizedMeshProvider({
           // 默认 URL 即本地 terrain_hubei 服务，此处显式写出便于替换
-          url: 'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
-          maximumLevel: 14,
+          url: 'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/{z}/{x}/{y}.terrain',
+          maximumLevel: 12, // 构建范围 max_zoom=12;14 会请求 z13/14 触发服务 429 限流→地形周期闪
         });
         // 经 setTerrainProvider 挂载（globe.terrainLayer 为只读 getter）；
         // sampleHeight(lonDeg, latDeg) → 米
@@ -136,6 +136,14 @@
         drawType = null;
       });
 
+      addBtn('飞往神农架', () => {
+        viewer.camera.flyTo({
+          destination: { lon: 110.9, lat: 32.1, height: 24_000 },
+          orientation: { heading: 3.6, pitch: -0.5, roll: 0 },
+          duration: 3,
+        });
+        log('飞往神农架（地形起伏最显著区域，24 km 侧视）…');
+      });
       addBtn('贴地折线', () => { addTerrainPolyline(); log('已添加贴地折线（宜昌→荆门）'); });
       addBtn('贴地多边形', () => { addTerrainPolygon(); log('已添加贴地多边形'); });
       addBtn('测贴地距离', () => { drawType = 'polyline'; draw.start('polyline'); log('左键取点，右键结束（拾取点已自动贴合地形）'); });
@@ -143,19 +151,22 @@
       addBtn('清除实体', () => { draw.stop(); viewer.scene.entities.removeAll(); log('已清空'); });
 
       // ── 5. flyTo 湖北：300 km 高空 → 拉近 ────────────────────────────
+      // 终点用神农架侧视：地形起伏要在「山区 + 斜视」才可见——武汉是江汉平原
+      // （高程 16-65 m），80 km 俯视平原无论如何看不到起伏（真机反复复验教训）。
       viewer.camera.flyTo({
         destination: { lon: 112.4, lat: 30.9, height: 300_000 },
         duration: 3,
         complete: () => {
           viewer.camera.flyTo({
-            destination: { lon: 112.4, lat: 30.9, height: 80_000 },
+            destination: { lon: 110.9, lat: 32.1, height: 24_000 },
+            orientation: { heading: 3.6, pitch: -0.5, roll: 0 },
             duration: 4,
           });
         },
       });
 
       log(terrainOk
-        ? '地形已就绪（localhost:8888）。拉近后可见折线/多边形贴合山谷起伏。\n点击「贴地折线」「贴地多边形」查看，或用「测贴地距离/面积」量测。'
+        ? '地形已就绪（192.168.0.200:7777）。默认飞往神农架侧视——山区起伏最显著；\n平原（武汉一带）高程仅十几米，俯视看不出起伏属正常。'
         : '运行在 0 高椭球模式（无 TerrainLayer 或服务离线）。');
     }
 

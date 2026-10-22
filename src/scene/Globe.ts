@@ -4,6 +4,7 @@ import { EllipsoidGeometry } from './EllipsoidGeometry';
 import { Camera } from './Camera';
 import { ImageryLayerCollection } from '../imagery/ImageryLayerCollection';
 import { ImageryLayer } from '../imagery/ImageryLayer';
+import type { TileTextureCache } from '../imagery/TileTextureCache';
 import { TileKey } from '../imagery/TileKey';
 import { Color } from '../math/Color';
 import { Matrix4 } from '../math/Matrix4';
@@ -102,6 +103,19 @@ export class Globe {
   private _terrainGeometryCache = new Map<string, CachedTileGeometry>();
   /** 1×1 earthy texture bound to terrain tiles with no resolvable imagery. */
   private _terrainFallbackTexture: GPUTexture | null = null;
+  /**
+   * Imagery cache that holds the live terrain pins (released on clear —
+   * pins outliving the terrain set would leak capacity exemption).
+   */
+  private _terrainPinCache: TileTextureCache | null = null;
+  /**
+   * Retired tile primitives awaiting their in-flight grace window before
+   * GPU destruction (see `_destroyTilePrimitive`: `Primitive.destroy()`
+   * frees vertex/index buffers IMMEDIATELY, which invalidates still-
+   * executing submits → per-tile black frames during upgrade streams).
+   */
+  private _retiredPrimitives: Array<{ primitive: Primitive; frame: number }> = [];
+  private _frameIndex = 0;
 
   /** Scale factor: globe radius in normalised units = 1.0 */
   static readonly RADIUS = 1.0;
@@ -380,8 +394,18 @@ export class Globe {
     if (!this._opaquePipeline) {
       this._clearTilePrimitives();
       this._clearTerrainPrimitives();
+      // Keep advancing the grace window even without a pipeline — otherwise
+      // resources retired here would never be destroyed.
+      this._frameIndex++;
+      this._flushRetiredPrimitives();
       return;
     }
+
+    // Retired-primitive grace window: free GPU resources only once the
+    // submits referencing them have completed (2 frames — same policy as
+    // TileTextureCache's deferred texture destruction).
+    this._frameIndex++;
+    this._flushRetiredPrimitives();
 
     // P3 多图层合成：单可见层 = 原 activeLayer 原样（零改动路径）；≥2 可见
     // 层 = 集合的合成层（CompositeImageryProvider 逐瓦片叠加）。
@@ -417,22 +441,25 @@ export class Globe {
   }
 
   /**
-   * Draw all live tile primitives in the G-Buffer pass. While terrain
-   * primitives exist they replace the flat imagery tiles (they carry the same
-   * tile textures where the grids align); otherwise imagery tiles draw.
+   * Draw all live tile primitives in the G-Buffer pass. Terrain meshes and
+   * flat imagery tiles are drawn TOGETHER and the depth test arbitrates:
+   * elevated terrain sticks out above the (slightly lifted, see
+   * TILE_RADIUS_SCALE) flat imagery, while regions the terrain service does
+   * not cover (geographic terrain only spans its dataset bounds — e.g. the
+   * 7777 Hubei set) keep their flat imagery instead of a black hole. The
+   * former "terrain replaces flat tiles wholesale" early return flickered:
+   * it toggled the whole imagery layer on/off as terrain tiles streamed in
+   * and out, and left everything outside the terrain bounds permanently
+   * black.
    */
   drawTiles(pass: GPURenderPassEncoder, cameraBindGroup: GPUBindGroup): void {
-    if (this._terrainPrimitives.size > 0) {
-      for (const entry of this._terrainPrimitives.values()) {
-        entry.primitive.drawOpaque(pass, cameraBindGroup);
-      }
-      return;
+    for (const entry of this._terrainPrimitives.values()) {
+      entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
     for (const entry of this._tilePrimitives.values()) {
       entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
-    // Polar fills ride along with the flat imagery path (terrain replaces the
-    // whole flat tile set including fills — see the early return above).
+    // Polar fills ride along with the flat imagery path.
     for (const which of ['north', 'south'] as const) {
       const entries = this._polarFills[which];
       if (entries === null) continue;
@@ -450,20 +477,12 @@ export class Globe {
    * re-draws the same set the G-Buffer pass draws). Allocated per call —
    * only invoked when a pick is pending, never per rendered frame.
    *
-   * MUST stay same-source with {@link Globe.drawTiles}: while terrain
-   * primitives exist, drawTiles draws ONLY the terrain set (flat imagery
-   * tiles and polar fills are skipped by its early return), so the pick pass
-   * must paint the terrain geometry too — otherwise picking rasterises the
-   * flat imagery tiles while the G-Buffer holds displaced terrain meshes,
-   * and every pick lands systematically offset.
+   * MUST stay same-source with {@link Globe.drawTiles}: both sets (terrain
+   * meshes + flat imagery + polar fills) are drawn together, depth-arbitrated.
    */
   get tilePrimitives(): Primitive[] {
-    if (this._terrainPrimitives.size > 0) {
-      const terrain: Primitive[] = [];
-      for (const entry of this._terrainPrimitives.values()) terrain.push(entry.primitive);
-      return terrain;
-    }
     const out: Primitive[] = [];
+    for (const entry of this._terrainPrimitives.values()) out.push(entry.primitive);
     for (const entry of this._tilePrimitives.values()) out.push(entry.primitive);
     for (const which of ['north', 'south'] as const) {
       const entries = this._polarFills[which];
@@ -808,6 +827,7 @@ export class Globe {
 
     for (const [key, entry] of this._terrainPrimitives) {
       if (!keep.has(key)) {
+        this._unpinTerrainTexture(entry);
         this._destroyTilePrimitive(entry);
         this._terrainPrimitives.delete(key);
       }
@@ -818,16 +838,47 @@ export class Globe {
       const mesh = terrainLayer.getMesh(tile.z, tile.x, tile.y);
       if (mesh === null) continue; // evicted between selection and sync
 
-      // Textures: only the webmercator terrain grid aligns 1:1 with imagery
-      // TileKeys, so tile textures are reused there; geographic terrain (and
-      // anything unresolvable) renders with the flat fallback texture.
+      // Textures: the webmercator terrain grid aligns 1:1 with imagery
+      // TileKeys, so tile textures are reused there. Geographic terrain
+      // (EPSG:4326 TMS) resolves the covering WEB-MERCATOR imagery tile via
+      // its centre and maps vertex UVs through the mercator projection —
+      // a geographic tile is half a mercator tile wide at the same z, so it
+      // straddles at most two columns; clamp-to-edge sampling keeps the
+      // straddle error to the shared edge row (CesiumJS draping semantics,
+      // simplified to a single reference tile).
       let texture: GPUTexture;
       let textureLevels = -1; // -1 → fallback texture, full [0,1] uv
+      let refMerc: { z: number; x: number; y: number } | undefined;
+      let pinKey: string | undefined;
       if (layer !== null && terrainLayer.provider.tilingScheme === 'webmercator') {
         const resolved = layer.resolveTexture(new TileKey(tile.z, tile.x, tile.y));
         if (resolved !== null) {
           texture = resolved.texture;
           textureLevels = resolved.ancestorLevels;
+          pinKey = `${tile.z - resolved.ancestorLevels}/${tile.x >> resolved.ancestorLevels}/${tile.y >> resolved.ancestorLevels}`;
+        } else {
+          texture = this._getTerrainFallbackTexture();
+        }
+      } else if (layer !== null) {
+        const rect = geographicTileBounds(tile.z, tile.x, tile.y);
+        const lonC = (rect.west + rect.east) / 2;
+        const latC = (rect.north + rect.south) / 2;
+        const n = 2 ** tile.z;
+        const mx = Math.min(n - 1, Math.max(0,
+          Math.floor(((lonC + 180) / 360) * n)));
+        const mercN = (1 - Math.log(Math.tan(
+          Math.PI / 4 + (latC * Math.PI / 180) / 2)) / Math.PI) / 2;
+        const my = Math.min(n - 1, Math.max(0, Math.floor(mercN * n)));
+        const resolved = layer.resolveTexture(new TileKey(tile.z, mx, my));
+        if (resolved !== null) {
+          texture = resolved.texture;
+          textureLevels = resolved.ancestorLevels;
+          refMerc = {
+            z: tile.z - resolved.ancestorLevels,
+            x: mx >> resolved.ancestorLevels,
+            y: my >> resolved.ancestorLevels,
+          };
+          pinKey = `${refMerc.z}/${refMerc.x}/${refMerc.y}`;
         } else {
           texture = this._getTerrainFallbackTexture();
         }
@@ -839,26 +890,47 @@ export class Globe {
       // rendered neighbourhood changes (e.g. a coarse fallback neighbour is
       // replaced by finer tiles) the stitched edge positions change and the
       // primitive must rebuild even though its texture did not.
-      const geometryKey = this._terrainGeometryKey(tile, textureLevels);
+      const geometryKey = this._terrainGeometryKey(tile, textureLevels, refMerc);
       const entry = this._terrainPrimitives.get(key);
       if (entry !== undefined && (entry.texture !== texture || entry.geometryKey !== geometryKey)) {
         // Bound texture changed → rebuild with matching uv sub-rect geometry;
         // stitch signature changed → rebuild with the re-stitched edges.
+        if (entry.pinKey !== undefined && entry.pinKey !== pinKey) this._unpinTerrainTexture(entry);
         this._destroyTilePrimitive(entry);
         this._terrainPrimitives.delete(key);
       }
       if (!this._terrainPrimitives.has(key)) {
+        if (pinKey !== undefined && layer !== null) {
+          layer.textureCache.pin(pinKey); // bind-time pin (flicker fix)
+          this._terrainPinCache = layer.textureCache;
+        }
         this._terrainPrimitives.set(
           key,
-          this._createTerrainPrimitive(tile, mesh, texture, textureLevels, geometryKey)
+          this._createTerrainPrimitive(tile, mesh, texture, textureLevels, geometryKey, refMerc, pinKey)
         );
       }
     }
   }
 
+  /**
+   * Release a terrain entry's eviction pin (see TileTextureCache._pins).
+   * Pins are released on primitive destroy AND on rebuild-to-a-different-key;
+   * keeping a pin whose texture changed would leak capacity exemption.
+   */
+  private _unpinTerrainTexture(entry: TilePrimitiveEntry): void {
+    if (entry.pinKey === undefined) return;
+    if (this._terrainPinCache !== null) this._terrainPinCache.unpin(entry.pinKey);
+    entry.pinKey = undefined;
+  }
+
   /** Geometry cache key for a terrain render tile (includes the stitch signature). */
-  private _terrainGeometryKey(tile: TerrainRenderTile, textureLevels: number): string {
-    return `terrain:${tile.z}/${tile.x}/${tile.y}#${tile.ancestorLevels}#${textureLevels}#${tile.stitchSignature}`;
+  private _terrainGeometryKey(
+    tile: TerrainRenderTile,
+    textureLevels: number,
+    refMerc?: { z: number; x: number; y: number }
+  ): string {
+    return `terrain:${tile.z}/${tile.x}/${tile.y}#${tile.ancestorLevels}#${textureLevels}` +
+      `#${refMerc ? `m${refMerc.z}/${refMerc.x}/${refMerc.y}` : 'l'}#${tile.stitchSignature}`;
   }
 
   /** Build one terrain primitive (displaced mesh geometry + tile texture). */
@@ -867,10 +939,16 @@ export class Globe {
     mesh: TerrainMeshData,
     texture: GPUTexture,
     textureLevels: number,
-    geometryKey: string
+    geometryKey: string,
+    refMerc?: { z: number; x: number; y: number },
+    pinKey?: string
   ): TilePrimitiveEntry {
-    const uvRect = textureLevels > 0 ? this._tileUvRect(tile.x, tile.y, textureLevels) : undefined;
-    const geometry = this._getTerrainGeometry(tile, mesh, uvRect, textureLevels);
+    // uvRect（线性子矩形）仅用于 webmercator 同网格路径；geographic 地形走
+    // refMerc 的逐顶点 mercator 投影 UV（见 _getTerrainGeometry）。
+    const uvRect = refMerc === undefined && textureLevels > 0
+      ? this._tileUvRect(tile.x, tile.y, textureLevels)
+      : undefined;
+    const geometry = this._getTerrainGeometry(tile, mesh, uvRect, textureLevels, refMerc);
     const primitive = new Primitive(this._context, {
       vertices:    geometry.vertices,
       indices:     geometry.indices,
@@ -881,7 +959,7 @@ export class Globe {
     Matrix4.identity(primitive.modelMatrix);
     primitive.setTexture(texture, this._getTileSampler());
     primitive.buildOpaqueBindGroup(this._opaquePipeline as GPURenderPipeline);
-    return { primitive, texture, geometryKey };
+    return { primitive, texture, geometryKey, pinKey };
   }
 
   /**
@@ -901,9 +979,10 @@ export class Globe {
     tile: TerrainRenderTile,
     mesh: TerrainMeshData,
     uvRect: { u0: number; v0: number; u1: number; v1: number } | undefined,
-    textureLevels: number
+    textureLevels: number,
+    refMerc?: { z: number; x: number; y: number }
   ): CachedTileGeometry {
-    const cacheKey = this._terrainGeometryKey(tile, textureLevels);
+    const cacheKey = this._terrainGeometryKey(tile, textureLevels, refMerc);
     const cached = this._terrainGeometryCache.get(cacheKey);
     if (cached) return cached;
 
@@ -946,14 +1025,35 @@ export class Globe {
     const latSpan = rect.north - rect.south;
 
     for (let i = 0; i < vertexCount; i++) {
+      // True-ellipsoid inverse (matches ecefFromLonLatHeight, 2026-10-22):
+      // x = n·nx·s, y = n·ny·s, z = n(1−e²)·nz·s → n cancels, closed form
+      // tanφ = z / ((1−e²)·hypot(x, y)). Legacy `y/ρ, z/ρ` undo belonged to
+      // the retired squash convention and mis-projected draping UVs.
       const x = positions[i * 3];
-      const y = positions[i * 3 + 1] / WGS84_POLAR_RATIO; // undo squash
-      const z = positions[i * 3 + 2] / WGS84_POLAR_RATIO;
+      const y = positions[i * 3 + 1];
+      const z = positions[i * 3 + 2];
+      const e2 = 1.0 - WGS84_POLAR_RATIO * WGS84_POLAR_RATIO;
 
       const lon = Math.atan2(y, x) * rad;
-      const lat = Math.atan2(z, Math.hypot(x, y)) * rad;
-      const u   = u0 + du * (lon - rect.west) / lonSpan;
-      const v   = v0 + dv * (rect.north - lat) / latSpan; // row 0 = north edge
+      const lat = Math.atan2(z / (1.0 - e2), Math.hypot(x, y)) * rad;
+      // Geographic terrain draping: vertex lon/lat → web-mercator imagery tile
+      // UV. v is NON-linear in latitude (mercator y); u is linear in lon.
+      let u: number;
+      let v: number;
+      if (refMerc !== undefined) {
+        const mn = 2 ** refMerc.z;
+        u = ((lon + 180) / 360) * mn - refMerc.x;
+        const m = (1 - Math.log(Math.tan(Math.PI / 4 + lat / rad / 2)) / Math.PI) / 2;
+        v = m * mn - refMerc.y;
+        // A geographic tile straddles at most two mercator columns/rows —
+        // clamp straddling edge vertices to the reference tile's borders
+        // (sampler is clamp-to-edge; error confined to the shared edge row).
+        if (u < 0) u = 0; else if (u > 1) u = 1;
+        if (v < 0) v = 0; else if (v > 1) v = 1;
+      } else {
+        u = u0 + du * (lon - rect.west) / lonSpan;
+        v = v0 + dv * (rect.north - lat) / latSpan; // row 0 = north edge
+      }
 
       let nx = normals[i * 3];
       let ny = normals[i * 3 + 1];
@@ -1015,6 +1115,7 @@ export class Globe {
   private _clearTerrainPrimitives(): void {
     if (this._terrainPrimitives.size === 0) return;
     for (const entry of this._terrainPrimitives.values()) {
+      this._unpinTerrainTexture(entry);
       this._destroyTilePrimitive(entry);
     }
     this._terrainPrimitives.clear();
@@ -1050,9 +1151,34 @@ export class Globe {
         usage: GPUTextureUsage.TEXTURE_BINDING,
       });
     }
+    // Detach the shared tile texture first: the eventual destroy() destroys
+    // whatever texture is bound — the sentinel, never the shared imagery
+    // texture still referenced by the cache / other primitives.
     entry.primitive.setTexture(this._detachTexture);
-    entry.primitive.destroy(); // consumes the sentinel (destroy is idempotent)
-    this._detachTexture = null;
+    // DEFERRED destroy (flicker fix): Primitive.destroy() frees vertex/index
+    // buffers immediately, but the previous frame's render pass may still be
+    // executing on the GPU and referencing them — destroying now invalidates
+    // that submit and the tile's screen region turns black for a frame (the
+    // clear↔black flicker during tile upgrade streams). Retire instead;
+    // _flushRetiredPrimitives destroys after the 2-frame grace window.
+    this._retiredPrimitives.push({ primitive: entry.primitive, frame: this._frameIndex });
+  }
+
+  /** Destroy retired primitives whose in-flight grace window has elapsed. */
+  private _flushRetiredPrimitives(): void {
+    if (this._retiredPrimitives.length === 0) return;
+    const deadline = this._frameIndex - RETIRE_GRACE_FRAMES;
+    let write = 0;
+    for (let read = 0; read < this._retiredPrimitives.length; read++) {
+      const item = this._retiredPrimitives[read];
+      if (item.frame <= deadline) {
+        item.primitive.destroy();          // consumes the detach sentinel
+        this._detachTexture = null;        // sentinel destroyed with it — recreated on next retire
+      } else {
+        this._retiredPrimitives[write++] = item;
+      }
+    }
+    this._retiredPrimitives.length = write;
   }
 
   /** Destroy all tile primitives including the polar fills (no layer active). */
@@ -1071,6 +1197,10 @@ export class Globe {
   destroy(): void {
     this._clearTilePrimitives();
     this._clearTerrainPrimitives();
+    // Teardown: no further frames will reference the retired resources —
+    // destroy them all immediately (bypasses the grace window).
+    for (const item of this._retiredPrimitives) item.primitive.destroy();
+    this._retiredPrimitives.length = 0;
     this._terrainGeometryCache.clear();
     if (this._terrainLayer !== null) {
       this._terrainLayer.destroy();
@@ -1099,6 +1229,12 @@ interface TilePrimitiveEntry {
    * stitch-signature changes that require a rebuild).
    */
   geometryKey?: string;
+  /**
+   * Terrain only: imagery cache key pinned against LRU eviction for the
+   * lifetime of this entry (see TileTextureCache.pin — evicting a bound
+   * texture triggers the clear↔blur rebuild flicker).
+   */
+  pinKey?: string;
 }
 
 /** @internal Cached interleaved geometry for a tile (+ UV variant). */
@@ -1129,8 +1265,15 @@ const TILE_SKIRT_DEPTH = 0.005;
  * "tiles above a drawn base globe" architecture; `edgeLift` stays a no-op.
  */
 function tileRadiusScale(_level: number): number {
-  return 1.0;
+  // 影像瓦片微抬升（共存绘制必需）：地形 mesh 与平面影像瓦片同帧绘制、
+  // 深度裁决——山区地形（>50m）自然凸出，0 高水面/平原由抬升的影像覆盖
+  // （影像本就是该处纹理，视觉无差），彻底避免 0 高区域的 z-fighting。
+  // 50m 在 ~300km 视距的深度精度下稳定可分辨，又远低于任何显著地形。
+  return 1.0 + IMAGERY_LIFT;
 }
+
+/** Imagery tile radial lift over the ellipsoid (50 m in normalised units). */
+const IMAGERY_LIFT = 50 / 6378137;
 
 /**
  * tile 的 RTC 几何中心：tile 矩形中心点的真 WGS84 归一化 ECEF（与
@@ -1186,5 +1329,13 @@ const POLAR_FILL_SKIRT_RADIUS = 0.9995;
 
 /** Max cached tile geometries (CPU arrays only; ~4 KB each at 8×8). */
 const TILE_GEOMETRY_CACHE_CAPACITY = 1024;
+
+/**
+ * Frames a retired tile primitive waits before its GPU resources are
+ * destroyed (same policy as TileTextureCache.DEFERRED_DESTROY_FRAMES):
+ * submits referencing its buffers must have completed — destroying earlier
+ * invalidates the submit and the tile's region flashes black for a frame.
+ */
+const RETIRE_GRACE_FRAMES = 2;
 
 export default Globe;

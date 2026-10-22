@@ -531,7 +531,9 @@ struct CameraUniforms {
   nearFar         : vec2<f32>,     // @224 (8B)
 }
 
-// 128B 渲染侧参数（B1 flags/船迹 + L3 水下视角 + L4-A 岸线泡沫）
+// 224B 渲染侧参数（B1 flags/船迹 + L3 水下视角 + L4-A 岸线泡沫 + T-TROPICAL 观感档）
+// 旧 8 个 vec4（128B）偏移完全不变；lookShallow 起为 T-TROPICAL 扩容段——
+// look 开关（lookShallow.x）=0 时新字段全部不消费，default 档零回归。
 struct OceanRenderParams {
   sunDir      : vec4<f32>,  // 指向太阳（归一化，归一化 ECEF 空间）
   deepColor   : vec4<f32>,  // 深水基色
@@ -541,6 +543,12 @@ struct OceanRenderParams {
   underwater  : vec4<f32>,  // x L3 水下视角开 / y L5 时间秒 / z L5 SSS 总强度 / w L5 featureFlags
   shoreParams : vec4<f32>,  // L4-A x 岸线泡沫开 / y shoreStrength / z 海面雾太阳染色强度（w 保留）
   seabedUv    : vec4<f32>,  // L4-A seabed uv = planeXZ*zw + xy（海面局部米 → [0,1]）
+  lookShallow : vec4<f32>,  // T-TROPICAL x look 开关（1=tropical） / yzw 浅水色（线性 RGB）
+  lookDeep    : vec4<f32>,  // T-TROPICAL yzw 深水色（线性 RGB）（x 保留 0）
+  lookTrans   : vec4<f32>,  // T-TROPICAL yzw 透射色（线性 RGB） / x sparkle 太阳增益
+  lookParamsA : vec4<f32>,  // T-TROPICAL x fresnelPower / y sparklePower / z sparkleIntensity / w foamScale
+  lookParamsB : vec4<f32>,  // T-TROPICAL x sssIntensity / y sssPower / z depthOffset(m) / w depthFalloff(m)
+  lookParamsC : vec4<f32>,  // T-TROPICAL x hazeScale（俯视雾压制）/ y rippleStrength（波痕明暗）/ zw 保留
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
@@ -845,10 +853,15 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 
   // 菲涅尔：水上 Schlick（F0 ≈ 0.02）；水下反转近似全内反射（掠射亮带更宽更陡）
   let ndv = clamp( dot( nLit, viewDir ), 0.0, 1.0 );
-  let fresnel = select(
+  var fresnel = select(
     0.02 + 0.98 * pow( 1.0 - ndv, 5.0 ),
     0.06 + 0.94 * pow( 1.0 - ndv, 1.6 ),
     uw );
+  // T-TROPICAL：宽带掠射 fresnel（surfing fresnel.power 2.2——(1-cosθ)^2.2
+  // 反射带比 pow5 更宽、垂直入射过渡更缓，加勒比观感主反射占比）；default 档不动。
+  if ( renderParams.lookShallow.x > 0.5 && ! uw ) {
+    fresnel = 0.02 + 0.98 * pow( 1.0 - ndv, renderParams.lookParamsA.x );
+  }
 
   // 太阳高光：高指数锐主瓣 + 宽 glitter 次瓣；波面压缩处略增粗糙；水下弱化
   let sunDir = normalize( renderParams.sunDir.xyz );
@@ -869,6 +882,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 2.5-8km 距离门把高光在进雾带前压掉 55%（中近场零回归）。
   spec *= 1.0 - 0.55 * smoothstep( 2500.0, 8000.0, distM );
   spec = select( spec, spec * 0.35, uw );
+  // T-TROPICAL：旧双瓣 spec（硬边色阶方块观感来源）由下方 Blinn-Phong
+  // sparkle（pow 600 锐瓣 + bloom）整体替代，避免双高光叠加；default 档不动。
+  if ( renderParams.lookShallow.x > 0.5 && ! uw ) {
+    spec = 0.0;
+  }
 
   // CSSM 阴影因子（L3）：太阳直射贡献（太阳高光 + 天光反射）同乘，软边船影；
   // 未绑定 scene.shadow / 已关闭时 params.x=0 短路恒 1（零回归）；水下不采样。
@@ -985,6 +1003,8 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   foamMask = clamp( foamMask, 0.0, 1.0 );
   var fineGlow = 0.0;
   var albedoJit = 1.0;
+  // R4 T-TROPICAL 泡沫碎化系数（pattern 高频侵蚀；default/无图案恒 1 零回归）
+  var foamErode = 1.0;
   if ( renderParams.flags.x > 0.5 ) {
     // A3 阈值方案：coverage 驱动阈值 t，R 密度场 smoothstep 软边；
     // G 细泡亮度 0.3-0.5、B 斑驳反照率 ±10%、A 条纹 ±0.1 偏置。
@@ -996,6 +1016,13 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     foamMask = clamp( smoothstep( t - 0.04, t + 0.04, p.r ) + ( p.a - 0.5 ) * 0.2, 0.0, 1.0 );
     fineGlow = p.g * coverage;
     albedoJit = 1.0 + ( p.b - 0.5 ) * 0.2;
+    // R4 泡沫碎化（检查差距1「横贯画面的均匀实心白条」）：pattern 高频通道
+    //（R 密度 0.6 + G 细泡 worley 0.4）smoothstep 侵蚀 foamMask——pattern 谷处
+    // 白沫蚀刻掉、峰处保留丝缕（×0.85+0.15 不归零），实心条带 → 斑驳蚀刻
+    // 碎点；default 档 lookShallow.x ≤0.5 → select 恒 1 零回归。
+    foamErode = select( 1.0,
+      smoothstep( 0.30, 0.72, p.r * 0.6 + p.g * 0.4 ) * 0.85 + 0.15,
+      renderParams.lookShallow.x > 0.5 );
   }
 
   // 水色：近岸清透青蓝 → 远海深蓝（距离混合，2026-09-30 差距7：旧式
@@ -1057,9 +1084,75 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     + skyRad * fresnel * 0.9 * bandCalm * shadowF * cloudF
     + vec3<f32>( spec ) * mix( vec3<f32>( 1.0 ), sunTint, flagSpecTint ) * bandCalm * shadowF * cloudF;
 
+  // ── T-TROPICAL look 档（2026-10-22 复刻 threejswaterpro TROPICAL 观感）──
+  // surfing 合成链：mix(水色+SSS, 天空反射, fresnel) → +sparkle → 泡沫（下方
+  // ×foamScale 弱化）。look=0（默认）不进入，default 档 col 逐字节零回归。
+  // 分支内不采样新纹理、无隐式导数（全复用上方 skyRad/sunTint/foamMask/distM），
+  // naga/Tint 双校验器 uniform-control-flow 安全。
+  if ( renderParams.lookShallow.x > 0.5 && ! uw ) {
+    // T-C1 三色水深混合：surfing smoothstep(depthOffset, depthFalloff, 水深)。
+    // 水深：seabed 路径有效（shoreDepth < 哨兵 1000）用真实瞬时水深；否则掠射
+    // 近似 depthOffset/|视线·天顶|（surfing fallbackDepth = waterDepth/max(|viewDirY|,
+    // 0.1) 同构——视线越平、水柱路径越长），封顶 depthFalloff×1.5。
+    let vUp = abs( dot( viewDir, atmUp ) );
+    let grazeDepth = renderParams.lookParamsB.z / max( vUp, 0.12 );
+    let effDepth = min( select( grazeDepth, shoreDepth, shoreDepth < 999.0 ),
+                        renderParams.lookParamsB.w * 1.5 );
+    let depthF = smoothstep( renderParams.lookParamsB.z, renderParams.lookParamsB.w, effDepth );
+    // R3 俯视层次（检查 R2 俯视 7/10 water_lum_std 15.5 偏平的结构性根因）：
+    // 俯视 fresnel≈0.02，天空反射几乎不携带法线信息，三色水体为平色 → 波痕
+    // 不可辨。波面朝太阳坡亮 / 背太阳坡暗的明暗对（rippleStrength 可调，
+    // 0=关）恢复波纹空间对比——俯视 lum_std 的直接来源。
+    let sunE = dot( sunDir, ocean.eastDir );
+    let sunN = dot( sunDir, ocean.northDir );
+    let slopeToSun = ( nLocal.x * sunE + nLocal.z * sunN )
+      / max( length( vec2<f32>( sunE, sunN ) ), 1e-4 );
+    let rippleShade = clamp(
+      1.0 + slopeToSun * renderParams.lookParamsC.y
+        - length( vec2<f32>( nLocal.x, nLocal.z ) ) * renderParams.lookParamsC.y * 0.3,
+      1.0 - renderParams.lookParamsC.y * 0.5,
+      1.0 + renderParams.lookParamsC.y * 0.5 );
+    let waterCol = mix( renderParams.lookShallow.yzw, renderParams.lookDeep.yzw, depthF ) * rippleShade;
+    // T-C2 wrap-lighting SSS（surfing calculateForwardScatter：wrap 0.5 / power
+    // 3.5）：逆光波峰透射青碧（mix 向 transmission 色），距离衰减防地平线
+    // popping；替代旧 T3 加法绿斑路径（本档已短路）。
+    // R4 塑料感修复（差距3：波峰无透光、近景偏「实」）：旧 waveTr =
+    // sat(dot(nLit,-sunDir)+0.3) 在平面水面（dot≈-sunUp<0）恒 0 →
+    // backlit*waveTr=0，透光只在极陡背光坡出现。改「法线相对平面基线的倾倒
+    // 量」：平面保留基线透光 0.45，逆光坡（法线背向太阳朝相机）>0 透光增强、
+    // 顺光坡 <0 压暗不透——「阳光从背后穿透浪尖的青碧透亮」。
+    let backlit = sat( ( dot( viewDir, - sunDir ) + 0.5 ) / 1.5 );
+    let flatDot = - dot( sunDir, atmUp );
+    let waveTr = sat( ( dot( nLit, - sunDir ) - flatDot ) * 0.9 + 0.45 );
+    let crestH = clamp( input.waveH * 0.28, 0.0, 1.0 );
+    // R4：fadeEnd 600→1500——透光延伸到中景（检查差距3 透光域过窄）。
+    let sssFade = 1.0 - smoothstep( 80.0, 1500.0, distM );
+    let sssF = sat( pow( backlit * waveTr, renderParams.lookParamsB.y )
+      * crestH * renderParams.lookParamsB.x * sssFade * shadowF );
+    let waterSSS = mix( waterCol, renderParams.lookTrans.yzw, sssF );
+    // T-C3 sparkle：Blinn-Phong 锐瓣（surfing sparklePower 600 / intensity 1.8 /
+    // sunIntensity 0.4 增益走 lookTrans.x），远处淡出、泡沫面抑制
+    // （surfing sparkleReduction = 1 - foam*0.7）；叠加 bloom 成细密金色闪点。
+    // R4 亮带断续（差距4：闪带窄而均匀，缺大涌浪调制的扭曲）：乘波面局部
+    // 坡度幅度调制（4 级联累计 slopeX/Z 现成量，K=2 视觉校准）——坡度大
+    //（浪面扭曲）处闪、平镜面处暗，均匀亮带 → 自然扭曲断续。
+    let hvT = normalize( viewDir + sunDir );
+    let slopeAmp = length( vec2<f32>( slopeX, slopeZ ) );
+    let spark = pow( max( dot( nLit, hvT ), 0.0 ), renderParams.lookParamsA.y )
+      * renderParams.lookParamsA.z * renderParams.lookTrans.x
+      * ( 0.55 + 0.9 * sat( slopeAmp * 2.0 ) )
+      * smoothstep( 2.0, 8.0, distM ) * ( 1.0 - smoothstep( 800.0, 2400.0, distM ) )
+      * ( 1.0 - foamMask * 0.7 );
+    // T-C5 合成对齐 surfing：反射走 T1 skyView LUT 同源辐射（bandCalm 群谷压
+    // 镜像、阴影/云影同乘保留）。
+    col = mix( waterSSS, skyRad * bandCalm * shadowF * cloudF, fresnel )
+      + vec3<f32>( spark ) * mix( vec3<f32>( 1.0 ), sunTint, flagSpecTint ) * shadowF * cloudF;
+  }
+
   // T3 波峰 SSS 透光：波面高×逆光×掠射的青绿透射，随太阳透射色偏移；
   // 波峰自遮蔽微降。RP[22]（underwater.z）总强度 0 = 关。
-  if ( flagSss > 0.5 && renderParams.underwater.z > 0.0 ) {
+  // T-TROPICAL 档走下方 wrap-lighting SSS（mix 向透射色，非加法）→ 此处短路。
+  if ( flagSss > 0.5 && renderParams.underwater.z > 0.0 && renderParams.lookShallow.x <= 0.5 ) {
     let upY  = clamp( dot( sunDir, atmUp ), 0.0, 1.0 );
     let H    = clamp( input.waveH * 0.28, 0.0, 1.0 );                  // ≈3.5m 封顶
     let back = clamp( dot( viewDir, - sunDir ) * 0.5 + 0.5, 0.0, 1.0 ); // 逆光因子
@@ -1113,7 +1206,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
 
   var foamWhite = vec3<f32>( 0.90, 0.94, 0.97 ) * ( 0.75 + 0.25 * fN + fineGlow );
   foamWhite = select( foamWhite, foamWhite * vec3<f32>( 0.35, 0.60, 0.62 ), uw ); // 水下泡沫偏暗青
-  col = mix( col, foamWhite * albedoJit, foamMask * 0.92 );
+  // T-TROPICAL 泡沫弱化（surfing foam.strength 0.25：白帽几乎无、细弱纹理）+
+  // R4 pattern 高频侵蚀碎化（foamErode，flags.x 分支内算）；default 档两系数
+  // 均 1，逐字节零回归。
+  let foamScaleT = select( 1.0, renderParams.lookParamsA.w, renderParams.lookShallow.x > 0.5 );
+  col = mix( col, foamWhite * albedoJit, foamMask * 0.92 * foamScaleT * foamErode );
 
   // 距离雾：远处融入天空色（弱化网格边缘接缝）；水下远景融入水色。
   // T-P 海面雾太阳染色（aerial perspective 海面侧）：朝太阳方向的雾色染
@@ -1127,7 +1224,17 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     fogCol = mix( fogCol, fogCol * sunTint * 1.4, toSun * apStrength );
   }
   let fog = 1.0 - exp( - distM / FOG_DIST );
-  col = mix( col, fogCol, fog * 0.96 );
+  // R3 T-TROPICAL hazeScale（检查 R2 根因实锤：ocean 自绘远距雾/大气混合是
+  // 俯视泛白主贡献——2600m 俯视 fog≈0.24 混向亮天色全图 R/G 0.69；
+  // scene.aerialPerspective 是 LightingPass 地形/图元通道参数，对海面像素
+  // 无效）。按视线天顶角加权：俯视（vZen→1）雾压到 hazeScale、掠视
+  //（vZen→0）雾全保——掠视 R2 已 9/10 达标不扰动；default 档 lookShallow.x
+  // ≤0.5 → select 恒 1，逐字节零回归。
+  let vZen = abs( dot( viewDir, atmUp ) );
+  let hazeScale = mix( 1.0,
+    select( 1.0, renderParams.lookParamsC.x, renderParams.lookShallow.x > 0.5 ),
+    vZen );
+  col = mix( col, fogCol, fog * 0.96 * hazeScale );
 
   // 水下仰视 Snell 窗：视线与竖直夹角 < 临界角 ~48.6°（ndv > ~0.66）区域
   // 透明天空（亮窗），窗外全反射暗带；alpha 同步降——此前海面 alpha 恒
@@ -1304,7 +1411,7 @@ fn peel_fs( input : PeelVSOut ) -> @location(0) vec4<f32> {
 
 /** OceanParams uniform buffer 字节数（288B，见 struct 注释）。 */
 export const OCEAN_PARAMS_UBO_BYTES = 288;
-/** OceanRenderParams uniform buffer 字节数（128B：sunDir/deep/sky/flags/wakeUv/underwater/shoreParams/seabedUv）。 */
-export const OCEAN_RENDER_PARAMS_UBO_BYTES = 128;
+/** OceanRenderParams uniform buffer 字节数（224B：sunDir/deep/sky/flags/wakeUv/underwater/shoreParams/seabedUv + T-TROPICAL lookShallow/lookDeep/lookTrans/lookParamsA/lookParamsB/lookParamsC；前 128B 布局不变）。 */
+export const OCEAN_RENDER_PARAMS_UBO_BYTES = 224;
 /** BreakParams uniform buffer 字节数（96B：gain/band/peel 三 vec4）。 */
 export const OCEAN_BREAK_PARAMS_UBO_BYTES = 96;

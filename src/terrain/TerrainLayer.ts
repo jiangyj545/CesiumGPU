@@ -862,16 +862,21 @@ export class TerrainLayer {
     const rad       = 180.0 / Math.PI;
 
     for (let i = 0; i < count; i++) {
+      // True-ellipsoid inverse (matches ecefFromLonLatHeight, 2026-10-22):
+      // x = n·nx·s, y = n·ny·s, z = n(1−e²)·nz·s → tanφ = z/((1−e²)·hypot(x,y))
+      // (n cancels), scale = hypot(x,y)/(n·cosφ).
       const x = positions[i * 3];
-      const y = positions[i * 3 + 1] / WGS84_POLAR_RATIO; // undo squash
-      const z = positions[i * 3 + 2] / WGS84_POLAR_RATIO;
+      const y = positions[i * 3 + 1];
+      const z = positions[i * 3 + 2];
+      const e2 = 1.0 - WGS84_POLAR_RATIO * WGS84_POLAR_RATIO;
 
       const lon = Math.atan2(y, x);
-      const lat = Math.atan2(z, Math.hypot(x, y));
-      // Radial scale folded into the position: |p| = scale·|unit dir|;
-      // height = (scale - 1) × WGS84 semi-major axis.
-      const scaleSq = x * x + y * y + z * z;
-      const height  = (Math.sqrt(scaleSq) - 1.0) * WGS84_SEMI_MAJOR;
+      const lat = Math.atan2(z / (1.0 - e2), Math.hypot(x, y));
+      const sinLat = Math.sin(lat);
+      const cosLat = Math.cos(lat);
+      const n = 1.0 / Math.sqrt(1.0 - e2 * sinLat * sinLat);
+      const scale = Math.hypot(x, y) / (n * cosLat);
+      const height = (scale - 1.0) * WGS84_SEMI_MAJOR;
 
       llh[i * 3]     = lon * rad;
       llh[i * 3 + 1] = lat * rad;
@@ -1226,15 +1231,19 @@ const WGS84_POLAR_RATIO = 6356752.3142 / 6378137.0;
 const WGS84_SEMI_MAJOR = 6378137.0;
 
 /**
- * Surface point (normalised ECEF, EllipsoidGeometry convention:
- * x = cos(lat)·cos(lon), y and z scaled by the polar ratio).
+ * Surface point (normalised ECEF, TRUE WGS84 ellipsoid — same formula as
+ * `EllipsoidGeometry.createRegion` / `ecefFromLonLatHeight` at h=0:
+ * x = n·cosφcosλ, y = n·cosφsinλ, z = n(1−e²)·sinφ).
  */
 function ecefSurfacePoint(lonDeg: number, latDeg: number, result: Cartesian3): Cartesian3 {
   const rad    = Math.PI / 180.0;
   const cosLat = Math.cos(latDeg * rad);
-  result.x = cosLat * Math.cos(lonDeg * rad);
-  result.y = cosLat * Math.sin(lonDeg * rad) * WGS84_POLAR_RATIO;
-  result.z = Math.sin(latDeg * rad) * WGS84_POLAR_RATIO;
+  const sinLat = Math.sin(latDeg * rad);
+  const e2     = 1.0 - WGS84_POLAR_RATIO * WGS84_POLAR_RATIO;
+  const n      = 1.0 / Math.sqrt(1.0 - e2 * sinLat * sinLat);
+  result.x = n * cosLat * Math.cos(lonDeg * rad);
+  result.y = n * cosLat * Math.sin(lonDeg * rad);
+  result.z = n * (1.0 - e2) * sinLat;
   return result;
 }
 

@@ -64,19 +64,19 @@
       const EARTH = 6378137;
       const RATIO = 6356752.3142 / 6378137;   // 引擎压扁系 y/z 极半径比
 
-      // ── 1. 地形层（湖北 8888，L0-14；离线时天际线退化为 0 高椭球不可用）──
+      // ── 1. 地形层（湖北 7777 内网，L0-14；离线时天际线退化为 0 高椭球不可用）──
       let terrainOk = false;
       try {
         if (typeof engine.TerrainLayer === 'function') {
           viewer.globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
-            url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
-            maximumLevel: 14,
+            url: 'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/{z}/{x}/{y}.terrain',
+            maximumLevel: 12, // 构建范围 max_zoom=12;14 会请求 z13/14 触发服务 429 限流→地形周期闪
           }));
           terrainOk = !!viewer.globe.terrainLayer;
         }
       } catch (err) { console.warn('[77] terrain init failed:', err.message); }
       const terrain = viewer.globe.terrainLayer;
-      if (!terrainOk) result.textContent = '⚠ 地形服务(8888)不可用：天际线分析需要真实高程，当前无法计算。';
+      if (!terrainOk) result.textContent = '⚠ 地形服务(7777)不可用：天际线分析需要真实高程，当前无法计算。';
 
       // ── 2. 场景：神农架山谷看四周山脊（天际线可辨地形）────────────────
       // 眼高 1500 m（谷底 ~1.2 km，300 m 净空）朝西北 300°、pitch -2° 近水平
@@ -229,7 +229,7 @@
         } catch (err) {
           skylinePts = null;
           result.textContent = `⚠ 天际线计算失败：${err && err.message ? err.message : err}\n` +
-            '（需本地地形服务 8888；相机移动时会自动重试）';
+            '（需内网地形服务 7777；相机移动时会自动重试）';
           console.warn('[77] skyline compute failed:', err);
         } finally {
           computing = false;

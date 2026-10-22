@@ -132,15 +132,21 @@ export function applyHeightReference(
 
   const r = Cartesian3.magnitude(position);
   if (r < 1e-9) return position;
+  // TRUE-ellipsoid inverse (matches ecefFromLonLatHeight / Camera.surfaceRadius,
+  // 2026-10-22): tanφ = z/((1−e²)·hypot(x,y)); surface length
+  // n·√(cos²φ + (1−e²)²·sin²φ).
+  const e2 = 1.0 - WGS84_POLAR_RATIO * WGS84_POLAR_RATIO;
   const ux = position.x / r;
-  const uy = (position.y / r) / WGS84_POLAR_RATIO;
-  const uz = (position.z / r) / WGS84_POLAR_RATIO;
-  const n = Math.sqrt(ux * ux + uy * uy + uz * uz);
-  const cx2 = (ux / n) * (ux / n); // cosφcosλ 分量的平方（Camera.surfaceRadius 同式）
-  const surfaceR = Math.sqrt(cx2 + WGS84_POLAR_RATIO * WGS84_POLAR_RATIO * (1.0 - cx2));
+  const uy = position.y / r;
+  const uz = position.z / r;
+  const latRad = Math.atan2(uz / (1.0 - e2), Math.hypot(ux, uy));
+  const sinLat = Math.sin(latRad);
+  const cosLat = Math.cos(latRad);
+  const nLat = 1.0 / Math.sqrt(1.0 - e2 * sinLat * sinLat);
+  const surfaceR = nLat * Math.sqrt(cosLat * cosLat + (1.0 - e2) * (1.0 - e2) * sinLat * sinLat);
 
   const lonDeg = (Math.atan2(uy, ux) * 180) / Math.PI;
-  const latDeg = (Math.atan2(uz, Math.hypot(ux, uy)) * 180) / Math.PI;
+  const latDeg = (latRad * 180) / Math.PI;
   const hTerrain = sampleHeight.sampleHeight(lonDeg, latDeg);
 
   const hCurrent = r - surfaceR;

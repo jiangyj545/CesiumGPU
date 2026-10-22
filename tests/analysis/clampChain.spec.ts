@@ -121,20 +121,26 @@ function gridMesh(
   return { positions, indices, minHeight: minH, maxHeight: maxH, center: [0, 0, 0] };
 }
 
-/** 从归一化 ECEF 位置反推高度（米）——复刻引擎「高度折入模长」约定。 */
+/** 从归一化 ECEF 位置反推高度（米）——真椭球约定（ecefFromLonLatHeight，
+ * 2026-10-22）：hypot(x, y, z/(1−e²)) = n·scale。 */
 function heightOf(p: Cartesian3): number {
   const x = p.x;
-  const y = p.y / POLAR_RATIO;
-  const z = p.z / POLAR_RATIO;
-  return (Math.hypot(x, y, z) - 1) * SEMI_MAJOR;
+  const y = p.y;
+  const z = p.z;
+  const e2 = 1 - POLAR_RATIO * POLAR_RATIO;
+  const lat = Math.atan2(z / (1 - e2), Math.hypot(x, y));
+  const n = 1 / Math.sqrt(1 - e2 * Math.sin(lat) * Math.sin(lat));
+  return (Math.hypot(x, y, z / (1 - e2)) / n - 1) * SEMI_MAJOR;
 }
 
-/** 从交错顶点缓冲的一个顶点反推 (lonDeg, latDeg)（引擎面约定）。 */
+/** 从交错顶点缓冲的一个顶点反推 (lonDeg, latDeg)（真椭球面约定：
+ * tanφ = z/((1−e²)·hypot(x,y))，n 消去闭式）。 */
 function lonLatOfVertex(v: Float32Array, base: number, stride: number): [number, number] {
   const x = v[base];
-  const y = v[base + 1] / POLAR_RATIO;
-  const z = v[base + 2] / POLAR_RATIO;
-  return [Math.atan2(y, x) * RAD2DEG, Math.atan2(z, Math.hypot(x, y)) * RAD2DEG];
+  const y = v[base + 1];
+  const z = v[base + 2];
+  const e2 = 1 - POLAR_RATIO * POLAR_RATIO;
+  return [Math.atan2(y, x) * RAD2DEG, Math.atan2(z / (1 - e2), Math.hypot(x, y)) * RAD2DEG];
 }
 
 /** 地表点（h = 0）的归一化 ECEF。 */

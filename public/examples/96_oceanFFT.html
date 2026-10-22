@@ -38,15 +38,18 @@
       巡航船沿椭圆航线自动航行，船体随航向转向。
       <b>Track C/G</b>：体积云 + 云影（地形/海面双通道）+ 光柱（godRays /
       水下太阳光柱）+ 岸线冲刷。</p>
-    <label>风速 <b id="windSpeedVal">8.0</b> m/s</label>
-    <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="13" />
-    <label>风向 <b id="windDirVal">20</b>°</label>
-    <input id="windDir" type="range" min="0" max="360" step="5" value="20" />
-    <label>choppiness 卷浪度 <b id="choppinessVal">0.90</b></label>
-    <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="1.15" />
-    <!-- 2026-10-09 覆盖回落：0.54→0.62（配合图案阈值 0.85→0.70，平静海面白斑大幅减少） -->
-    <label>foamBias 白沫阈值 <b id="foamBiasVal">0.62</b></label>
-    <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.62" />
+    <!-- 2026-10-22 tropical 档：滑杆默认值与 OceanFFTWater 构造参数同步
+         （windSpeed 11.5 / windDirection 17，bindSlider 初始化会用滑杆值回写，
+         不同步会覆盖构造值）。R4：choppiness 1.12 波峰更尖。 -->
+    <label>风速 <b id="windSpeedVal">11.5</b> m/s</label>
+    <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="11.5" />
+    <label>风向 <b id="windDirVal">17</b>°</label>
+    <input id="windDir" type="range" min="0" max="360" step="5" value="17" />
+    <label>choppiness 卷浪度 <b id="choppinessVal">1.12</b></label>
+    <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="1.12" />
+    <!-- R4：0.62→0.66（Jacobian 阈值提高，白沫更零星；2026-10-09 曾 0.54→0.62） -->
+    <label>foamBias 白沫阈值 <b id="foamBiasVal">0.66</b></label>
+    <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.66" />
     <label>时间尺度 <b id="timeScaleVal">1.6</b>×</label>
     <input id="timeScale" type="range" min="0" max="3" step="0.1" value="1.6" />
     <label>船速 <b id="boatSpeedVal">6.0</b> m/s（0 = 停船）</label>
@@ -119,6 +122,14 @@
       // ── 1. 后处理开启（折射需要 _sceneColorRT 路径；海面高光吃 bloom）──
       viewer.scene.postProcess.enabled = true;
       viewer.scene.postProcess.godRays.enabled = true; // Track G：屏幕空间太阳光柱
+      // tropical 观感：bloom 0.45/0.65/0.45（2026-10-22 R2 复调——检查 R1 实测
+      // 掠射反射带 >240 亮度仅 13px（基准 192px）极亮核不足，threshold
+      // 0.75→0.65 让 sparkle 锐瓣峰值更早进 bloom；intensity/knee 0.45 不变）。
+      const bloomP = viewer.scene.postProcess.bloom;
+      bloomP.enabled = true;
+      bloomP.threshold = 0.65;
+      bloomP.intensity = 0.45;
+      bloomP.knee = 0.45;
 
       // ── 2. 船迹波场（A4）：必须先于 ocean add 到 effects，ocean 才能取
       //      到当帧 fieldView（ping-pong 采样视图与 encoder 内依赖一致）──
@@ -163,10 +174,26 @@
         extentKm: 10,
         segments: 256,
         waterLevel: 0,
-        windSpeed: 13,
-        windDirection: 20,
-        choppiness: 1.15,
-        timeScale: 1,
+        // 2026-10-22 tropical 观感档（threejswaterpro TROPICAL preset）：
+        // 三色水深混合 + wrap-lighting SSS + sparkle + 宽带 fresnel + 泡沫弱化。
+        // 旧观感回 look:'default'（零回归）。
+        // R2/R3 复调：sparkleIntensity 2.4 补掠射反射带极亮核；depthFalloffM 120
+        // 深浅分带 + hazeScale/rippleStrength 引擎 tropical 默认（0.55/0.45）。
+        // R4 观感精修（视觉模型双盲对比「效果一般」）：foamScale 0.28（开阔水面
+        // 零星碎点）+ sssIntensity 2.2（逆光浪尖透光）；choppiness 1.12 波峰更尖
+        // + timeScale 1.6（基准 animationSpeed 3.6 地球尺度折中）+ spreadBlend
+        // 0.62 方向发散 / swellWindDirection -25 交叉涌（~45° 夹角消机械条带）。
+        look: 'tropical',
+        windSpeed: 11.5,
+        windDirection: 17,
+        choppiness: 1.12,
+        sparkleIntensity: 2.4,
+        foamScale: 0.28,
+        sssIntensity: 2.2,
+        depthFalloffM: 120,
+        spreadBlend: 0.62,
+        swellWindDirection: -25,
+        timeScale: 1.6,
         sunDirection: SUN,
         foamPattern,
         wake: wakeField,
@@ -243,6 +270,11 @@
         return (v && b) ? { view: v, atmosphereParamsBuffer: b, sunDir: sky.sunDirection } : null;
       };
       viewer.scene.aerialSource = bindAerial;
+      // R3 回退 R2 的 0.25 实验值（检查 R2 实锤：scene.aerialPerspective 是
+      // LightingPass 地形/图元通道参数，2600m 俯视全画面是 ocean effect 自绘
+      // 表面——走 ocean.bindAtmosphere 的 skyView 通道——此参数对海面像素零
+      // 作用；俯视泛白的实际治疗在 OceanFFTShader tropical 分支 hazeScale，
+      // 走 UBO RP[52]）。恢复原值 0.42 避免误导后人；地形远雾观感不变。
       viewer.scene.aerialPerspective = { strength: 0.42, distM: 25000 };
 
       // ── 5d. T4 深度感知破碎波：沙洲岸线带（VS 波形变形 + FS 泡沫花边/内卷
@@ -265,10 +297,10 @@
       //      → spray(船首喷雾粒子，GBuffer 深度测试) → uwFog(全屏罩)
       const uwFog = new engine.UnderwaterFog(context, {
         intensity: 0.85,
-        waterColor: [0.035, 0.19, 0.30], // 晴日透蓝（2026-10-06 检查差距3：旧
-                                         // 青绿 [0.06,0.34,0.31] G>B 水体染灰绿；
-                                         // Round4 微提亮偏蓝——远处 Beer 雾混入后
-                                         // "近清澈→远渐蓝"，不再暗青黑）
+        waterColor: [0.02, 0.14, 0.16],  // 青绿（2026-10-22 tropical 档：与水上
+                                         // look:'tropical' 水体观感一致——
+                                         // #0a3d47 量级青绿碧透；旧透蓝 [0.035,
+                                         // 0.19, 0.30] 与水上青绿不接续）
         particleDensity: 0.28,           // 0.9→0.32→0.2（Round3 检查差距4：
                                          // 0.2 全隐没，回调 0.28 至隐约可见）
         seabedDepthM: 5,                 // 水下俯视参考海床深（沙洲周边 4-6 m）

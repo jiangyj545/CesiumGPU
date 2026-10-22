@@ -94,6 +94,10 @@
       ? JSON.parse(urlQ.get('spec'))
       : null;
     const GIMBAL_STAB = urlQ.get('gimbal') === 'stab';
+    // ?stereo=<meters>（Wave1-B1 双目基线，十进制米如 stereo=0.12；>0 启用右目
+    // 平行光轴渲染——右目沿 body-left 反向平移 baselineM，mode 固定 'rgb'，
+    // URL 不暴露 mode 保持简单）
+    const STEREO_M = Number(urlQ.get('stereo') || '');
     // URL hz → 录制采样初始值(此前仅注释声称支持、从未实现——手工点"开始录制"
     // 恒为下拉默认 5,桌面端 capture 全帧开销大导致卡顿;farm 走 start({hz}) 不受影响)
     {
@@ -601,6 +605,10 @@
         height: viewer.context.drawingBufferHeight,
         nearM: 1,
         farM: 2000,
+        // Wave1-B1：?stereo=<m> 开启双目（缺省不渲染右目，单目行为不变）
+        ...(Number.isFinite(STEREO_M) && STEREO_M > 0
+          ? { stereo: { baselineM: STEREO_M } }
+          : {}),
         pickIdToSemantic: (id) => {
           if (id & INSTANCE_FLAG) {
             return (id & 0x400000) !== 0 ? 5 : 1;

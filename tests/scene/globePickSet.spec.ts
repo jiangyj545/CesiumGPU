@@ -74,7 +74,10 @@ describe('Globe.tilePrimitives 与 drawTiles 绘制集合同源', () => {
     expect(labelsOf(globe.tilePrimitives)).toEqual(['1/0/0', '1/1/0', 'fill-n', 'fill-s']);
   });
 
-  it('地形 Map 有条目 → getter 只返回地形条目（不含影像与极冠填充）', () => {
+  it('地形 Map 有条目 → getter 返回地形+影像+极冠填充（共存绘制）', () => {
+    // 共存架构（2026-10-22）：地理地形只覆盖数据集 bounds（如 7777 湖北集），
+    // 旧"地形独占"互斥分支会让 bounds 外永久黑洞 + 地形流送时整层影像
+    // 开关振荡闪烁；现两者同帧绘制、深度裁决（影像瓦片微抬升 50m）。
     const globe = new Globe({ device: {} } as never);
     inject(globe, {
       imagery: ['1/0/0'],
@@ -82,7 +85,9 @@ describe('Globe.tilePrimitives 与 drawTiles 绘制集合同源', () => {
       fills: { north: 'fill-n', south: 'fill-s' },
     });
 
-    expect(labelsOf(globe.tilePrimitives)).toEqual(['3/4/2', '3/5/2']);
+    expect(labelsOf(globe.tilePrimitives)).toEqual(
+      ['3/4/2', '3/5/2', '1/0/0', 'fill-n', 'fill-s']
+    );
   });
 
   it('drawTiles 的绘制集合与 getter 集合一致（地形激活）', () => {
@@ -96,8 +101,8 @@ describe('Globe.tilePrimitives 与 drawTiles 绘制集合同源', () => {
     const { drawn, pass } = makePassRecorder();
     globe.drawTiles(pass, {} as GPUBindGroup);
 
-    // 互斥分支：只画地形，影像瓦片与极冠填充都不画（与 getter 同源）
-    expect(drawn).toEqual(['3/4/2']);
+    // 共存分支：地形与影像瓦片、极冠填充全部绘制（深度裁决，与 getter 同源）
+    expect(drawn).toEqual(['3/4/2', '1/0/0', 'fill-n']);
     expect(drawn).toEqual(labelsOf(globe.tilePrimitives));
   });
 

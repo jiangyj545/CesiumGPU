@@ -162,27 +162,35 @@ describe('quantizedMeshDecoder', () => {
       // 4 顶点全在边缘 → 每个复制一个裙边顶点：8 顶点 24 floats
       expect(mesh.positions.length).toBe(8 * 3);
 
-      // 主网格顶点位置 = ECEF(lon(u 边界), lat(v 边界), h)
+      // 主网格顶点位置 = ECEF(lon(u 边界), lat(v 边界), h)——真椭球约定
+      // （ecefFromLonLatHeight，2026-10-22）：x=n·nx, y=n·ny, z=n(1−e²)·nz。
       const bounds = geographicTileBounds(10, 100, 200);
       const rad = Math.PI / 180;
       const ratio = 6356752.3142 / 6378137;
+      const e2 = 1 - ratio * ratio;
+      const ell = (latDeg: number) => {
+        const sinLat = Math.sin(latDeg * rad);
+        return 1 / Math.sqrt(1 - e2 * sinLat * sinLat);
+      };
       const scale0 = 1 + 100 / 6378137; // hq=0 → h = minH = 100m
+      const nS = ell(bounds.south);
       const nx = Math.cos(bounds.south * rad) * Math.cos(bounds.west * rad);
       const ny = Math.cos(bounds.south * rad) * Math.sin(bounds.west * rad);
       const nz = Math.sin(bounds.south * rad);
-      expect(mesh.positions[0]).toBeCloseTo(nx * scale0, 5);
-      expect(mesh.positions[1]).toBeCloseTo(ny * ratio * scale0, 5);
-      expect(mesh.positions[2]).toBeCloseTo(nz * ratio * scale0, 5);
+      expect(mesh.positions[0]).toBeCloseTo(nS * nx * scale0, 5);
+      expect(mesh.positions[1]).toBeCloseTo(nS * ny * scale0, 5);
+      expect(mesh.positions[2]).toBeCloseTo(nS * (1 - e2) * nz * scale0, 5);
 
       // 顶点 2（u=0, v=32767, hq=32767）→ 西北角、最高处
       const scale2 = 1 + 1100 / 6378137;
+      const nN = ell(bounds.north);
       const nx2 = Math.cos(bounds.north * rad) * Math.cos(bounds.west * rad);
       const ny2 = Math.cos(bounds.north * rad) * Math.sin(bounds.west * rad);
       const nz2 = Math.sin(bounds.north * rad);
       const p2 = Array.from(mesh.positions.slice(2 * 3, 2 * 3 + 3));
-      expect(p2[0]).toBeCloseTo(nx2 * scale2, 5);
-      expect(p2[1]).toBeCloseTo(ny2 * ratio * scale2, 5);
-      expect(p2[2]).toBeCloseTo(nz2 * ratio * scale2, 5);
+      expect(p2[0]).toBeCloseTo(nN * nx2 * scale2, 5);
+      expect(p2[1]).toBeCloseTo(nN * ny2 * scale2, 5);
+      expect(p2[2]).toBeCloseTo(nN * (1 - e2) * nz2 * scale2, 5);
     });
 
     it('基础索引高水位解码还原原始索引', () => {

@@ -100,6 +100,67 @@ export interface OceanFFTWaterOptions {
   wake?: WakeField;
   /** 折射：FS 扰动采样场景颜色历史混合进水色（需 Scene.sceneColorHistory 提供）。Default: `false` */
   refraction?: boolean;
+  /** 观感档。`'tropical'` 启用 surfing 复刻渲染分支（三色水深混合 / wrap-lighting
+   *  SSS / Blinn-Phong sparkle / 宽带 fresnel / 泡沫 ×0.25 弱化），颜色等参数
+   *  走下方细粒度覆盖。Default: `'default'`（现有渲染路径，零回归）。 */
+  look?: 'default' | 'tropical';
+  /** tropical 档浅水色（sRGB `#rrggbb` 或线性 [r,g,b]）。Default: `'#117778'` */
+  shallowColor?: string | [number, number, number];
+  /** tropical 档深水色。Default: `'#084c59'` */
+  deepColor?: string | [number, number, number];
+  /** tropical 档透射色（SSS mix 目标，逆光波峰青碧）。Default: `'#2ab29d'` */
+  transmissionColor?: string | [number, number, number];
+  /** tropical 档 SSS 总强度。Default: `1.2` */
+  sssIntensity?: number;
+  /** tropical 档 SSS wrap-lighting 幂。Default: `3.5` */
+  sssPower?: number;
+  /** tropical 档 sparkle 锐瓣幂（Blinn-Phong shininess）。Default: `600` */
+  sparklePower?: number;
+  /** tropical 档 sparkle 强度。Default: `1.8` */
+  sparkleIntensity?: number;
+  /** tropical 档 sparkle 太阳增益（≈ surfing sun.intensity）。Default: `0.4` */
+  sparkleSunGain?: number;
+  /** tropical 档 fresnel 幂（(1-cosθ)^p 掠射带宽度）。Default: `2.2` */
+  fresnelPower?: number;
+  /** tropical 档泡沫最终缩放。Default: `0.25` */
+  foamScale?: number;
+  /** tropical 档三色混合起点水深（米）。Default: `57` */
+  depthOffsetM?: number;
+  /** tropical 档三色混合终点水深（米）。Default: `200` */
+  depthFalloffM?: number;
+  /** tropical 档远距雾/大气混合压制（按视线天顶角加权：俯视雾 ×hazeScale、
+   *  掠视雾全保）。R3 俯视泛白治疗。Default: `0.55`（default 档恒 1 零回归） */
+  hazeScale?: number;
+  /** tropical 档波痕明暗强度（波面朝太阳坡亮/背坡暗的水色调制，0=关）。
+   *  R3 俯视层次增强。Default: `0.45`（default 档恒 0 零回归） */
+  rippleStrength?: number;
+  /** 波谱覆盖：local 系统方向发散混合（0-1，越大方向越发散）。R4 消近景
+   *  条带感（方向一致性过强）。Default: `0.85`（现值不变，零回归） */
+  spreadBlend?: number;
+  /** 波谱覆盖：swell 系统风向（度）。R4 交叉涌——与 local 风向形成夹角
+   *  打散波向一致性。Default: `5`（现值不变，零回归） */
+  swellWindDirection?: number;
+}
+
+/**
+ * sRGB → 线性 RGB（tropical 档 UBO 颜色统一线性域；IEC 61966-2-1 分段）。
+ * 入参 `'#rrggbb'`（非法格式抛错）或 0-1 分量（做分段换算）。
+ */
+export function oceanSrgbToLinear( color: string | [number, number, number] ): [number, number, number] {
+  const toLin = ( c: number ): number =>
+    c <= 0.04045 ? c / 12.92 : Math.pow( ( c + 0.055 ) / 1.055, 2.4 );
+  let rgb: [number, number, number];
+  if ( typeof color === 'string' ) {
+    const m = /^#([0-9a-fA-F]{6})$/.exec( color );
+    if ( !m ) {
+      throw new Error( `OceanFFTWater: 颜色非法 ${ color }（须 #rrggbb）` );
+    }
+    const n = parseInt( m[1], 16 );
+    rgb = [ ( ( n >> 16 ) & 255 ) / 255, ( ( n >> 8 ) & 255 ) / 255, ( n & 255 ) / 255 ];
+  } else {
+    rgb = [ color[0], color[1], color[2] ];
+  }
+  return [ toLin( rgb[0] ), toLin( rgb[1] ), toLin( rgb[2] ) ];
 }
 
 /** 一个 compute pipeline + 配套 bind group（每 kernel 一份）。 */
@@ -399,10 +460,11 @@ export class OceanFFTWater implements IPass {
 
     this._local = {
       scale: 1, windSpeed: options.windSpeed ?? 8, windDirection: options.windDirection ?? 20,
-      fetch: 120, spreadBlend: 0.85, swell: 0.05, peakEnhancement: 3.3, shortWavesFade: 0.01,
+      // R4 波谱覆盖：spreadBlend 方向发散（消条带感）/ swellWindDirection 交叉涌
+      fetch: 120, spreadBlend: options.spreadBlend ?? 0.85, swell: 0.05, peakEnhancement: 3.3, shortWavesFade: 0.01,
     };
     this._swell = {
-      scale: 0.48, windSpeed: 6, windDirection: 5,
+      scale: 0.48, windSpeed: 6, windDirection: options.swellWindDirection ?? 5,
       fetch: 1200, spreadBlend: 1.0, swell: 0.9, peakEnhancement: 3.3, shortWavesFade: 0.1,
     };
 
@@ -431,6 +493,34 @@ export class OceanFFTWater implements IPass {
     this._geometry = OceanFFTWater._buildGeometry(
       lon, lat, this._extentKm, this._segments, this._waterLevel
     );
+
+    // ── T-TROPICAL look 档：渲染参数写入 RenderParams UBO 扩容段 RP[32..51]。
+    // 构造期一次写入，render() 每帧全量 writeBuffer 自动携带。default 档
+    // RP[32..51] 保持全零 → shader look 开关短路，UBO 前 128B 逐字节与旧布局
+    // 一致（零回归）。
+    if ( options.look === 'tropical' ) {
+      const RP = this._renderParamsF32;
+      const linShallow = oceanSrgbToLinear( options.shallowColor ?? '#117778' );
+      const linDeep    = oceanSrgbToLinear( options.deepColor ?? '#084c59' );
+      const linTrans   = oceanSrgbToLinear( options.transmissionColor ?? '#2ab29d' );
+      RP[32] = 1;                 // look 开关
+      RP[33] = linShallow[0]; RP[34] = linShallow[1]; RP[35] = linShallow[2];
+      RP[36] = 0;                 // 保留
+      RP[37] = linDeep[0];    RP[38] = linDeep[1];    RP[39] = linDeep[2];
+      RP[40] = options.sparkleSunGain ?? 0.4;  // sparkle 太阳增益
+      RP[41] = linTrans[0];   RP[42] = linTrans[1];   RP[43] = linTrans[2];
+      RP[44] = options.fresnelPower ?? 2.2;
+      RP[45] = options.sparklePower ?? 600;
+      RP[46] = options.sparkleIntensity ?? 1.8;
+      RP[47] = options.foamScale ?? 0.25;
+      RP[48] = options.sssIntensity ?? 1.2;
+      RP[49] = options.sssPower ?? 3.5;
+      RP[50] = options.depthOffsetM ?? 57;
+      RP[51] = options.depthFalloffM ?? 200;
+      // lookParamsC（R3 俯视泛白/偏平治疗）：hazeScale 俯视雾压制 / 波痕明暗
+      RP[52] = options.hazeScale ?? 0.55;
+      RP[53] = options.rippleStrength ?? 0.45;
+    }
   }
 
   // ── 公开 API ─────────────────────────────────────────────────────────────

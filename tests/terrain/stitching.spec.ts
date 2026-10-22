@@ -87,13 +87,17 @@ function gridMesh(
   return { positions, indices, minHeight: minH, maxHeight: maxH, center: [0, 0, 0] };
 }
 
-/** 从归一化 ECEF 位置反推高度（米）——复刻引擎「高度折入模长」约定。 */
+/** 从归一化 ECEF 位置反推高度（米）——真椭球约定（ecefFromLonLatHeight，
+ * 2026-10-22）：hypot(x, y, z/(1−e²)) = n·scale（n 消去后的方向模长）。 */
 function heightOf(positions: Float32Array, vertex: number): number {
   const i = vertex * 3;
   const x = positions[i];
-  const y = positions[i + 1] / POLAR_RATIO;
-  const z = positions[i + 2] / POLAR_RATIO;
-  return (Math.hypot(x, y, z) - 1) * SEMI_MAJOR;
+  const y = positions[i + 1];
+  const z = positions[i + 2];
+  const e2 = 1 - POLAR_RATIO * POLAR_RATIO;
+  const lat = Math.atan2(z / (1 - e2), Math.hypot(x, y));
+  const n = 1 / Math.sqrt(1 - e2 * Math.sin(lat) * Math.sin(lat));
+  return (Math.hypot(x, y, z / (1 - e2)) / n - 1) * SEMI_MAJOR;
 }
 
 // ── 场景 ─────────────────────────────────────────────────────────────────────

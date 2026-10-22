@@ -63,6 +63,15 @@ export class TileTextureCache {
 
   /** Evicted textures waiting out the in-flight command buffer grace window. */
   private _pendingDestroy: PendingDestroy[] = [];
+  /**
+   * Runtime-pinned keys (imagery textures bound to LIVE terrain primitives).
+   * Evicting such a texture would destroy it under the referencing bind
+   * group → the terrain tile falls back to a coarse ancestor → re-request →
+   * upgrade → destroy/rebuild cycle: the visible clear↔blur FLICKER of
+   * terrain draping. Pins are key-level and released by the referrer
+   * (see Globe._syncTerrainPrimitives) when its primitive is destroyed.
+   */
+  private _pins = new Set<string>();
   private _frameIndex = 0;
 
   private _hits = 0;
@@ -141,8 +150,25 @@ export class TileTextureCache {
       texture.destroy();
     }
     this._entries.clear();
+    this._pins.clear();
     for (const item of this._pendingDestroy) item.texture.destroy();
     this._pendingDestroy.length = 0;
+  }
+
+  /**
+   * Pin a RESIDENT key against LRU eviction (imagery bound to a live terrain
+   * primitive — see `_pins`). Returns false when the key is not resident
+   * (nothing to pin; the caller treats it as unpinned/unbound).
+   */
+  pin(key: string): boolean {
+    if (!this._entries.has(key)) return false;
+    this._pins.add(key);
+    return true;
+  }
+
+  /** Release a pin when the referencing primitive is destroyed/replaced. */
+  unpin(key: string): void {
+    this._pins.delete(key);
   }
 
   /**
@@ -185,8 +211,9 @@ export class TileTextureCache {
     }
   }
 
-  /** Coarse (fallback-chain) tiles are exempt from LRU eviction. */
+  /** Coarse (fallback-chain) tiles and runtime pins are exempt from eviction. */
   private _isPinned(key: string): boolean {
+    if (this._pins.has(key)) return true;
     // Keys are "{level}/{x}/{y}" — the leading number is the zoom level.
     const slash = key.indexOf('/');
     if (slash <= 0) return false;

@@ -67,7 +67,9 @@ describe('terrainProvider', () => {
         'http://localhost:8888/api/v1/terrain-3d/serve/terrain_hubei/3/2/1.terrain'
       );
       expect(provider.tilingScheme).toBe('geographic');
-      expect(provider.maximumLevel).toBe(14);
+      // 12：7777 terrain_hubei 的 CTB 构建范围（max_zoom=12）；请求 z13+ 会触发
+      // 服务端 429 限流 → 地形瓦片 30s 重试循环 → 可见的精细度周期闪烁。
+      expect(provider.maximumLevel).toBe(12);
       expect(provider.ready).toBe(true);
     });
 

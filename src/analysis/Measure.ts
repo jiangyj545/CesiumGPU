@@ -79,28 +79,32 @@ export class Measure {
       return out;
     }
 
-    // Parametric lon/lat under the engine surface convention.
+    // Parametric lon/lat under the TRUE-ellipsoid engine surface convention
+    // (matches ecefFromLonLatHeight / EllipsoidGeometry.createRegion, 2026-10-22):
+    // tanφ = z/((1−e²)·hypot(x,y)); n cancels in the inverse.
     const inv = 1.0 / mag;
     const ux = position.x * inv;
-    const uy = (position.y * inv) / Measure.POLAR_RATIO;
-    const uz = (position.z * inv) / Measure.POLAR_RATIO;
+    const uy = position.y * inv;
+    const uz = position.z * inv;
+    const e2 = 1.0 - Measure.POLAR_RATIO * Measure.POLAR_RATIO;
     const lon = Math.atan2(uy, ux);
-    const lat = Math.atan2(uz, Math.hypot(ux, uy));
+    const lat = Math.atan2(uz / (1.0 - e2), Math.hypot(ux, uy));
 
     const h = sampleHeight(lon * (180 / Math.PI), lat * (180 / Math.PI));
     const height = Number.isFinite(h) ? h : 0.0;
 
-    // Rebuild the surface point: parametric direction squashed in y/z,
-    // radially scaled by 1 + height / EARTH_SCALE (identical to the terrain
+    // Rebuild the surface point: true-ellipsoid parameterisation radially
+    // scaled by 1 + height / EARTH_SCALE (identical to the terrain
     // mesh vertex formula `ecefFromLonLatHeight`).
     const cosLat = Math.cos(lat);
     const sinLat = Math.sin(lat);
+    const n = 1.0 / Math.sqrt(1.0 - e2 * sinLat * sinLat);
     const scale = 1.0 + height / Measure.EARTH_SCALE;
 
     const out = result ?? new Cartesian3();
-    out.x = cosLat * Math.cos(lon) * scale;
-    out.y = cosLat * Math.sin(lon) * Measure.POLAR_RATIO * scale;
-    out.z = sinLat * Measure.POLAR_RATIO * scale;
+    out.x = n * cosLat * Math.cos(lon) * scale;
+    out.y = n * cosLat * Math.sin(lon) * scale;
+    out.z = n * (1.0 - e2) * sinLat * scale;
     return out;
   }
 

@@ -25,7 +25,7 @@
   <div class="cg-panel">
     <h1>18 离线 DEM 地形加载</h1>
     <p class="desc">LocalQuantizedMeshProvider 直连本地 quantized-mesh 地形
-      服务（localhost:8888，湖北 L0-14），强调"离线服务接入"：
+      服务（192.168.0.200:7777，湖北 L0-14），强调"离线服务接入"：
       地形开/关一键对比椭球与真实地表，再对湖北主要城市点做
       terrainLayer.sampleHeight 采样验证高程。对应 EV-Globe 02_DEM /
       02_demExternal / 02_GoogleDem 的服务端地形接入主题。</p>
@@ -44,17 +44,17 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
-            '\n⚠ 离线地形服务(8888)未启动：运行 python .omc/tmp/terrain_server.py 后刷新');
+            '\n⚠ 内网地形服务(192.168.0.200:7777)不可达');
         });
 
       // ── 1. 离线地形 provider（显式 URL 便于替换为自己的服务）────────
       const provider = new engine.LocalQuantizedMeshProvider({
-        url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
-        maximumLevel: 14,
+        url: 'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/{z}/{x}/{y}.terrain',
+        maximumLevel: 12, // 构建范围 max_zoom=12;14 会请求 z13/14 触发服务 429 限流→地形周期闪
       });
 
       // ── 2. 地形开/关对比 ────────────────────────────────────────────
@@ -134,7 +134,7 @@
       }
       function refresh() {
         const t = globe.terrainLayer;   // null = 椭球模式
-        const lines = [`地形模式: ${terrainOn ? '在线（8888 离线服务）' : '关闭（0 高椭球）'}`, '── 已加载区采样 ──'];
+        const lines = [`地形模式: ${terrainOn ? '在线（7777 内网地形服务）' : '关闭（0 高椭球）'}`, '── 已加载区采样 ──'];
         if (anchor) {
           const [ax, ay] = anchor;
           const near = [

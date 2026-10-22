@@ -49,19 +49,19 @@
       const result = document.getElementById('result');
 
       // ── 服务可用性探测（离线地形服务未启动时给出明确提示）──────────
-      fetch('http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/layer.json', { method: 'HEAD' })
+      fetch('http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/layer.json', { method: 'HEAD' })
         .then(r => { if (!r.ok) throw new Error(r.status); })
         .catch(() => {
           result.insertAdjacentHTML('beforeend',
-            '\n⚠ 离线地形服务(8888)未启动：运行 python .omc/tmp/terrain_server.py 后刷新');
+            '\n⚠ 内网地形服务(192.168.0.200:7777)不可达');
         });
       const canvas = document.getElementById('profile');
       const ctx = canvas.getContext('2d');
 
-      // ── 1. 地形层（8888 离线服务）───────────────────────────────────
+      // ── 1. 地形层（7777 内网地形服务）───────────────────────────────────
       globe.setTerrainProvider(new engine.LocalQuantizedMeshProvider({
-        url: 'http://127.0.0.1:8888/api/v1/terrain-3d/serve/terrain_hubei/{z}/{x}/{y}.terrain',
-        maximumLevel: 14,
+        url: 'http://192.168.0.200:7777/api/v1/terrain-3d/tiles/terrain_hubei/{z}/{x}/{y}.terrain',
+        maximumLevel: 12, // 构建范围 max_zoom=12;14 会请求 z13/14 触发服务 429 限流→地形周期闪
       }));
 
       // ── 2. 预置剖面线（湖北境内）──────────────────────────────────
