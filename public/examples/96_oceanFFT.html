@@ -45,8 +45,8 @@
     <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="11.5" />
     <label>风向 <b id="windDirVal">17</b>°</label>
     <input id="windDir" type="range" min="0" max="360" step="5" value="17" />
-    <label>choppiness 卷浪度 <b id="choppinessVal">1.12</b></label>
-    <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="1.12" />
+    <label>choppiness 卷浪度 <b id="choppinessVal">1.2</b></label>
+    <input id="choppiness" type="range" min="0" max="1.5" step="0.05" value="1.2" />
     <!-- R4：0.62→0.66（Jacobian 阈值提高，白沫更零星；2026-10-09 曾 0.54→0.62） -->
     <label>foamBias 白沫阈值 <b id="foamBiasVal">0.66</b></label>
     <input id="foamBias" type="range" min="0.4" max="0.9" step="0.01" value="0.66" />
@@ -110,7 +110,9 @@
       // 裁剪实锤无盘无晕）；20° 盘心贴顶缘 1° 入画，径向亮核/光晕可辨。
       // 基向 N*0.72 + E*0.28 + U*0.42 @ (121.65E, 31.15N)，U 分量降至
       // sin20° 后归一化（方位 21° 不变，仅压仰角）。
-      const SUN = [-0.206, -0.316, 0.926];
+      // R6：仰角 20°→12°（对齐 surfing tropical sun.elevation=12；glitter
+      // 反射通道几何收窄成"焦点亮带"+逆光 SSS 增强，水平方位 21° 不变）。
+      const SUN = [-0.148, -0.437, 0.888];
       const METERS_PER_DEG = 111320;
       const R_EARTH = engine.Cartesian3.EARTH_RADIUS; // 6378137
       const context = viewer.scene.context;
@@ -180,16 +182,20 @@
         // R2/R3 复调：sparkleIntensity 2.4 补掠射反射带极亮核；depthFalloffM 120
         // 深浅分带 + hazeScale/rippleStrength 引擎 tropical 默认（0.55/0.45）。
         // R4 观感精修（视觉模型双盲对比「效果一般」）：foamScale 0.28（开阔水面
-        // 零星碎点）+ sssIntensity 2.2（逆光浪尖透光）；choppiness 1.12 波峰更尖
+        // 零星碎点）+ sssIntensity（逆光浪尖透光）；choppiness 波峰更尖
         // + timeScale 1.6（基准 animationSpeed 3.6 地球尺度折中）+ spreadBlend
         // 0.62 方向发散 / swellWindDirection -25 交叉涌（~45° 夹角消机械条带）。
+        // R5 复调：sssIntensity 2.2→3.2（R4 视觉评估「有但弱」×1.5）；
+        // choppiness 1.12→1.2（波峰再尖一档；滑杆 step 0.05 取可表达值）。
         look: 'tropical',
-        windSpeed: 11.5,
+        windSpeed: 12,
         windDirection: 17,
-        choppiness: 1.12,
-        sparkleIntensity: 2.4,
+        choppiness: 1.2,
+        sparklePower: 450,
+        sparkleIntensity: 3.2,
+        sparkleSunGain: 0.85,
         foamScale: 0.28,
-        sssIntensity: 2.2,
+        sssIntensity: 3.2,
         depthFalloffM: 120,
         spreadBlend: 0.62,
         swellWindDirection: -25,

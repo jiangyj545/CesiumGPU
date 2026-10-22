@@ -338,7 +338,8 @@ describe( 'OCEAN_FFT_RENDER_SHADER T-TROPICAL 源串', () => {
     // T-C3 sparkle（pow 600 锐瓣 + 泡沫抑制）+ R4 坡度调制（亮带扭曲断续）
     expect( s ).toContain( 'pow(max(dot(nLit,hvT),0.0),renderParams.lookParamsA.y)' );
     expect( s ).toContain( '(1.0-foamMask*0.7)' );
-    expect( s ).toContain( '(0.55+0.9*sat(slopeAmp*2.0))' );
+    // R5 回调：0.55+0.9×K2.0 杀闪点过头（c>200 17008→96），基线 0.82 温和调制
+    expect( s ).toContain( '(0.82+0.6*sat(slopeAmp*1.4))' );
     // T-C4 宽带 fresnel（power 2.2 可调）+ 旧 spec 清零（双高光防叠加）
     expect( s ).toContain( 'fresnel=0.02+0.98*pow(1.0-ndv,renderParams.lookParamsA.x)' );
     expect( s ).toContain( 'spec=0.0' );

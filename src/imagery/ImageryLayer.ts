@@ -281,6 +281,14 @@ export class ImageryLayer {
     }
 
     this._selected = selected;
+
+    // Render-set eviction guard (2026-10-22 flicker fix): a wide view can
+    // select more tiles than the texture-cache capacity — without protection
+    // every incoming texture evicts a SELECTED tile, whose primitive is then
+    // dropped (or terrain draping falls back to the 1×1 placeholder) until
+    // refetch lands: an endless evict→refetch→rebuild flicker loop. Selected
+    // tiles are budget-exempt; capacity still bounds the prefetch cache.
+    this._cache.protectRenderSet(selected.map(entry => entry.tile.key));
   }
 
   /**

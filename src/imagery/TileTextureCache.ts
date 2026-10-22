@@ -72,6 +72,8 @@ export class TileTextureCache {
    * (see Globe._syncTerrainPrimitives) when its primitive is destroyed.
    */
   private _pins = new Set<string>();
+  /** Current render set (selected tiles) — replaced wholesale each frame (see {@link protectRenderSet}). */
+  private _renderProtected = new Set<string>();
   private _frameIndex = 0;
 
   private _hits = 0;
@@ -151,6 +153,7 @@ export class TileTextureCache {
     }
     this._entries.clear();
     this._pins.clear();
+    this._renderProtected.clear();
     for (const item of this._pendingDestroy) item.texture.destroy();
     this._pendingDestroy.length = 0;
   }
@@ -169,6 +172,26 @@ export class TileTextureCache {
   /** Release a pin when the referencing primitive is destroyed/replaced. */
   unpin(key: string): void {
     this._pins.delete(key);
+  }
+
+  /**
+   * Declare the current render set (selected imagery tiles). Entries in this
+   * set are exempt from LRU eviction, exactly like {@link pin} — but the set
+   * is replaced wholesale every frame by {@link ImageryLayer.update}, so it
+   * tracks selection changes without leaking pins.
+   *
+   * 2026-10-22 flicker root cause: a wide z14 view selects ~259 tiles against
+   * the default capacity of 200 — every incoming texture then evicted 4–6
+   * SELECTED tiles per frame, whose primitives were dropped / draping fell
+   * back to the 1×1 placeholder until refetch — an endless
+   * evict→refetch→rebuild cycle visible as flicker. Protecting the render
+   * set makes capacity govern only the prefetch/warm cache; protected keys
+   * are budget-exempt (same as pins), so a fully-selected cache may exceed
+   * the nominal capacity — bounded by the selection cap itself.
+   */
+  protectRenderSet(keys: Iterable<string>): void {
+    this._renderProtected.clear();
+    for (const key of keys) this._renderProtected.add(key);
   }
 
   /**
@@ -211,9 +234,10 @@ export class TileTextureCache {
     }
   }
 
-  /** Coarse (fallback-chain) tiles and runtime pins are exempt from eviction. */
+  /** Coarse (fallback-chain) tiles, runtime pins and the render set are exempt from eviction. */
   private _isPinned(key: string): boolean {
     if (this._pins.has(key)) return true;
+    if (this._renderProtected.has(key)) return true;
     // Keys are "{level}/{x}/{y}" — the leading number is the zoom level.
     const slash = key.indexOf('/');
     if (slash <= 0) return false;

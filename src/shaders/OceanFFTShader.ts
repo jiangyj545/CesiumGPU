@@ -1134,13 +1134,15 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     // sunIntensity 0.4 增益走 lookTrans.x），远处淡出、泡沫面抑制
     // （surfing sparkleReduction = 1 - foam*0.7）；叠加 bloom 成细密金色闪点。
     // R4 亮带断续（差距4：闪带窄而均匀，缺大涌浪调制的扭曲）：乘波面局部
-    // 坡度幅度调制（4 级联累计 slopeX/Z 现成量，K=2 视觉校准）——坡度大
-    //（浪面扭曲）处闪、平镜面处暗，均匀亮带 → 自然扭曲断续。
+    // 坡度幅度调制（4 级联累计 slopeX/Z 现成量）——坡度大（浪面扭曲）处闪、
+    // 平镜面处暗，均匀亮带 → 自然扭曲断续。R5 回调：0.55+0.9×K2.0 把闪点
+    // 密度杀过头（实测下 1/3 c>200 从 R3 17008 → 96），基线 0.82 + 温和调制
+    //（峰值仍 1.42）恢复 glitter 密度、保留宽窄变化。
     let hvT = normalize( viewDir + sunDir );
     let slopeAmp = length( vec2<f32>( slopeX, slopeZ ) );
     let spark = pow( max( dot( nLit, hvT ), 0.0 ), renderParams.lookParamsA.y )
       * renderParams.lookParamsA.z * renderParams.lookTrans.x
-      * ( 0.55 + 0.9 * sat( slopeAmp * 2.0 ) )
+      * ( 0.82 + 0.6 * sat( slopeAmp * 1.4 ) )
       * smoothstep( 2.0, 8.0, distM ) * ( 1.0 - smoothstep( 800.0, 2400.0, distM ) )
       * ( 1.0 - foamMask * 0.7 );
     // T-C5 合成对齐 surfing：反射走 T1 skyView LUT 同源辐射（bandCalm 群谷压
@@ -1231,7 +1233,10 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   //（vZen→0）雾全保——掠视 R2 已 9/10 达标不扰动；default 档 lookShallow.x
   // ≤0.5 → select 恒 1，逐字节零回归。
   let vZen = abs( dot( viewDir, atmUp ) );
-  let hazeScale = mix( 1.0,
+  // R5：掠射端（vZen→0）tropical 也微压 0.85——视觉模型把地平线低频浅色
+  // 雾带误读为「泡沫条带」（实测泡沫占比仅 0.8%，条带实为雾）。default 档
+  // lookShallow.x=0 → step=0 且 select 恒 1，mix(1,1) 逐字节零回归。
+  let hazeScale = mix( 1.0 - 0.15 * step( 0.5, renderParams.lookShallow.x ),
     select( 1.0, renderParams.lookParamsC.x, renderParams.lookShallow.x > 0.5 ),
     vZen );
   col = mix( col, fogCol, fog * 0.96 * hazeScale );
