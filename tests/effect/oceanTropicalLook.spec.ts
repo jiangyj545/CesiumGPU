@@ -177,16 +177,16 @@ beforeAll( () => {
 
 describe( 'oceanSrgbToLinear（T-TROPICAL 色域换算）', () => {
   it( 'tropical preset 三色 sRGB → 线性 RGB（手算基准，1e-3 级）', () => {
-    // #117778：R=17/255→((0.0667+0.055)/1.055)^2.4、G=119/255、B=120/255
-    const shallow = oceanSrgbToLinear( '#117778' );
-    expect( shallow[0] ).toBeCloseTo( 0.0056, 3 );
-    expect( shallow[1] ).toBeCloseTo( 0.1845, 3 );
-    expect( shallow[2] ).toBeCloseTo( 0.1878, 3 );
-    // #084c59：R=8/255 ≤ 0.04045 走线性段 /12.92
-    const deep = oceanSrgbToLinear( '#084c59' );
-    expect( deep[0] ).toBeCloseTo( 0.0024, 3 );
-    expect( deep[1] ).toBeCloseTo( 0.0723, 3 );
-    expect( deep[2] ).toBeCloseTo( 0.0999, 3 );
+    // #3f97a4（R7 参考色板：按参考近景 62,125,133 / sat≈0.53 降饱和）
+    const shallow = oceanSrgbToLinear( '#3f97a4' );
+    expect( shallow[0] ).toBeCloseTo( 0.0497, 3 );
+    expect( shallow[1] ).toBeCloseTo( 0.3095, 3 );
+    expect( shallow[2] ).toBeCloseTo( 0.3712, 3 );
+    // #1c5a63（R7 开阔海面深水：近景 hue 187 / lum≈86）
+    const deep = oceanSrgbToLinear( '#1c5a63' );
+    expect( deep[0] ).toBeCloseTo( 0.0116, 3 );
+    expect( deep[1] ).toBeCloseTo( 0.1022, 3 );
+    expect( deep[2] ).toBeCloseTo( 0.1248, 3 );
     // #2ab29d
     const trans = oceanSrgbToLinear( '#2ab29d' );
     expect( trans[0] ).toBeCloseTo( 0.0232, 3 );
@@ -214,31 +214,33 @@ describe( 'OceanFFTWater look=tropical UBO 注入', () => {
     const rp = rpAt( h, -1 );
     expect( rp.length ).toBe( OCEAN_RENDER_PARAMS_UBO_BYTES / 4 ); // 56 f32
     expect( rp[RP_LOOK_ON] ).toBe( 1 );
-    // shallow #117778 线性
-    expect( rp[RP_SHALLOW] ).toBeCloseTo( 0.0056, 3 );
-    expect( rp[RP_SHALLOW + 1] ).toBeCloseTo( 0.1845, 3 );
-    expect( rp[RP_SHALLOW + 2] ).toBeCloseTo( 0.1878, 3 );
-    // deep #084c59 线性
-    expect( rp[RP_DEEP] ).toBeCloseTo( 0.0024, 3 );
-    expect( rp[RP_DEEP + 1] ).toBeCloseTo( 0.0723, 3 );
-    expect( rp[RP_DEEP + 2] ).toBeCloseTo( 0.0999, 3 );
-    // transmission #2ab29d 线性 + sparkle 太阳增益 0.4
-    expect( rp[RP_SPARK_SUN] ).toBeCloseTo( 0.4, 6 );
+    // shallow #3f97a4 线性
+    expect( rp[RP_SHALLOW] ).toBeCloseTo( 0.0497, 3 );
+    expect( rp[RP_SHALLOW + 1] ).toBeCloseTo( 0.3095, 3 );
+    expect( rp[RP_SHALLOW + 2] ).toBeCloseTo( 0.3712, 3 );
+    // deep #1c5a63 线性
+    expect( rp[RP_DEEP] ).toBeCloseTo( 0.0116, 3 );
+    expect( rp[RP_DEEP + 1] ).toBeCloseTo( 0.1022, 3 );
+    expect( rp[RP_DEEP + 2] ).toBeCloseTo( 0.1248, 3 );
+    // transmission #2ab29d 线性 + sparkle 太阳增益 0.6
+    expect( rp[RP_SPARK_SUN] ).toBeCloseTo( 0.9, 6 );
     expect( rp[RP_TRANS] ).toBeCloseTo( 0.0232, 3 );
     expect( rp[RP_TRANS + 1] ).toBeCloseTo( 0.4452, 3 );
     expect( rp[RP_TRANS + 2] ).toBeCloseTo( 0.3372, 3 );
-    // 标量参数（surfing tropical preset）
-    expect( rp[RP_FRESNEL_POW] ).toBeCloseTo( 2.2, 6 );
-    expect( rp[RP_SPARKLE_POW] ).toBeCloseTo( 600, 6 );
-    expect( rp[RP_SPARKLE_INT] ).toBeCloseTo( 1.8, 6 );
-    expect( rp[RP_FOAM_SCALE] ).toBeCloseTo( 0.25, 6 );
-    expect( rp[RP_SSS_INT] ).toBeCloseTo( 1.2, 6 );
+    // 标量参数（R7 热带参考档 preset）
+    expect( rp[RP_FRESNEL_POW] ).toBeCloseTo( 7.5, 6 );
+    expect( rp[RP_SPARKLE_POW] ).toBeCloseTo( 6000, 6 );
+    expect( rp[RP_SPARKLE_INT] ).toBeCloseTo( 10.0, 6 );
+    expect( rp[RP_FOAM_SCALE] ).toBeCloseTo( 0.55, 6 );
+    expect( rp[RP_SSS_INT] ).toBeCloseTo( 2.0, 6 );
     expect( rp[RP_SSS_POW] ).toBeCloseTo( 3.5, 6 );
-    expect( rp[RP_DEPTH_OFF] ).toBeCloseTo( 57, 6 );
-    expect( rp[RP_DEPTH_FALL] ).toBeCloseTo( 200, 6 );
-    // lookParamsC（R3）：俯视雾压制 / 波痕明暗（tropical 默认）
-    expect( rp[RP_HAZE_SCALE] ).toBeCloseTo( 0.55, 6 );
-    expect( rp[RP_RIPPLE_STRENGTH] ).toBeCloseTo( 0.45, 6 );
+    expect( rp[RP_DEPTH_OFF] ).toBeCloseTo( 1, 6 );
+    expect( rp[RP_DEPTH_FALL] ).toBeCloseTo( 22, 6 );
+    // lookParamsC（R3）：俯视雾压制 / 波痕明暗（tropical 默认） / 圆盘半径
+    expect( rp[RP_HAZE_SCALE] ).toBeCloseTo( 0.70, 6 );
+    expect( rp[RP_RIPPLE_STRENGTH] ).toBeCloseTo( 0.5, 6 );
+    expect( rp[54] ).toBeCloseTo( 40000, 6 ); // horizonRadiusKm 40 → MSL 圆盘半径
+    expect( rp[55] ).toBe( 0 );
   } );
 
   it( '细粒度覆盖：sRGB 分量覆盖 + 标量覆盖写入 UBO', () => {

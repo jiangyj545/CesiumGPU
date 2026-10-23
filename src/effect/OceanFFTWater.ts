@@ -78,10 +78,18 @@ export interface OceanFFTWaterOptions {
   context: Context;
   /** 海面中心经纬度（度），必填。 */
   center: [number, number];
-  /** 海面边长（公里，正方形网格）。Default: `2.5` */
+  /** 海面边长（公里，正方形网格）。Default: `2.5`。look='tropical' 时改用
+   *  `horizonRadiusKm` 的极坐标圆盘网格（本字段只影响 default 档） */
   extentKm?: number;
   /** 每边网格段数（>= 2）。Default: `256` */
   segments?: number;
+  /** tropical 档极坐标圆盘海面半径（公里）：覆盖真地平线（眼高 40m ≈22.5km）
+   *  并留 500m alpha 收边余量；半径 2km 内环向格距 ≤50m。
+   *  40km 而非更大：球面海面在真地平线之后仍投影在地平线下方（60km 处低于
+   *  切平面 282m ≈ 屏幕 1.5px），圆盘越大，背景（球体影像）从海面上缘露出的
+   *  缝隙越宽；40km 时仅 ~0.5px。
+   *  default 档不消费（仍用 extentKm 方格）。Default: `40` */
+  horizonRadiusKm?: number;
   /** 水位（米，折入 ECEF 模长）。Default: `0` */
   waterLevel?: number;
   /** 风速 m/s（驱动 local 波浪系统谱）。Default: `8` */
@@ -104,35 +112,37 @@ export interface OceanFFTWaterOptions {
    *  SSS / Blinn-Phong sparkle / 宽带 fresnel / 泡沫 ×0.25 弱化），颜色等参数
    *  走下方细粒度覆盖。Default: `'default'`（现有渲染路径，零回归）。 */
   look?: 'default' | 'tropical';
-  /** tropical 档浅水色（sRGB `#rrggbb` 或线性 [r,g,b]）。Default: `'#117778'` */
+  /** tropical 档浅水色（sRGB `#rrggbb` 或线性 [r,g,b]）。Default: `'#3f97a4'`
+   *  （参考站近景水实测 62,125,133 / sat≈0.53：比 surf 原色 #2fb3c4 降饱和，
+   *  否则 ACES 后接近纯青绿 sat≈1.0）。 */
   shallowColor?: string | [number, number, number];
-  /** tropical 档深水色。Default: `'#084c59'` */
+  /** tropical 档深水色。Default: `'#1c5a63'`（开阔海面近景 hue 187 / lum≈86） */
   deepColor?: string | [number, number, number];
   /** tropical 档透射色（SSS mix 目标，逆光波峰青碧）。Default: `'#2ab29d'` */
   transmissionColor?: string | [number, number, number];
-  /** tropical 档 SSS 总强度。Default: `1.2` */
+  /** tropical 档 SSS 总强度。Default: `2.0` */
   sssIntensity?: number;
   /** tropical 档 SSS wrap-lighting 幂。Default: `3.5` */
   sssPower?: number;
-  /** tropical 档 sparkle 锐瓣幂（Blinn-Phong shininess）。Default: `600` */
+  /** tropical 档 sparkle 锐瓣幂（Blinn-Phong shininess）。Default: `6000` */
   sparklePower?: number;
-  /** tropical 档 sparkle 强度。Default: `1.8` */
+  /** tropical 档 sparkle 强度。Default: `10.0` */
   sparkleIntensity?: number;
-  /** tropical 档 sparkle 太阳增益（≈ surfing sun.intensity）。Default: `0.4` */
+  /** tropical 档 sparkle 太阳增益（≈ surfing sun.intensity）。Default: `0.9` */
   sparkleSunGain?: number;
-  /** tropical 档 fresnel 幂（(1-cosθ)^p 掠射带宽度）。Default: `2.2` */
+  /** tropical 档 fresnel 幂（(1-cosθ)^p 掠射带宽度）。Default: `7.5` */
   fresnelPower?: number;
-  /** tropical 档泡沫最终缩放。Default: `0.25` */
+  /** tropical 档泡沫最终缩放（不透明度乘子）。Default: `0.55` */
   foamScale?: number;
-  /** tropical 档三色混合起点水深（米）。Default: `57` */
+  /** tropical 档三色混合起点水深（米）。Default: `1` */
   depthOffsetM?: number;
-  /** tropical 档三色混合终点水深（米）。Default: `200` */
+  /** tropical 档三色混合终点水深（米）。Default: `22` */
   depthFalloffM?: number;
   /** tropical 档远距雾/大气混合压制（按视线天顶角加权：俯视雾 ×hazeScale、
-   *  掠视雾全保）。R3 俯视泛白治疗。Default: `0.55`（default 档恒 1 零回归） */
+   *  掠视雾全保）。R3 俯视泛白治疗。Default: `0.70`（default 档恒 1 零回归） */
   hazeScale?: number;
   /** tropical 档波痕明暗强度（波面朝太阳坡亮/背坡暗的水色调制，0=关）。
-   *  R3 俯视层次增强。Default: `0.45`（default 档恒 0 零回归） */
+   *  R3 俯视层次增强。Default: `0.5`（default 档恒 0 零回归） */
   rippleStrength?: number;
   /** 波谱覆盖：local 系统方向发散混合（0-1，越大方向越发散）。R4 消近景
    *  条带感（方向一致性过强）。Default: `0.85`（现值不变，零回归） */
@@ -293,6 +303,8 @@ export class OceanFFTWater implements IPass {
   private _camera: Camera | null = null;
   private readonly _extentKm: number;
   private readonly _segments: number;
+  /** tropical 圆盘海面半径（米；0 = default 档方格网格，不消费）。 */
+  private readonly _seaRadiusM: number;
   private readonly _waterLevel: number;
   private _choppiness: number;
   private _timeScale: number;
@@ -395,6 +407,10 @@ export class OceanFFTWater implements IPass {
   private _bgAtmoUboS: GPUBuffer | null = null;
   /** Track C 缓存键：云影贴图视图身份（绑定/解绑、CloudLayer 失效后变化）。 */
   private _bgCloudTex: GPUTextureView | null = null;
+  /** T-TROPICAL 不透明场景遮挡源（GBuffer worldPos 视图 getter）。 */
+  private _occluderSource: (() => GPUTextureView | null) | null = null;
+  /** 遮挡视图缓存键（worldPos view 在 resize 后换身份）。 */
+  private _bgOccluder: GPUTextureView | null = null;
   /** L3：阴影未激活时的占位资源（1×1 depth 2d-array + 全零 UBO + comparison）。 */
   private _shadowFallbackTex: GPUTexture | null = null;
   private _shadowFallbackView: GPUTextureView | null = null;
@@ -449,6 +465,10 @@ export class OceanFFTWater implements IPass {
     this._context   = context;
     this._extentKm  = options.extentKm ?? 2.5;
     this._segments  = segments;
+    // T-TROPICAL：40km 极坐标圆盘（≥ 真地平线距离）；default 档为 0（方格网格）
+    this._seaRadiusM = options.look === 'tropical'
+      ? Math.max( 1, options.horizonRadiusKm ?? 40 ) * 1000
+      : 0;
     this._waterLevel = options.waterLevel ?? 0;
     this._choppiness = options.choppiness ?? 0.9;
     this._timeScale  = options.timeScale ?? 1;
@@ -490,36 +510,48 @@ export class OceanFFTWater implements IPass {
     this._paramsF32.set(enu.up, P_UP);
 
     this._updateSpectrumUniforms();
-    this._geometry = OceanFFTWater._buildGeometry(
-      lon, lat, this._extentKm, this._segments, this._waterLevel
-    );
+    if ( this._seaRadiusM > 0 ) {
+      // T-TROPICAL 极坐标圆盘：单张连续网格覆盖到 60km（无方格外缘硬边）。
+      // 环向 256 扇区 → 半径 2km 内格距 ≤49m；径向环距按指数增长（近场 ~2m
+      // 级、远场 ~6km 级），既有近景细节又不爆顶点数（≈7.4 万顶点）。
+      this._geometry = OceanFFTWater._buildRadialGeometry(
+        lon, lat, this._seaRadiusM, 256, this._waterLevel
+      );
+    } else {
+      this._geometry = OceanFFTWater._buildGeometry(
+        lon, lat, this._extentKm, this._segments, this._waterLevel
+      );
+    }
 
-    // ── T-TROPICAL look 档：渲染参数写入 RenderParams UBO 扩容段 RP[32..51]。
+    // ── T-TROPICAL look 档：渲染参数写入 RenderParams UBO 扩容段 RP[32..55]。
     // 构造期一次写入，render() 每帧全量 writeBuffer 自动携带。default 档
-    // RP[32..51] 保持全零 → shader look 开关短路，UBO 前 128B 逐字节与旧布局
+    // RP[32..55] 保持全零 → shader look 开关短路，UBO 前 128B 逐字节与旧布局
     // 一致（零回归）。
     if ( options.look === 'tropical' ) {
       const RP = this._renderParamsF32;
-      const linShallow = oceanSrgbToLinear( options.shallowColor ?? '#117778' );
-      const linDeep    = oceanSrgbToLinear( options.deepColor ?? '#084c59' );
+      const linShallow = oceanSrgbToLinear( options.shallowColor ?? '#3f97a4' );
+      const linDeep    = oceanSrgbToLinear( options.deepColor ?? '#1c5a63' );
       const linTrans   = oceanSrgbToLinear( options.transmissionColor ?? '#2ab29d' );
       RP[32] = 1;                 // look 开关
       RP[33] = linShallow[0]; RP[34] = linShallow[1]; RP[35] = linShallow[2];
       RP[36] = 0;                 // 保留
       RP[37] = linDeep[0];    RP[38] = linDeep[1];    RP[39] = linDeep[2];
-      RP[40] = options.sparkleSunGain ?? 0.4;  // sparkle 太阳增益
+      RP[40] = options.sparkleSunGain ?? 0.9;  // sparkle 太阳增益
       RP[41] = linTrans[0];   RP[42] = linTrans[1];   RP[43] = linTrans[2];
-      RP[44] = options.fresnelPower ?? 2.2;
-      RP[45] = options.sparklePower ?? 600;
-      RP[46] = options.sparkleIntensity ?? 1.8;
-      RP[47] = options.foamScale ?? 0.25;
-      RP[48] = options.sssIntensity ?? 1.2;
+      RP[44] = options.fresnelPower ?? 7.5;
+      RP[45] = options.sparklePower ?? 6000;
+      RP[46] = options.sparkleIntensity ?? 10.0;
+      RP[47] = options.foamScale ?? 0.55;
+      RP[48] = options.sssIntensity ?? 2.0;
       RP[49] = options.sssPower ?? 3.5;
-      RP[50] = options.depthOffsetM ?? 57;
-      RP[51] = options.depthFalloffM ?? 200;
-      // lookParamsC（R3 俯视泛白/偏平治疗）：hazeScale 俯视雾压制 / 波痕明暗
-      RP[52] = options.hazeScale ?? 0.55;
-      RP[53] = options.rippleStrength ?? 0.45;
+      RP[50] = options.depthOffsetM ?? 1;
+      RP[51] = options.depthFalloffM ?? 22;
+      // lookParamsC（R3 俯视泛白/偏平治疗）：hazeScale 俯视雾压制 / 波痕明暗 /
+      // 圆盘半径（FS 外缘 500m alpha 收边） / w 保留
+      RP[52] = options.hazeScale ?? 0.70;
+      RP[53] = options.rippleStrength ?? 0.5;
+      RP[54] = this._seaRadiusM;
+      RP[55] = 0;
     }
   }
 
@@ -655,6 +687,25 @@ export class OceanFFTWater implements IPass {
    */
   bindCloudShadow(source: (() => CloudShadowInfo | null) | null): void {
     this._cloudShadowSource = source;
+  }
+
+  /**
+   * 注入不透明场景遮挡源（T-TROPICAL 船体/地形入画；`() => GBuffer worldPos
+   * 视图`，通常 `viewer.scene.gbufferPass.textures.worldPosView`）。
+   *
+   * 海面 pass 没有深度附件、且绘制在 Lighting 之后 → 船体会被海面完整覆盖
+   * （只剩 CSSM 阴影的「黑剪影/消失」）。绑定后 FS 按「场景世界位置到相机
+   * 距离 < 本水面片元距离 - 容差」判定遮挡并 discard：容差覆盖波形自身
+   * ±1.5m 与距离精度，天然绕开「海面基准与球面共面（波谷）」的深度冲突。
+   * 未调用 / null → 绑 1×1 零占位（worldPos=0 → 判定短路），default 档 shader
+   * 也不采样（零回归）。
+   */
+  setOccluderView(source: (() => GPUTextureView | null) | null): void {
+    if (source !== null && typeof source !== 'function') {
+      throw new Error('OceanFFTWater.setOccluderView: 须函数或 null');
+    }
+    this._occluderSource = source;
+    this._renderBindGroup = null;
   }
 
   /** 天空反射开关（featureFlags bit0；须先 bindAtmosphere 才生效）。 */
@@ -974,11 +1025,13 @@ export class OceanFFTWater implements IPass {
     const atmoUbS = atmoReady ? atmoSrc!.skyParams! : this._atmoFallbackUBO!;
     // Track C：云影贴图视图（未激活 → 1×1 黑占位；UBO/采样器身份恒定不进键）
     const cloudView = cloudSrc?.view ?? this._cloudFallbackView!;
+    // T-TROPICAL：GBuffer worldPos 视图（未绑定 → 1×1 零占位 → 遮挡判定短路）
+    const occluderView = this._occluderSource?.() ?? this._fallbackView!;
     if (!this._renderBindGroup || foamView !== this._bgFoam || wakeView !== this._bgWake
       || histView !== this._bgHist || shUbo !== this._bgShadow || seabedView !== this._bgSeabed
       || atmoSv !== this._bgAtmoSv || atmoTr !== this._bgAtmoTr
       || atmoUbA !== this._bgAtmoUboA || atmoUbS !== this._bgAtmoUboS
-      || cloudView !== this._bgCloudTex) {
+      || cloudView !== this._bgCloudTex || occluderView !== this._bgOccluder) {
       this._renderBindGroup = this._context.device.createBindGroup({
         layout: this._renderBindGroupLayout,
         entries: [
@@ -1007,6 +1060,8 @@ export class OceanFFTWater implements IPass {
           { binding: 20, resource: cloudView },
           { binding: 21, resource: { buffer: this._cloudShadowUBO! } },
           { binding: 22, resource: this._clampSampler! },
+          // T-TROPICAL：不透明场景遮挡（船体/地形入画；textureLoad，无采样器）
+          { binding: 23, resource: occluderView },
         ],
       });
       this._bgFoam = foamView;
@@ -1019,6 +1074,7 @@ export class OceanFFTWater implements IPass {
       this._bgAtmoUboA = atmoUbA;
       this._bgAtmoUboS = atmoUbS;
       this._bgCloudTex = cloudView;
+      this._bgOccluder = occluderView;
     }
 
     const camData = new Float32Array(CAMERA_UBO_SIZE / 4);
@@ -1098,6 +1154,7 @@ export class OceanFFTWater implements IPass {
     this._cloudFallbackView = null;
     this._cloudShadowUBO = null;
     this._bgCloudTex = null;
+    this._bgOccluder = null;
     this._clampSampler = null;
     this._vertexBuffer = null;
     this._indexBuffer = null;
@@ -1415,6 +1472,9 @@ export class OceanFFTWater implements IPass {
           { binding: 20, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
           { binding: 21, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: CLOUD_SHADOW_PARAMS_UBO_BYTES } },
           { binding: 22, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+          // T-TROPICAL 不透明场景遮挡：GBuffer worldPos（rgba32float，不可过滤 →
+          // FS 用 textureLoad 取最近 texel；未绑定时 1×1 零占位短路）
+          { binding: 23, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
         ],
       });
 
@@ -1621,6 +1681,96 @@ export class OceanFFTWater implements IPass {
         indices[o++] = r0 + 1;
         indices[o++] = r1;
         indices[o++] = r1 + 1;
+      }
+    }
+    return { vertices, indices, indexCount: indices.length };
+  }
+
+  /**
+   * T-TROPICAL 极坐标圆盘网格 → 归一化 ECEF 顶点（每顶点 [ecefXYZ, planeX_m,
+   * planeZ_m]，与方格网格同顶点布局，渲染管线/位移采样完全复用）。
+   *
+   * 目的：原方格网格只有 ±extentKm/2（96 页 10km → ±5km），而 14m 眼高的真
+   * 地平线 ≈13.4km、40m 眼高 ≈22.5km——网格外缘就是海天交界，FS 在网格边缘
+   * 的雾/法线全部硬切（地平线竖条根因之一）。圆盘把海面连续铺到 60km：
+   *   · 环向 256 扇区 → r≤2km 弧长格距 ≤49m（近场细节与方格网格同级）；
+   *   · 径向环距指数增长（近场 ~2m 起、2km 外每环 ×1.1），远场 ~6km/环——
+   *     远场法线已在 shader 里淡出为纯镜面，大三角形无观感代价。
+   * 单张网格无接缝，配合 FS 的外缘 500m alpha 收边（lookParamsC.z）无硬边。
+   */
+  private static _buildRadialGeometry(
+    centerLon: number,
+    centerLat: number,
+    radiusM: number,
+    sectors: number,
+    waterLevel: number
+  ): { vertices: Float32Array; indices: Uint32Array; indexCount: number } {
+    const rings: number[] = [];
+    let r = 2.0;
+    while (r < 2000 && rings.length < 400) {
+      rings.push(r);
+      r *= 1.028;
+    }
+    while (r < radiusM && rings.length < 460) {
+      rings.push(r);
+      r *= 1.10;
+    }
+    rings.push(radiusM);
+
+    const ringCount = rings.length;
+    const vertCount = 1 + ringCount * sectors;
+    const vertices = new Float32Array(vertCount * 5);
+    const metersPerDegLon = METERS_PER_DEG * Math.cos((centerLat * Math.PI) / 180);
+    const tmp: [number, number, number] = [0, 0, 0];
+
+    // 0 号顶点 = 圆盘中心
+    ecefFromLonLatHeight(centerLon, centerLat, waterLevel, tmp);
+    vertices[0] = tmp[0];
+    vertices[1] = tmp[1];
+    vertices[2] = tmp[2];
+    vertices[3] = 0;
+    vertices[4] = 0;
+
+    for (let ir = 0; ir < ringCount; ir++) {
+      const rad = rings[ir];
+      for (let is = 0; is < sectors; is++) {
+        const ang = (is / sectors) * Math.PI * 2;
+        const planeX = Math.cos(ang) * rad;
+        const planeZ = Math.sin(ang) * rad;
+        const lon = centerLon + planeX / metersPerDegLon;
+        const lat = centerLat + planeZ / METERS_PER_DEG;
+        ecefFromLonLatHeight(lon, lat, waterLevel, tmp);
+        const v = (1 + ir * sectors + is) * 5;
+        vertices[v + 0] = tmp[0];
+        vertices[v + 1] = tmp[1];
+        vertices[v + 2] = tmp[2];
+        vertices[v + 3] = planeX;
+        vertices[v + 4] = planeZ;
+      }
+    }
+
+    // 中心扇形 + 环间四边形（逆时针序与方格网格一致；海面管线 cullMode none，
+    // 序只影响调试可读性——保持同一约定便于后续几何对照）。
+    const triCount = sectors + (ringCount - 1) * sectors * 2;
+    const indices = new Uint32Array(triCount * 3);
+    let o = 0;
+    for (let is = 0; is < sectors; is++) {
+      const n = (is + 1) % sectors;
+      indices[o++] = 0;
+      indices[o++] = 1 + n;
+      indices[o++] = 1 + is;
+    }
+    for (let ir = 0; ir < ringCount - 1; ir++) {
+      const baseIn = 1 + ir * sectors;
+      const baseOut = 1 + (ir + 1) * sectors;
+      for (let is = 0; is < sectors; is++) {
+        const n = (is + 1) % sectors;
+        indices[o++] = baseIn + is;
+        indices[o++] = baseIn + n;
+        indices[o++] = baseOut + is;
+        indices[o++] = baseIn + n;
+        indices[o++] = baseOut + n;
+        indices[o++] = baseOut + is;
       }
     }
     return { vertices, indices, indexCount: indices.length };

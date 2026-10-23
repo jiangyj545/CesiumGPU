@@ -465,7 +465,7 @@ describe('CloudShader 源串结构', () => {
     expect(CLOUD_RENDER_WGSL).toContain('cirrus.params0.x > 0.5');
     expect(CLOUD_RENDER_WGSL).toContain('cirrus.planeCenter.w');
     // alpha 压 ≤ 0.5。
-    expect(CLOUD_RENDER_WGSL).toContain('min(clamp(cDens * cirrus.params0.z, 0.0, 1.0), 0.5)');
+    expect(CLOUD_RENDER_WGSL).toContain('min(clamp(cDens * cirrus.params0.z, 0.0, 1.0), 0.42)');
     // 烘焙：卷云密度 ×0.3 低权重叠加（enable 闸）。
     expect(CLOUD_SHADOW_BAKE_WGSL).toContain('cirrusDensity');
     expect(CLOUD_SHADOW_BAKE_WGSL).toContain('clamp(dens + cD * 0.3, 0.0, 1.0)');

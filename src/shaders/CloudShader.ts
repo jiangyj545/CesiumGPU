@@ -137,7 +137,9 @@ fn cloudFieldN(planeM: vec2<f32>, windKm: vec2<f32>, aa: f32, fw: f32) -> f32 {
 fn cloudDensity(planeM: vec2<f32>, coverage: f32, windKm: vec2<f32>, aa: f32, fw: f32) -> f32 {
   let n = cloudFieldN(planeM, windKm, aa, fw);
   let thr = mix(0.78, 0.30, clamp(coverage, 0.0, 1.0));
-  return smoothstep(thr, thr + 0.10, n);
+  // R7-R2：边缘过渡 0.10→0.18 —— 检查员「扁平白片/硬边」：更宽的 density
+  // 梯度让云缘半透明羽化，同时压低薄缘亮度。
+  return smoothstep(thr, thr + 0.18, n);
 }
 
 /**
@@ -295,14 +297,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       if (cDens > 0.004) {
         // 卷云冰晶薄层：正午近白，黄昏染金橙（卷云比主云更受低角度阳光）。
         let duskC = 1.0 - clamp(dot(cloud.sunDirection.xyz, up) * 1.6, 0.0, 1.0);
-        var cCol = mix(vec3<f32>(1.04, 1.02, 1.0), vec3<f32>(1.25, 0.6, 0.38), duskC * 0.9);
+        var cCol = mix(vec3<f32>(0.88, 0.87, 0.86), vec3<f32>(1.05, 0.52, 0.32), duskC * 0.9);
         // 卷云银边：视线朝太阳时纤维丝前向散射增亮。
         let cSilver = pow(clamp(dot(rd, cloud.sunDirection.xyz), 0.0, 1.0), 4.0) * (1.0 - cDens);
         cCol += vec3<f32>(cSilver * 0.6);
         // 卷云仰角门（2026-09-29 用户截图"橙白横带"）：卷云高 ~8km，贴水
         // 平视时交点极远 → 压成地平线上方一条突兀橙白线；仰角 <~3.4° 渐隐。
         let cirrFade = smoothstep(0.06, 0.20, el);
-        let cA = min(clamp(cDens * cirrus.params0.z, 0.0, 1.0), 0.5) * horizon * cirrFade;
+        let cA = min(clamp(cDens * cirrus.params0.z, 0.0, 1.0), 0.42) * horizon * cirrFade;
         premul = cCol * cA + premul * (1.0 - cA);
         alpha = cA + alpha * (1.0 - cA);
       }
@@ -359,13 +361,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let silver = pow(clamp(dot(rd, cloud.sunDirection.xyz), 0.0, 1.0), 4.0) * (1.0 - dens) * 0.85;
 
       // 太阳高度染色：正午近云顶白，黄昏整体染橙红（transmittance 近似）。
+      // R7：旧式 1 - clamp(sunUp*1.6,0,1) 在太阳仰角 12°（sunUp≈0.21）就给出
+      // dusk≈0.67 → 整片云染粉（参考站热带白天云是纯白/浅灰）。改为只有太阳
+      // 贴地平线（sunUp ≲ 6°）才进入黄昏染色：白天 dusk 恒 0，云保持中性白。
       let sunUp = dot(cloud.sunDirection.xyz, up);
-      let dusk = 1.0 - clamp(sunUp * 1.6, 0.0, 1.0);
+      let dusk = 1.0 - smoothstep( 0.02, 0.12, sunUp );
       var mCol = mix(cloud.tintHigh.rgb, cloud.tintLow.rgb, cont);
       // 太阳直接散射：Beer-Powder 能量 × 方向传播。2026-09-30 云发灰根因：
       // ×2.6 下受光面全档峰值仅 ~1.0（ACES 后 ~0.5 = 139 灰，实测 p50）；
       // ×3.4 受光面到 ~1.7（ACES ~0.83 云白），云腹仍灰蓝 → 体积感。
-      mCol = mCol * (ambient + vec3<f32>(beerPowder * 3.4 * directional));
+      mCol = mCol * (ambient + vec3<f32>(beerPowder * 1.3 * directional));
       // 银边加色（黄昏偏金），随整体 dusk 透射染色乘法耦合。
       mCol += vec3<f32>(silver) * mix(vec3<f32>(1.0, 0.98, 0.94), vec3<f32>(1.2, 0.72, 0.42), dusk);
       mCol = mix(mCol, mCol * vec3<f32>(1.3, 0.55, 0.32), dusk * 0.85);

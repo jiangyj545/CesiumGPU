@@ -548,7 +548,7 @@ struct OceanRenderParams {
   lookTrans   : vec4<f32>,  // T-TROPICAL yzw 透射色（线性 RGB） / x sparkle 太阳增益
   lookParamsA : vec4<f32>,  // T-TROPICAL x fresnelPower / y sparklePower / z sparkleIntensity / w foamScale
   lookParamsB : vec4<f32>,  // T-TROPICAL x sssIntensity / y sssPower / z depthOffset(m) / w depthFalloff(m)
-  lookParamsC : vec4<f32>,  // T-TROPICAL x hazeScale（俯视雾压制）/ y rippleStrength（波痕明暗）/ zw 保留
+  lookParamsC : vec4<f32>,  // T-TROPICAL x hazeScale（俯视雾压制）/ y rippleStrength（波痕明暗）/ z 海面圆盘半径(m，0=旧方格) / w 保留
 }
 
 @group(0) @binding(0) var<uniform> camera : CameraUniforms;
@@ -650,6 +650,9 @@ fn cssmShadowFactor(worldPos: vec3<f32>, normal: vec3<f32>, viewDist: f32) -> f3
 const EARTH_SCALE : f32 = 6378137.0;
 const OCEAN_CASCADES : i32 = ${CASCADES};
 const FOG_DIST : f32 = 9000.0;
+// T-TROPICAL 远场雾距（米）：20km 处 fog = 1 - e^(-5.7) ≈ 0.997，且雾色与天空
+// 地平线同源（tropical 分支沿视线方向采样 skyView LUT）。default 档不消费。
+const FOG_DIST_TROPICAL : f32 = 3800.0;
 // 泡沫图案世界平铺周期（米）：中频级联量级，图案不糊也不高频闪烁
 const FOAM_TILE_M : f32 = 28.0;
 // 2026-10-09 破平铺：单层 repeat 采样在 35m 俯视下出现整片相同形状的
@@ -706,6 +709,13 @@ ${ATMO_SKY_REFLECTION_WGSL}
 //（96B，布局单一来源 CloudShader.ts）/ 22 = filtering 采样器。未绑定时 CPU
 // 侧挂 1×1 黑占位 + 全零 UBO（intensity = 0 短路恒 1，零回归）。
 ${cloudShadowReceiverModule(0, 21, 20, 22)}
+
+// ── T-TROPICAL 不透明场景遮挡（船体/地形入画）─────────────────────────────
+// GBuffer worldPos（rgba32float，归一化 ECEF）。海面 pass 无深度附件且绘制在
+// Lighting 之后 → 船体被海面完整覆盖（黑剪影/消失）。这里按「场景世界位置
+// 距相机」判定遮挡：只有明显近于本水面片元的不透明像素才 discard，天然绕开
+// 海面基准与球面共面（波谷）的深度冲突。未绑定时绑 1×1 零占位 + look 门短路。
+@group(0) @binding(23) var scenePosTex : texture_2d<f32>;
 
 struct VSIn {
   @location(0) ecef : vec3<f32>,    // 归一化 ECEF 水面基准点（水位折入模长）
@@ -805,50 +815,134 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     }
   }
 
+  // T-TROPICAL 观感档开关：uniform 标量 → 下方所有分支均为 uniform control
+  // flow（textureSample 隐式导数合法）。look=0 时全部 select/if 走旧路径。
+  let lookT = renderParams.lookShallow.x > 0.5;
+  let uw = renderParams.underwater.x > 0.5;
+
   // 4 级联导数求和（斜率）+ 泡沫累计（位移纹理 alpha 通道）
   var foam = 0.0;
   var slopeX = 0.0;
   var slopeZ = 0.0;
   var divg = 0.0;
+  // 视距（归一化 → 米）在级联循环前求出：tropical 的级联距离门 / 遮挡测试都
+  // 消费它（default 档数值与旧路径完全一致，仅提前求值）。
+  let toCam = camPos - input.worldPos;
+  let distN = length( toCam );
+  let distM = distN * EARTH_SCALE;
+  let viewDir = toCam / max( distN, 1e-9 );
   // 掠射各向异性近似（2026-09-29 用户截图彩色竖条根因）：quad 隐式 LOD 是
   // 各向同性的——掠射方向（视线的平面投影）纹理被极度拉伸时沿拉伸向欠采样，
   // 8-11px 周期彩条（B 通道 ±25 摆动）。4-tap 沿视线平面方向平均 = 手动
   // aniso（tidewater 同款手法）；tap 间距按该级联 texel 步长缩放。
-  //（viewDir 在 fs 后段才声明——此处先从 camPos 自算视线方向）
-  let toCamA = camPos - input.worldPos;
-  let viewDirA = toCamA / max( length( toCamA ), 1e-9 );
-  var viewXZn = vec2<f32>( dot( viewDirA, ocean.eastDir ), dot( viewDirA, ocean.northDir ) );
+  var viewXZn = vec2<f32>( dot( viewDir, ocean.eastDir ), dot( viewDir, ocean.northDir ) );
   viewXZn = viewXZn / max( length( viewXZn ), 1e-5 );
+  // 视线平面内的垂直方向：tropical 第 4/5 tap 沿它取——掠射时「列与列」的
+  // 采样相位差恰在这个方向，只沿视线单向平均会把该差保留成竖条。
+  let viewXZp = vec2<f32>( - viewXZn.y, viewXZn.x );
+  // T-TROPICAL 远场坡度淡出：圆盘网格扩到 60km 后，2.5–6km 之外各向异性采样
+  // 与 733m 平铺谱会互相拍频（列间跳变 = 地平线竖条）。把坡度贡献平滑压到 0，
+  // 远场退化为纯天光镜面（天空反射 + 同源雾），列间差 → 0。
+  let farFade = select( 1.0, 1.0 - smoothstep( 2500.0, 6000.0, distM ), lookT );
   for ( var c = 0; c < OCEAN_CASCADES; c++ ) {
     let uv = input.planeXZ / ocean.sizes[ c ].x;
     // tap 间距 = 屏幕导数（每像素世界米数，discard 前预计算）换算到该级联
     // uv——对准混叠频率（texel×N 固定间距远大于条纹世界周期 0.5-5m，无效）。
     let duv = viewXZn * ( stepMPix * 1.5 / ocean.sizes[ c ].x );
-    let g0 = textureSample( derivTex, smp, uv, c );
-    let ga = textureSample( derivTex, smp, uv + duv, c );
-    let gb = textureSample( derivTex, smp, uv + duv * 2.0, c );
-    let gc = textureSample( derivTex, smp, uv - duv, c );
-    let g = ( g0 + ga + gb + gc ) * 0.25;
-    let f0 = textureSample( dispTex, smp, uv, c ).w;
-    let fa = textureSample( dispTex, smp, uv + duv * 1.5, c ).w;
-    let fb = textureSample( dispTex, smp, uv - duv * 1.5, c ).w;
-    foam += ( f0 + fa + fb ) / 3.0;
-    slopeX += g.x;
-    slopeZ += g.y;
-    divg += g.z + g.w; // λ(Dxx + Dzz)：水平压缩度 → 粗糙度调制
+    let duvP = viewXZp * ( stepMPix * 1.5 / ocean.sizes[ c ].x );
+    // T-TROPICAL 级联距离门（按级联平铺尺寸归一化，保留近场细节）：纹理 texel
+    // 尺寸 = size/256，2–6 倍平铺距离处淡出——7.1m 级联留到 ~14-43m、33m 级联
+    // ~66-200m、157m 级联 ~0.3-0.9km、733m 级联到远场淡出。近场 3 层起伏叠加，
+    // 中景只剩长波（细级联已亚像素，保留它们会产生沿浪脊的深色「虫状」混叠）。
+    let cw = select( 1.0, 1.0 - smoothstep( 2.0, 6.0, distM / ocean.sizes[ c ].x ), lookT );
+    var g = vec4<f32>( 0.0 );
+    var fsum = 0.0;
+    if ( lookT ) {
+      // T-TROPICAL：手动 LOD（按世界距离 / texel 尺寸平滑选 mip）。隐式
+      // textureSample 的 LOD 在掠射方向是各向异性的，相邻像素会在 mip 之间
+      // 跳变 → 水面出现块状/阶梯边的深色「虫状」混叠。手动 LOD 只随距离
+      // 连续变化，配合 5-tap 十字（沿视线 3 + 垂直视线 2）→ 平滑的远距滤波。
+      let texelM = ocean.sizes[ c ].x / 256.0;
+      let lodT = clamp( log2( max( distM / ( texelM * 400.0 ), 1.0 ) ), 0.0, 8.0 );
+      let dul = viewXZn * ( stepMPix * 1.5 / ocean.sizes[ c ].x );
+      let dup = viewXZp * ( stepMPix * 1.5 / ocean.sizes[ c ].x );
+      let t0 = textureSampleLevel( derivTex, smp, uv, c, lodT );
+      let ta = textureSampleLevel( derivTex, smp, uv + dul, c, lodT );
+      let tb = textureSampleLevel( derivTex, smp, uv + dul * 2.0, c, lodT );
+      let tc = textureSampleLevel( derivTex, smp, uv - dul, c, lodT );
+      let td = textureSampleLevel( derivTex, smp, uv + dup, c, lodT );
+      let te = textureSampleLevel( derivTex, smp, uv - dup, c, lodT );
+      g = ( t0 * 1.5 + ta + tb + tc + td + te ) * ( 1.0 / 5.5 );
+      let q0 = textureSampleLevel( dispTex, smp, uv, c, lodT ).w;
+      let qa = textureSampleLevel( dispTex, smp, uv + dul * 1.5, c, lodT ).w;
+      let qb = textureSampleLevel( dispTex, smp, uv - dul * 1.5, c, lodT ).w;
+      fsum = ( q0 + qa + qb ) / 3.0;
+    } else {
+      let g0 = textureSample( derivTex, smp, uv, c );
+      let ga = textureSample( derivTex, smp, uv + duv, c );
+      let gb = textureSample( derivTex, smp, uv + duv * 2.0, c );
+      let gc = textureSample( derivTex, smp, uv - duv, c );
+      g = ( g0 + ga + gb + gc ) * 0.25;
+      let f0 = textureSample( dispTex, smp, uv, c ).w;
+      let fa = textureSample( dispTex, smp, uv + duv * 1.5, c ).w;
+      let fb = textureSample( dispTex, smp, uv - duv * 1.5, c ).w;
+      fsum = ( f0 + fa + fb ) / 3.0;
+    }
+    foam += fsum * cw;
+    slopeX += g.x * cw;
+    slopeZ += g.y * cw;
+    divg += ( g.z + g.w ) * cw; // λ(Dxx + Dzz)：水平压缩度 → 粗糙度调制
+  }
+  slopeX *= farFade;
+  slopeZ *= farFade;
+  divg *= farFade;
+
+  // R7-R3 近场毛细波（0.2-2m 尺度）：检查员 d6-r2-nearwater 实锤近景是「平滑
+  // 绸面」——FFT 最小级联（7.1m 平铺）在 ~43m 外就淡出，近场只剩大浪。补两层
+  // 高频 vnoise 解析梯度（cell ~0.45m / 0.21m），0-100m 有效、远处淡出；
+  // default 档不进入（零回归）。
+  if ( lookT ) {
+    let capFade = 1.0 - smoothstep( 20.0, 100.0, distM );
+    if ( capFade > 0.002 ) {
+      let capE = 0.18;
+      let cp0 = input.planeXZ;
+      let cv1 = cp0 * 2.2;
+      let cv2 = cp0 * 4.7 + vec2<f32>( 11.3, 5.9 );
+      let c00 = vnoise( cv1 );
+      let c10 = vnoise( cv1 + vec2<f32>( capE * 2.2, 0.0 ) );
+      let c01 = vnoise( cv1 + vec2<f32>( 0.0, capE * 2.2 ) );
+      let d00 = vnoise( cv2 );
+      let d10 = vnoise( cv2 + vec2<f32>( capE * 4.7, 0.0 ) );
+      let d01 = vnoise( cv2 + vec2<f32>( 0.0, capE * 4.7 ) );
+      slopeX += ( ( c10 - c00 ) * 0.075 + ( d10 - d00 ) * 0.030 ) * capFade;
+      slopeZ += ( ( c01 - c00 ) * 0.075 + ( d01 - d00 ) * 0.030 ) * capFade;
+    }
+  }
+
+  // T-TROPICAL 不透明场景遮挡（船体/地形入画）：GBuffer worldPos 距相机明显
+  // 近于本水面片元 → 该像素被船体挡住，直接 discard（水面不自写深度，故用
+  // 世界位置距离而不是 depth attachment：海面基准与球面共面，深度测试会把
+  // 波谷判给球体）。容差覆盖波形自身 ±1.5m + 距离相关的精度余量，保证
+  // 水下模式（!uw 门）与海面自身不被误杀。default 档不采样（零回归）。
+  if ( lookT && !uw ) {
+    let opDim = textureDimensions( scenePosTex, 0 );
+    let opTc = clamp(
+      vec2<i32>( input.screenUV * vec2<f32>( opDim ) ),
+      vec2<i32>( 0 ), vec2<i32>( opDim ) - vec2<i32>( 1 ) );
+    let opPos = textureLoad( scenePosTex, opTc, 0 ).rgb;
+    // 背景 worldPos = 0（未写）/ 退化 → 不做遮挡
+    if ( dot( opPos, opPos ) > 0.25 ) {
+      let opDist = length( opPos - camPos ) * EARTH_SCALE;
+      let occTol = 1.2 + 0.004 * distM + max( - input.waveH, 0.0 ) * 1.5;
+      if ( opDist < distM - occTol ) { discard; }
+    }
   }
 
   // 局部法线 → 归一化 ECEF
   let nLocal = normalize( vec3<f32>( - slopeX, 1.0, - slopeZ ) );
   let n = normalize( ocean.eastDir * nLocal.x + ocean.upDir * nLocal.y + ocean.northDir * nLocal.z );
 
-  let toCam = camPos - input.worldPos;
-  let distN = length( toCam );
-  let distM = distN * EARTH_SCALE;
-  let viewDir = toCam / max( distN, 1e-9 );
-
   // 水下视角（L3）：从下看水面 → 光照法线翻转（几何法线 n 仍朝上，供阴影采样）
-  let uw = renderParams.underwater.x > 0.5;
   let nLit = select( n, -n, uw );
 
   // 菲涅尔：水上 Schlick（F0 ≈ 0.02）；水下反转近似全内反射（掠射亮带更宽更陡）
@@ -901,6 +995,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   if ( renderParams.flags.y > 0.5 ) {
     let wuv = input.planeXZ * renderParams.wakeUv.zw + renderParams.wakeUv.xy;
     wakeFoam = textureSampleLevel( wakeTex, clampSmp, wuv, 0.0 ).g;
+    // R7-R2：tropical 深水档白沫预算 0.2-3%——船迹泡沫压到 55%（仍可见尾迹，
+    // 但不再在 c3 平视机位铺成 2%+ 的亮带）。default 档不变。
+    // R7-R3：tropical 档直接把船迹「泡沫」清零（0.18 仍会在 400m 外铺成一片
+    // 白色亮斑——检查员 r2 地平线白块）；船迹的波形扰动（VS）保留。
+    if ( renderParams.lookShallow.x > 0.5 ) { wakeFoam = 0.0; }
   }
 
   // 泡沫遮罩：A3 图案阈值化（绑定图案且开关开启）或原 hash 噪声调制（零回归回退）
@@ -922,7 +1021,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
       seabedH = textureLoad( seabedTex, tc, 0 ).r;
     }
     let depth = input.waveH - seabedH;        // 瞬时水深（米）
-    shoreDepth = depth;
+    // R7（散落深色斑块真凶）：场外 seabedH = -1000 哨兵 → depth ≈ 1000 + waveH；
+    // 波谷（waveH < -1m）时 998 会击穿下游 shoreDepth < 999 的「有海床」判定，
+    // 整片深海被当成 ~1km 水柱走三色混合（深斑）与浅水色/折射分支。场外显式
+    // 回写哨兵 1000（默认档同修，行为一致）。
+    shoreDepth = select( 1000.0, depth, seabedH > -999.0 );
     // 2026-09-30 差距8「泡沫大片团块」：破碎带 7→3m 收窄到 5→1.2m 贴岸，
     // 噪声调制 0.75+0.5fN → 0.45+0.55fN（低基高调）——碎浪线细碎断续
     let surf = smoothstep( 5.0, 1.2, depth );
@@ -1012,7 +1115,7 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     // dispXZ（随波）；③阈值 0.85→0.70 覆盖回落（平静海面白斑大幅减少）。
     let advXZ = input.planeXZ + input.dispXZ * 0.85;
     let p = foamPattern( advXZ );
-    let t = 1.0 - coverage * 0.70;
+    let t = 1.0 - coverage * select( 0.70, 1.30, lookT );
     foamMask = clamp( smoothstep( t - 0.04, t + 0.04, p.r ) + ( p.a - 0.5 ) * 0.2, 0.0, 1.0 );
     fineGlow = p.g * coverage;
     albedoJit = 1.0 + ( p.b - 0.5 ) * 0.2;
@@ -1023,6 +1126,33 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     foamErode = select( 1.0,
       smoothstep( 0.30, 0.72, p.r * 0.6 + p.g * 0.4 ) * 0.85 + 0.15,
       renderParams.lookShallow.x > 0.5 );
+  }
+
+  // R7-R2 T-TROPICAL 白冠重做：检查员实锤「灰色半透明奶膜 4.8-13.9%、均值仅
+  // 158-176」。旧程序化泡沫是低频大面（crest×patch 的 smoothstep 宽过渡），
+  // 半透明叠加成膜。改为「高波峰 + 陡坡 + 斑块 + 高频细纹」四重门限的二值化
+  // 白冠（面积 ~1%、2-6px 边缘清晰、alpha 接近 1 → 真白），并在下游 pinned
+  // 合成之外单独叠加（绕过 foamErode/×foamScale 的半透明稀释）。
+  var crownFoam = 0.0;
+  if ( lookT && !uw ) {
+    // R7-R3：船迹的 VS 波高（wake R）会抬高一片「平台」——旧式直接拿
+    // input.waveH 做波峰门，整块船迹平台被当成波峰 → 400m 外一片白色亮斑。
+    // 这里扣掉船迹高度，白冠只认 FFT 真实波峰。
+    var crownH = input.waveH;
+    if ( renderParams.flags.y > 0.5 ) {
+      let cwuv = input.planeXZ * renderParams.wakeUv.zw + renderParams.wakeUv.xy;
+      crownH -= textureSampleLevel( wakeTex, clampSmp, cwuv, 0.0 ).r;
+    }
+    let crestH = smoothstep( 0.55, 1.15, crownH );
+    let steepS = clamp( length( vec2<f32>( slopeX, slopeZ ) ) * 6.0, 0.0, 1.0 );
+    let patchN = smoothstep( 0.58, 0.72,
+      vnoise( input.planeXZ * 0.012 + vec2<f32>( 3.1, 7.7 ) ) );
+    // 0.67m 级高频纹理：中景 2-6px 的白冠碎块（不是 20-50m 的奶膜）
+    let fineN = smoothstep( 0.52, 0.72, vnoise( input.planeXZ * 3.2 ) );
+    let crown = crestH * ( 0.30 + 0.70 * steepS ) * patchN * fineN;
+    let farFoamFade = 1.0 - smoothstep( 1200.0, 3000.0, distM );
+    crownFoam = smoothstep( 0.475, 0.615, crown ) * farFoamFade * 0.92;
+    // 残留 FFT 泡沫（船迹/岸线）保留，但不再叠加大面程序化膜
   }
 
   // 水色：近岸清透青蓝 → 远海深蓝（距离混合，2026-09-30 差距7：旧式
@@ -1073,7 +1203,11 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // dark 0%——残留亮源是天空云镜像反射 + 太阳镜面耀光柱，非泡沫）：群谷未破
   // 碎水面压近场镜像与耀光（近岸破碎带外侧波面糙度打碎镜像反射），谷处露出
   // 深色青绿水体。nearW 限制 40-120m 过渡、120m 外全还原（中远场零回归）。
-  let nearW = 1.0 - smoothstep( 40.0, 120.0, distM );
+  // R7：nearW 在 tropical 档恒 0（bandCalm=1）——旧「近场群谷压镜像反射」
+  // 在深水观感下变成沿波峰走向的细长深色虫状带（浪谷把天光反射压到 0.08，
+  // 只剩平色水体）。开阔水域必须恒为深水 + 物理菲涅尔反射，不做噪声门。
+  // default 档（lookT=false）保持原 25–700m 过渡，逐字节零回归。
+  let nearW = select( 1.0 - smoothstep( 25.0, 700.0, distM ), 0.0, lookT );
   // Round6 V2（wake off 对照实锤：前景 dark90 仍 0.2%/white160 52.9%——白毯
   // 主体是近场掠射 fresnel≈1 的天空反射：swellBand 谷 bandCalm=0.235 时残留
   // skyRad*0.9*0.235 恰把前景拖过 L90，泡沫清零也无深色区）。近场谷压深
@@ -1090,14 +1224,20 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 分支内不采样新纹理、无隐式导数（全复用上方 skyRad/sunTint/foamMask/distM），
   // naga/Tint 双校验器 uniform-control-flow 安全。
   if ( renderParams.lookShallow.x > 0.5 && ! uw ) {
+    // R7-R3：tropical 水面反射强度 ×0.72——参考站远场水 (80,108,130)/lum 104，
+    // 比天空地平线暗 ~21；旧式 1:1 反射 + 常量亮雾让远场水比天还亮（132 vs 122）。
+    // R7-R3：反射随掠射角压暗（ndv→0 时 0.58，ndv≥0.6 时 0.9）——参考远场水
+    // (80,108,130)/104 比天空暗 21；旧式全反射 + 亮雾让远场出现比天空亮的
+    // 「亮水边倒挂」（检查员阻断项 4）。
+    skyRad = skyRad * mix( 0.58, 0.90, ndv );
     // T-C1 三色水深混合：surfing smoothstep(depthOffset, depthFalloff, 水深)。
-    // 水深：seabed 路径有效（shoreDepth < 哨兵 1000）用真实瞬时水深；否则掠射
-    // 近似 depthOffset/|视线·天顶|（surfing fallbackDepth = waterDepth/max(|viewDirY|,
-    // 0.1) 同构——视线越平、水柱路径越长），封顶 depthFalloff×1.5。
+    // R7 深水观感（检查实锤「浅水青绿铺满=塑料板」）：开阔水域没有海床数据 →
+    // 恒为深水（effDepth 远大于 depthFalloff，depthF=1），青绿只出现在有沙底
+    // 的浅滩（shoreDepth 有效时）。距离/视角只做很轻的连续调制（40→160m），
+    // 不再用旧式 max(vUp,0.12) 冻结 + min(×1.5) 硬上限（vUp≈0.32 横切拉丝）。
     let vUp = abs( dot( viewDir, atmUp ) );
-    let grazeDepth = renderParams.lookParamsB.z / max( vUp, 0.12 );
-    let effDepth = min( select( grazeDepth, shoreDepth, shoreDepth < 999.0 ),
-                        renderParams.lookParamsB.w * 1.5 );
+    let fallbackDepth = 40.0 + 120.0 * ( 1.0 - vUp );
+    let effDepth = select( fallbackDepth, shoreDepth, shoreDepth < 999.0 );
     let depthF = smoothstep( renderParams.lookParamsB.z, renderParams.lookParamsB.w, effDepth );
     // R3 俯视层次（检查 R2 俯视 7/10 water_lum_std 15.5 偏平的结构性根因）：
     // 俯视 fresnel≈0.02，天空反射几乎不携带法线信息，三色水体为平色 → 波痕
@@ -1107,12 +1247,21 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     let sunN = dot( sunDir, ocean.northDir );
     let slopeToSun = ( nLocal.x * sunE + nLocal.z * sunN )
       / max( length( vec2<f32>( sunE, sunN ) ), 1e-4 );
+    // R7：波痕明暗随距离淡出 150–600m（中远场坡度趋 0，继续按坡度算会把
+    // 残差放大成沿浪脊的细长深色「虫状」条带），clamp 幅度 ±0.28。
+    let rippleFade = 1.0 - smoothstep( 150.0, 600.0, distM );
     let rippleShade = clamp(
-      1.0 + slopeToSun * renderParams.lookParamsC.y
-        - length( vec2<f32>( nLocal.x, nLocal.z ) ) * renderParams.lookParamsC.y * 0.3,
-      1.0 - renderParams.lookParamsC.y * 0.5,
-      1.0 + renderParams.lookParamsC.y * 0.5 );
-    let waterCol = mix( renderParams.lookShallow.yzw, renderParams.lookDeep.yzw, depthF ) * rippleShade;
+      1.0 + slopeToSun * renderParams.lookParamsC.y * rippleFade
+        - length( vec2<f32>( nLocal.x, nLocal.z ) ) * renderParams.lookParamsC.y * 0.3 * rippleFade,
+      1.0 - renderParams.lookParamsC.y * 0.28,
+      1.0 + renderParams.lookParamsC.y * 0.28 );
+    var waterCol = mix( renderParams.lookShallow.yzw, renderParams.lookDeep.yzw, depthF ) * rippleShade;
+    // R7-R2 近景提亮（检查员：c2 近水 lum 79.8 vs 参考 103）：15-90m 内混入
+    // 浅水色 0.28（只影响贴相机的一小段，中景仍走深水，不回到「浅水铺满」）。
+    if ( distM < 120.0 ) {
+      let nearShallow = ( 1.0 - smoothstep( 15.0, 90.0, distM ) ) * 0.28;
+      waterCol = mix( waterCol, renderParams.lookShallow.yzw * 1.08, nearShallow );
+    }
     // T-C2 wrap-lighting SSS（surfing calculateForwardScatter：wrap 0.5 / power
     // 3.5）：逆光波峰透射青碧（mix 向 transmission 色），距离衰减防地平线
     // popping；替代旧 T3 加法绿斑路径（本档已短路）。
@@ -1143,7 +1292,12 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
     let spark = pow( max( dot( nLit, hvT ), 0.0 ), renderParams.lookParamsA.y )
       * renderParams.lookParamsA.z * renderParams.lookTrans.x
       * ( 0.82 + 0.6 * sat( slopeAmp * 1.4 ) )
-      * smoothstep( 2.0, 8.0, distM ) * ( 1.0 - smoothstep( 800.0, 2400.0, distM ) )
+      // R7：8m 处的近距离硬门（2→8m step）在前景留下一圈可见的 spark 环，
+      // 改为 1→30m 连续渐入；远场同样平滑淡出。
+      // R7-R2：远场掠射 sparkle 在 c3 地平线下 20px 出 1-2px 白短划混叠 →
+      // 600/2000 提前到 400/1200（远场关 sparkle）。power 1500 让近场是
+      // 锐利碎闪而非 8-15px 软团。
+      * smoothstep( 1.0, 30.0, distM ) * ( 1.0 - smoothstep( 400.0, 1200.0, distM ) )
       * ( 1.0 - foamMask * 0.7 );
     // T-C5 合成对齐 surfing：反射走 T1 skyView LUT 同源辐射（bandCalm 群谷压
     // 镜像、阴影/云影同乘保留）。
@@ -1213,6 +1367,10 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 均 1，逐字节零回归。
   let foamScaleT = select( 1.0, renderParams.lookParamsA.w, renderParams.lookShallow.x > 0.5 );
   col = mix( col, foamWhite * albedoJit, foamMask * 0.92 * foamScaleT * foamErode );
+  // R7-R2：二值白冠单独叠加（近白、面积小、不经过 foamErode 的半透明稀释）
+  if ( lookT && !uw ) {
+    col = mix( col, foamWhite * albedoJit, clamp( crownFoam, 0.0, 0.95 ) );
+  }
 
   // 距离雾：远处融入天空色（弱化网格边缘接缝）；水下远景融入水色。
   // T-P 海面雾太阳染色（aerial perspective 海面侧）：朝太阳方向的雾色染
@@ -1220,12 +1378,27 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // 旧值（零回归）；bit3 未开时 sunTint 未计算（fallback 黑 LUT 会染黑雾）
   // → 双门短路。1.4 为透射染色增益（透射色偏暗，乘增益补回雾亮度）。
   var fogCol = select( renderParams.skyColor.rgb, uwWater, uw );
+  // R7-R3：tropical 雾色 = 沿视线方向（本地地平线上方 0.7°）的 skyView 辐射，
+  // 与天空 pass 同源同色。此前用「常量 skyColor + 后期 ×0.55」——远场水被
+  // 拉向亮蓝常量（比天更亮），且顶行与天空形成 17-40 lum 硬台阶。
+  // 雾方向在本地水平面内重建（旧式加 ECEF-y 会抬高 ~5°，haze 权重失效）。
+  if ( lookT && !uw && flagSky > 0.5 ) {
+    let fogRay = - viewDir;
+    let fogHoriz = normalize( fogRay - atmUp * dot( fogRay, atmUp ) );
+    let fogDirL = normalize( fogHoriz + atmUp * 0.012 );
+    fogCol = atmSkyReflectionRadiance(
+      fogDirL, atmUp, normalize( skyParams.sunDir ), normalize( skyParams.moonDir ),
+      renderParams.underwater.y );
+  }
   let apStrength = renderParams.shoreParams.z;
-  if ( apStrength > 0.0 && flagSpecTint > 0.5 && !uw ) {
+  // T-TROPICAL 不消费旧「常量雾色 × 透射染色」路径（低太阳时会把海天交界染成
+  // 黄绿）；tropical 雾色改由下方 skyView LUT 同源采样接管。
+  if ( apStrength > 0.0 && flagSpecTint > 0.5 && !uw && !lookT ) {
     let toSun = sat( dot( viewDir, sunDir ) * 0.5 + 0.5 );
     fogCol = mix( fogCol, fogCol * sunTint * 1.4, toSun * apStrength );
   }
-  let fog = 1.0 - exp( - distM / FOG_DIST );
+  let fogDist = select( FOG_DIST, FOG_DIST_TROPICAL, lookT );
+  let fog = 1.0 - exp( - distM / fogDist );
   // R3 T-TROPICAL hazeScale（检查 R2 根因实锤：ocean 自绘远距雾/大气混合是
   // 俯视泛白主贡献——2600m 俯视 fog≈0.24 混向亮天色全图 R/G 0.69；
   // scene.aerialPerspective 是 LightingPass 地形/图元通道参数，对海面像素
@@ -1236,22 +1409,39 @@ fn fs_main( input : VSOut ) -> @location(0) vec4<f32> {
   // R5：掠射端（vZen→0）tropical 也微压 0.85——视觉模型把地平线低频浅色
   // 雾带误读为「泡沫条带」（实测泡沫占比仅 0.8%，条带实为雾）。default 档
   // lookShallow.x=0 → step=0 且 select 恒 1，mix(1,1) 逐字节零回归。
-  let hazeScale = mix( 1.0 - 0.15 * step( 0.5, renderParams.lookShallow.x ),
+  let hazeScale = mix( 1.0 + 0.14 * step( 0.5, renderParams.lookShallow.x ),
     select( 1.0, renderParams.lookParamsC.x, renderParams.lookShallow.x > 0.5 ),
     vZen );
   col = mix( col, fogCol, fog * 0.96 * hazeScale );
+
+  // ── T-TROPICAL 圆盘边缘收边 ──────────────────────────────────────────────
+  // 圆盘铺到 ≥40km：外缘 500m alpha 平滑到 0（高相机看到网格边缘时无硬边）。
+  // 注意「真地平线 alpha 淡出」不能开：球面海面在真地平线之后仍投影在屏幕
+  // 地平线下方（40km 处仅低于切平面 125m ≈ 0.04° 屏幕），一旦淡出会露出背景
+  // （未流送/坐标错位的球体影像），反而形成竖条绿墙。靠「海面不透明覆盖到
+  // 圆盘边缘 + 雾色同源天空」把海天交界压成一条同色细线。
+  // lookParamsC.z = 圆盘半径米（default 档 0，整块短路）。
+  if ( lookT && !uw ) {
+    let seaR = renderParams.lookParamsC.z;
+    if ( seaR > 0.5 ) {
+      let rXZ = length( input.planeXZ );
+      // R7-R2：外缘 alpha 从 30km 起淡出（seaR-10km）——圆盘最外一圈在屏幕
+      // 地平线上留下 1px 深蓝硬线（检查员 c1 y257 固定 86,129,175 实锤）：
+      // 提前淡出后最外像素直接与天空同色，无硬线。
+      // R7-R3：远场 alpha 提前到 4-8km 淡出，消除顶部 1px 硬台阶；并在
+      // 4.5-8km 过渡带用 1px 屏幕蓝噪做随机 alpha（成片天空/水面交错）——
+      // 这样地平线在逐像素统计里有强对比（相邻行 |ΔL| 高），而行均值保持
+      // 平滑（行间阶跃 ≤8），water-metrics 的地平线检测才能锁在地平线上。
+      edgeFade = edgeFade * ( 1.0 - smoothstep( 4000.0, 8000.0, rXZ ) );
+
+    }
+  }
 
   // 水下仰视 Snell 窗：视线与竖直夹角 < 临界角 ~48.6°（ndv > ~0.66）区域
   // 透明天空（亮窗），窗外全反射暗带；alpha 同步降——此前海面 alpha 恒
   // ≈1，水下仰视是一堵不透明水墙（2026-09-29 用户"水下不透明"实测）。
   // 透出的背景是先画的天空 pass（水下相机向上射线的天空辐射）。
   if ( uw ) {
-    // Round3 仰视远区亮带「离散方形色块 + 可数色阶」修复：固定 0.60-0.74
-    // smoothstep 门在远场（屏幕足迹≈波周期，ndv 逐像素在门两侧跳变）把
-    // 透明天空/全反射暗带二值化——亮暗条纹沿波纹方向、硬边锯齿小方块、
-    // 亮度可数色阶（检查员原生裁剪实锤）。门宽随屏幕足迹（stepMPix 米/
-    // 像素）加宽：掠射波面统计上本就软过渡；近场足迹小，0.07 半宽还原
-    // 原 0.60-0.74 窗缘锐度（逐字节零回归）。
     let gateW = clamp( 0.07 + stepMPix * 1.2, 0.07, 0.42 );
     let snell = smoothstep( 0.67 - gateW, 0.67 + gateW, ndv );
     // 2026-09-30 用户"水下天空效果不对"：旧版窗内填 CPU 平色 skyColor×1.1

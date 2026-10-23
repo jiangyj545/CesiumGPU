@@ -104,6 +104,14 @@ export class Globe {
   /** 1×1 earthy texture bound to terrain tiles with no resolvable imagery. */
   private _terrainFallbackTexture: GPUTexture | null = null;
   /**
+   * Geographic bounds (degrees) covered by the live terrain meshes — the
+   * imagery flat layer is suppressed inside it once terrain draping is fully
+   * resident (see {@link _terrainDrapingReady}). `null` when no terrain.
+   */
+  private _terrainCoverage: { w: number; s: number; e: number; n: number } | null = null;
+  /** True when every terrain primitive binds real draping imagery (not the 1×1 fallback). */
+  private _terrainDrapingReady = false;
+  /**
    * Imagery cache that holds the live terrain pins (released on clear —
    * pins outliving the terrain set would leak capacity exemption).
    */
@@ -442,21 +450,23 @@ export class Globe {
 
   /**
    * Draw all live tile primitives in the G-Buffer pass. Terrain meshes and
-   * flat imagery tiles are drawn TOGETHER and the depth test arbitrates:
-   * elevated terrain sticks out above the (slightly lifted, see
-   * TILE_RADIUS_SCALE) flat imagery, while regions the terrain service does
-   * not cover (geographic terrain only spans its dataset bounds — e.g. the
-   * 7777 Hubei set) keep their flat imagery instead of a black hole. The
-   * former "terrain replaces flat tiles wholesale" early return flickered:
-   * it toggled the whole imagery layer on/off as terrain tiles streamed in
-   * and out, and left everything outside the terrain bounds permanently
-   * black.
+   * flat imagery tiles cooperate in SINGLE-LAYER mode inside the terrain
+   * coverage: terrain carries its own draping imagery, so flat tiles fully
+   * inside the terrain dataset bounds are SKIPPED once draping is resident
+   * (two shells a few metres apart in depth degenerate into frame-by-frame
+   * depth alternation at far view distances — the "one rippled layer, one
+   * flat layer" flicker, 2026-10-23). Outside the coverage (geographic
+   * terrain only spans its dataset bounds — e.g. the 7777 Hubei set) the
+   * flat imagery keeps backfilling instead of a black hole. Edge tiles that
+   * straddle the coverage boundary still draw (they carry the outer fringe).
    */
   drawTiles(pass: GPURenderPassEncoder, cameraBindGroup: GPUBindGroup): void {
     for (const entry of this._terrainPrimitives.values()) {
       entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
-    for (const entry of this._tilePrimitives.values()) {
+    const coverage = this._terrainDrapingReady ? this._terrainCoverage : null;
+    for (const [imageryKey, entry] of this._tilePrimitives) {
+      if (coverage !== null && imageryTileFullyInside(imageryKey, coverage)) continue;
       entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
     // Polar fills ride along with the flat imagery path.
@@ -910,6 +920,31 @@ export class Globe {
         );
       }
     }
+
+    // Single-layer arbitration state (2026-10-23): union bounds of the live
+    // terrain meshes + whether draping imagery is fully resident. Inside the
+    // coverage the imagery flat layer is skipped once draping is ready — the
+    // two shells sit within a few metres of depth of each other at coarse
+    // LOD / far view distances and the depth test degenerates into
+    // frame-by-frame alternation ("one rippled layer, one flat layer"
+    // flicker). Terrain carries its own imagery; the flat layer only
+    // backfills the region outside the terrain dataset.
+    let coverage: { w: number; s: number; e: number; n: number } | null = null;
+    let drapingReady = this._terrainPrimitives.size > 0;
+    const fallbackTex = this._terrainFallbackTexture;
+    for (const [key, entry] of this._terrainPrimitives) {
+      if (entry.texture === fallbackTex || entry.texture.width <= 1) drapingReady = false;
+      const m = key.match(/^terrain:(\d+)\/(\d+)\/(\d+)/);
+      if (m !== null) {
+        const b = geographicTileBounds(+m[1], +m[2], +m[3]);
+        coverage = coverage === null
+          ? { w: b.west, s: b.south, e: b.east, n: b.north }
+          : { w: Math.min(coverage.w, b.west), s: Math.min(coverage.s, b.south),
+              e: Math.max(coverage.e, b.east), n: Math.max(coverage.n, b.north) };
+      }
+    }
+    this._terrainCoverage = coverage;
+    this._terrainDrapingReady = drapingReady;
   }
 
   /**
@@ -1292,6 +1327,29 @@ const IMAGERY_LIFT = 50 / 6378137;
 function tileRTCEnabled(): boolean {
   if (typeof location === 'undefined') return false;
   return new URLSearchParams(location.search).get('waRtcTiles') === '1';
+}
+
+/**
+ * Whether a Web-Mercator imagery tile `{z}/{x}/{y}` (Google row order, y=0
+ * north) lies FULLY inside a geographic coverage rectangle (degrees). Used by
+ * {@link Globe.drawTiles} to suppress the flat layer inside the terrain
+ * coverage; tiles straddling the boundary return false and keep drawing.
+ */
+export function imageryTileFullyInside(
+  key: string,
+  coverage: { w: number; s: number; e: number; n: number }
+): boolean {
+  const m = key.match(/^(\d+)\/(\d+)\/(\d+)$/);
+  if (m === null) return false;
+  const n = 2 ** +m[1];
+  const x = +m[2];
+  const y = +m[3];
+  const west  = (x / n) * 360 - 180;
+  const east  = ((x + 1) / n) * 360 - 180;
+  const north = (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
+  const south = (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
+  return west >= coverage.w && east <= coverage.e &&
+         south >= coverage.s && north <= coverage.n;
 }
 
 function tileRTCOrigin(tile: TileKey): [number, number, number] {

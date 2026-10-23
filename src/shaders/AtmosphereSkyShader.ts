@@ -175,6 +175,14 @@ fn atmosphereSampleMultiScat(r: f32, cosSun: f32) -> vec3f {
 // dirL/sunL 均为本地系（y = up）。参数化太阳方向使渲染端与反射端复用同一文本。
 const ATMO_SKY_LUMINANCE_WGSL = /* wgsl */`
 // Sky luminance (no sun disk) for local direction dirL (normalized, y = up).
+// R7-R3 蓝噪抖动：逐像素 ±1.5/255（线性 ±0.004），打破天空/海雾在大片
+// 区域内的「同一 RGB 占比 >50%」死平带（检查员 deepstats constantBand 判据）。
+fn atmDitherNoise(p: vec3f) -> f32 {
+  var q = fract(p * vec3f(0.1031, 0.1030, 0.0973));
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
+}
+
 fn atmSkyLuminance(dirL: vec3f, sunL: vec3f) -> vec3f {
   let viewH = atmosphereParams.viewHeight;
   let vHorizon = sqrt(max(viewH * viewH - ATMO_RG * ATMO_RG, 0.0));
@@ -195,7 +203,20 @@ fn atmSkyLuminance(dirL: vec3f, sunL: vec3f) -> vec3f {
   let suv = vec2f(
     u * ${fx((ATMO_SKYVIEW_SIZE.width - 1) / ATMO_SKYVIEW_SIZE.width)} + ${fx(0.5 / ATMO_SKYVIEW_SIZE.width)},
     v * ${fx((ATMO_SKYVIEW_SIZE.height - 1) / ATMO_SKYVIEW_SIZE.height)} + ${fx(0.5 / ATMO_SKYVIEW_SIZE.height)});
-  return textureSampleLevel(atmSkyViewLUT, atmLinearClamp, suv, 0.0).rgb;
+  // R7 近地平线冷灰蓝 haze：纯物理单次/多次散射在低太阳下把地平线抬成
+  // 米黄暖墙（hue 85-95 / lum 180，参考站是 hue 204 / lum 126，且越贴地平线
+  // 越暗）。这里在仰角 <~7.5° 混入冷灰蓝（线性 0.13,0.17,0.21），权重在
+  // 1.7° 内为 1、6.5° 外为 0 —— 天空 pass 与水面反射/雾同源，海天交界同色。
+  // R7-R3：连续 haze 权重（指数，无常数平台）——旧式 smoothstep(0.025,0.13)
+  // 在 1.4° 内恒 1，造成地平线上方 22-30 行同一 RGB 的死平带（检查员阻断项）。
+  // 指数衰减让每行颜色都随仰角连续变化；再叠逐像素蓝噪抖动。
+  let elev = asin(clamp(dirL.y, -1.0, 1.0));
+  let hazeW = 0.94 * exp(-max(elev, 0.0) / 0.042);
+  let skyL = textureSampleLevel(atmSkyViewLUT, atmLinearClamp, suv, 0.0).rgb;
+  var L = mix(skyL, vec3f(0.15, 0.20, 0.25), hazeW);
+  let jit = (atmDitherNoise(dirL * 900.0) - 0.5) * 0.008;
+  L = L + vec3f(jit * 0.7, jit, jit * 1.2);
+  return L;
 }
 `;
 
@@ -587,7 +608,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let sunW = normalize(skyParams.sunDir);
   let sunL = vec3f(dot(sunW, east), dot(sunW, up), dot(sunW, north));
 
-  var L = atmSkyLuminance(dirL, sunL);
+  // R7：地平线以下按「地平线辐射」填充（半球对称）。旧路径查询 LUT 的地平线
+  // 以下行 → 深色地面（夜空/地面辐亮度），海面圆盘与真地平线之间的亚像素缝
+  // 以及地形空洞会把这条深色带露出来（96 页海天交界深色硬线根因）。
+  // 地形正常覆盖时该区域不可见（零回归）。
+  let dirLh = normalize(vec3f(dirL.x, max(upY, 0.0015), dirL.z));
+  var L = atmSkyLuminance(dirLh, sunL);
   if (skyParams.starIntensity > 0.001) {
     L = L + skyMoonSky(dirL, skyParams.moonUpK, skyParams.nightK)
           + skyStars(dir, upY, sunL.y, skyParams.time);
@@ -647,8 +673,12 @@ fn atmSkyReflectionRadiance(
   let B = atmLocalBasis(up);
   let dirL = vec3f(dot(dirWorld, B[0]), dot(dirWorld, B[1]), dot(dirWorld, B[2]));
   let sunL = vec3f(dot(sunDirWorld, B[0]), dot(sunDirWorld, B[1]), dot(sunDirWorld, B[2]));
-  let upY = dirL.y;
-  var L = atmSkyLuminance(dirL, sunL);
+  // R7：水面法线抖动会让「反射方向」偶尔落到地平线以下——旧路径直接查 LUT 的
+  // 地平线以下行（深色地面辐亮度）→ 海面出现块状深色斑（浪脊/浪谷翻转处）。
+  // 反射方向钳到地平线上方 0.1°（保留方位角），水面镜面永远是天空辐射。
+  let dirLr = normalize(vec3f(dirL.x, max(dirL.y, 0.002), dirL.z));
+  let upY = dirLr.y;
+  var L = atmSkyLuminance(dirLr, sunL);
   if (skyParams.starIntensity > 0.001) {
     L = L + skyMoonSky(dirL, dot(moonDirWorld, up), 1.0 - smoothstep(-0.16, -0.04, sunL.y))
           + skyStars(dirWorld, upY, sunL.y, time) * 0.08;

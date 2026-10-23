@@ -79,6 +79,14 @@ export class DynamicWater implements IPass {
   private static readonly CAMERA_UBO_BYTES = CAMERA_UBO_SIZE;
   /** color(16) + sunDir(16) + time/speed/waveScale/glint(16) = 48B。 */
   private static readonly PARAMS_UBO_BYTES = 48;
+  /** 赤道半径（米）：归一化 ECEF → 米。 */
+  private static readonly EARTH_RADIUS_M = 6378137.0;
+  /** WGS84 极半径 / 赤道半径：椭球面 x²+y²+(z/ρ)²=1。 */
+  private static readonly POLAR_RATIO = 6356752.3142 / 6378137.0;
+  /** 球面细分目标边长（米）：20 km 弦垂距 ≈ 8 m，低空机位片元贴合海面。 */
+  private static readonly GRID_EDGE_M = 20_000;
+  /** 单片扇叶细分上限（96² ≈ 9.2k 三角形/扇叶，兼顾大域与建网格耗时）。 */
+  private static readonly MAX_GRID_STEPS = 96;
 
   constructor(context: Context, options: DynamicWaterOptions) {
     this._context = context;
@@ -90,6 +98,10 @@ export class DynamicWater implements IPass {
     this._sunDir = DynamicWater._normalize(options.sunDirection ?? [0.4, 0.5, 0.77]);
     this._geometry = DynamicWater._buildGeometry(options.positions);
   }
+
+  /** 水体基色 RGBA（实时可调，下一帧生效；a = 近景不透明度）。 */
+  get color(): [number, number, number, number] { return this._color; }
+  set color(v: [number, number, number, number]) { this._color = [v[0], v[1], v[2], v[3]]; }
 
   /** 波速倍率（实时可调，下一帧生效）。 */
   get speed(): number { return this._speed; }
@@ -271,7 +283,15 @@ export class DynamicWater implements IPass {
   }
 
   /**
-   * 多边形扇形三角化（凸多边形）：顶点 0 为扇心，(0, i, i+1) 为扇叶。
+   * 多边形扇形三角化（凸多边形）+ 球面自适应细分：顶点 0 为扇心，
+   * (0, i, i+1) 为扇叶，每片扇叶按最长边细分成重心格点。
+   *
+   * 为什么必须细分：扇叶是**弦平面**，横跨 15°×20° 海域时平面中心比
+   * 椭球面低 ~100 km。低空机位（数百米）下，片元世界坐标落在地球内部，
+   * 射线-球遮挡把整面水判成"远侧"剔除（48 页 400 m 实测整屏无水）；
+   * 即使不剔除，平面投影也只会压在画面最底部一条。细分后每个格点沿
+   * 径向抬回椭球面（保留调用方给的统一水位偏移），20 km 弦垂距 ≈ 8 m。
+   *
    * 每顶点 [px,py,pz,u,v]，uv 置 0（波纹以世界坐标为空间基准）。
    */
   private static _buildGeometry(positions: Cartesian3[]): {
@@ -284,24 +304,88 @@ export class DynamicWater implements IPass {
       return { vertices: new Float32Array(0), indices: new Uint32Array(0), indexCount: 0 };
     }
 
-    const vertices = new Float32Array(n * 5);
+    // 统一水位偏移（环顶点相对椭球面的平均高度）：常规输入为 0；
+    // 传入整体抬高的水体（如 +100 m 湖面）时保持其水位不变。
+    let levelOffset = 0;
+    for (let i = 0; i < n; i++) {
+      levelOffset += Cartesian3.magnitude(positions[i]) - DynamicWater._surfaceRadius(positions[i]);
+    }
+    levelOffset /= n;
+
+    const verts: number[] = [];
+    const idx: number[] = [];
+    const lift = (x: number, y: number, z: number): void => {
+      const r = Math.hypot(x, y, z) || 1;
+      const k = (DynamicWater._surfaceRadiusAt(x / r, y / r, z / r) + levelOffset) / r;
+      verts.push(x * k, y * k, z * k, 0, 0);
+    };
+
+    // 先把环点抬到水面（输入已是地表点时 k≈1）
+    const ring: Cartesian3[] = [];
     for (let i = 0; i < n; i++) {
       const p = positions[i];
-      vertices[i * 5 + 0] = p.x;
-      vertices[i * 5 + 1] = p.y;
-      vertices[i * 5 + 2] = p.z;
-      // uv 置 0（预留）
+      const r = Cartesian3.magnitude(p) || 1;
+      const k = (DynamicWater._surfaceRadius(p) + levelOffset) / r;
+      ring.push(new Cartesian3(p.x * k, p.y * k, p.z * k));
     }
 
-    const triCount = n - 2;
-    const indices = new Uint32Array(triCount * 3);
-    for (let i = 0; i < triCount; i++) {
-      indices[i * 3 + 0] = 0;
-      indices[i * 3 + 1] = i + 1;
-      indices[i * 3 + 2] = i + 2;
+    for (let t = 0; t < n - 2; t++) {
+      const A = ring[0], B = ring[t + 1], C = ring[t + 2];
+      const eMax = Math.max(
+        Cartesian3.distance(A, B),
+        Cartesian3.distance(B, C),
+        Cartesian3.distance(C, A),
+      ) * DynamicWater.EARTH_RADIUS_M;
+      const steps = Math.min(
+        DynamicWater.MAX_GRID_STEPS,
+        Math.max(1, Math.ceil(eMax / DynamicWater.GRID_EDGE_M)),
+      );
+      const base = verts.length / 5;
+      // 重心格点：行 iy 有 steps-iy+1 个点，沿弦平面线性插值后径向抬回球面
+      for (let iy = 0; iy <= steps; iy++) {
+        const c = iy / steps;
+        for (let ix = 0; ix <= steps - iy; ix++) {
+          const b = ix / steps;
+          const a = 1 - b - c;
+          lift(a * A.x + b * B.x + c * C.x,
+               a * A.y + b * B.y + c * C.y,
+               a * A.z + b * B.z + c * C.z);
+        }
+      }
+      let rowStart = base;
+      for (let iy = 0; iy < steps; iy++) {
+        const rowLen = steps - iy + 1;
+        const cells = steps - iy;
+        for (let ix = 0; ix < cells; ix++) {
+          const v0 = rowStart + ix;
+          const v1 = v0 + 1;
+          const v2 = rowStart + rowLen + ix;
+          idx.push(v0, v1, v2);
+          if (ix < cells - 1) idx.push(v1, v2 + 1, v2);
+        }
+        rowStart += rowLen;
+      }
     }
 
-    return { vertices, indices, indexCount: triCount * 3 };
+    return {
+      vertices: new Float32Array(verts),
+      indices: new Uint32Array(idx),
+      indexCount: idx.length,
+    };
+  }
+
+  /**
+   * WGS84 椭球面（赤道半径归一化 1、z 轴压扁 ρ）沿某方向的半径。
+   * 与 `Camera.surfaceRadius` / `EllipsoidGeometry` 同一压扁系约定。
+   */
+  private static _surfaceRadiusAt(ux: number, uy: number, uz: number): number {
+    const inv = 1 / DynamicWater.POLAR_RATIO;
+    return 1 / Math.sqrt(ux * ux + uy * uy + uz * uz * inv * inv);
+  }
+
+  private static _surfaceRadius(p: Cartesian3): number {
+    const r = Cartesian3.magnitude(p) || 1;
+    return DynamicWater._surfaceRadiusAt(p.x / r, p.y / r, p.z / r);
   }
 
   /** 归一化方向向量。 */

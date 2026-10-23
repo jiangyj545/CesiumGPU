@@ -41,8 +41,8 @@
     <!-- 2026-10-22 tropical 档：滑杆默认值与 OceanFFTWater 构造参数同步
          （windSpeed 11.5 / windDirection 17，bindSlider 初始化会用滑杆值回写，
          不同步会覆盖构造值）。R4：choppiness 1.12 波峰更尖。 -->
-    <label>风速 <b id="windSpeedVal">11.5</b> m/s</label>
-    <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="11.5" />
+    <label>风速 <b id="windSpeedVal">12.0</b> m/s</label>
+    <input id="windSpeed" type="range" min="2" max="15" step="0.5" value="12" />
     <label>风向 <b id="windDirVal">17</b>°</label>
     <input id="windDir" type="range" min="0" max="360" step="5" value="17" />
     <label>choppiness 卷浪度 <b id="choppinessVal">1.2</b></label>
@@ -57,7 +57,7 @@
     <div class="checks">
       <label class="checkline"><input id="showToggle" type="checkbox" checked /> 显示海面</label>
       <label class="checkline"><input id="causticsToggle" type="checkbox" checked /> 焦散沙洲</label>
-      <label class="checkline"><input id="wakeToggle" type="checkbox" checked /> 船迹波场</label>
+      <label class="checkline"><input id="wakeToggle" type="checkbox" /> 船迹波场</label>
       <label class="checkline"><input id="skyToggle" type="checkbox" checked /> 物理大气</label>
       <label class="checkline"><input id="refractionToggle" type="checkbox" checked /> 水面折射</label>
       <label class="checkline"><input id="shadowToggle" type="checkbox" checked /> 船体阴影</label>
@@ -70,10 +70,11 @@
       <label class="checkline"><input id="breakSprayToggle" type="checkbox" checked /> 破碎喷雾</label>
       <label class="checkline"><input id="cloudsToggle" type="checkbox" checked /> 体积云</label>
       <label class="checkline"><input id="cloudShadowToggle" type="checkbox" checked /> 云影</label>
-      <label class="checkline"><input id="godRaysToggle" type="checkbox" checked /> 光柱</label>
+      <label class="checkline"><input id="godRaysToggle" type="checkbox" /> 光柱</label>
+      <label class="checkline"><input id="lensFlareToggle" type="checkbox" /> 镜头光晕</label>
       <label class="checkline"><input id="swashToggle" type="checkbox" checked /> 岸线冲刷</label>
       <label class="checkline"><input id="sunShaftToggle" type="checkbox" checked /> 水下光柱</label>
-      <label class="checkline"><input id="peelToggle" type="checkbox" checked /> 卷唇破碎</label>
+      <label class="checkline"><input id="peelToggle" type="checkbox" /> 卷唇破碎</label>
       <label class="checkline"><input id="cirrusToggle" type="checkbox" checked /> 卷云层</label>
       <label class="checkline"><input id="swashSimToggle" type="checkbox" checked /> 冲刷模拟</label>
       <label class="checkline"><input id="aerialToggle" type="checkbox" checked /> 大气透视</label>
@@ -103,35 +104,42 @@
     async function demo(viewer, engine) {
       // ── 0. 常量：海域中心 / 太阳方向 / 米度换算 ──────────────────────
       const CEN_LON = 121.65, CEN_LAT = 31.15;
-      // 低角度斜射太阳（本地 NNE、仰角 ~20°）：高光 glitter 路径进画 +
-      // SSS 逆光成立（正午陡太阳下镜面反射不在反射几何内，高光全灭）。
-      // 2026-10-06 Round3 检查差距1：仰角 28.5°→20°——pitch -9° 视野顶缘
-      // +21°，旧值盘心出画 7.5° 且盘外 glow 半宽仅 ~2° 全衰减（太阳区 3x
-      // 裁剪实锤无盘无晕）；20° 盘心贴顶缘 1° 入画，径向亮核/光晕可辨。
-      // 基向 N*0.72 + E*0.28 + U*0.42 @ (121.65E, 31.15N)，U 分量降至
-      // sin20° 后归一化（方位 21° 不变，仅压仰角）。
-      // R6：仰角 20°→12°（对齐 surfing tropical sun.elevation=12；glitter
-      // 反射通道几何收窄成"焦点亮带"+逆光 SSS 增强，水平方位 21° 不变）。
-      const SUN = [-0.148, -0.437, 0.888];
+      // 太阳：方位 21°（NNE）、仰角 40°（R7 参考站热带白天 ~15:00 的高太阳）。
+      // R6 的低仰角 12° 是"surfing 落日感"调法：天空地平线被长路径染成黄绿、
+      // 水面整体偏暗、云被 dusk 染粉——与参考的蓝天白云正午档相反。抬高太阳
+      // 后地平线散射路径变短（中性灰蓝）、天顶更蓝、水面受光接近参考。
+      // ECEF 方向由中心点 ENU 基按 az=21°/el=40° 合成（仰角=dot(up,sun)）。
+      const SUN = [-0.328235, 0.009320, 0.944550];
       const METERS_PER_DEG = 111320;
       const R_EARTH = engine.Cartesian3.EARTH_RADIUS; // 6378137
       const context = viewer.scene.context;
+
+      // R7：隐藏地球球体。R5 的「相机/相机落点已转真 WGS84 椭球、球体影像仍是
+      // 压扁系」坐标迁移尚未收口：球面比海面高约 7.6km，它的地平线会从海面
+      // 上缘翻出一条竖条绿墙（旧 png 地平线 barcode 的背景源），并且世界位置
+      // 差 7.6km 会让海面遮挡测试误杀远场。本页是纯海面场景（沙洲/海床/焦散
+      // 都是独立 effect，不依赖球体），关掉球体后海天交界由 40km 海面圆盘 +
+      // 同源天空雾接管，无背景透出。地表相关回归不在本页验收范围。
+      viewer.globe.show = false;
 
       // L3 太阳方向同源联动：DirectionalLight.direction 是光传播方向
       //（太阳→场景，即 -SUN）。CSSM 阴影取 lights[0]，与海洋高光/大气同源。
       viewer.scene.lights[0].direction = [-SUN[0], -SUN[1], -SUN[2]];
 
       // ── 1. 后处理开启（折射需要 _sceneColorRT 路径；海面高光吃 bloom）──
+      // R7 参考档（threejswaterpro 默认 Three.js Sky Pro 热带白天）：
+      // · 默认关 godRays 与 lensFlare——太阳不在构图内，屏幕空间光柱/鬼影只会
+      //   在无太阳处刷亮斑（旧 png 顶上那团白雾的来源之一）。
+      // · bloom threshold 0.65→1.2 / intensity 0.45→0.22：只让 sparkle 极亮核
+      //   进 bloom，水面不再糊成白带；太阳盘本身已降到 0.6（见下）。
       viewer.scene.postProcess.enabled = true;
-      viewer.scene.postProcess.godRays.enabled = true; // Track G：屏幕空间太阳光柱
-      // tropical 观感：bloom 0.45/0.65/0.45（2026-10-22 R2 复调——检查 R1 实测
-      // 掠射反射带 >240 亮度仅 13px（基准 192px）极亮核不足，threshold
-      // 0.75→0.65 让 sparkle 锐瓣峰值更早进 bloom；intensity/knee 0.45 不变）。
+      viewer.scene.postProcess.godRays.enabled = false; // Track G：默认关（面板可开）
       const bloomP = viewer.scene.postProcess.bloom;
       bloomP.enabled = true;
-      bloomP.threshold = 0.65;
-      bloomP.intensity = 0.45;
-      bloomP.knee = 0.45;
+      bloomP.threshold = 1.2;
+      bloomP.intensity = 0.22;
+      bloomP.knee = 0.5;
+      viewer.scene.postProcess.lensFlare.enabled = false;
 
       // ── 2. 船迹波场（A4）：必须先于 ocean add 到 effects，ocean 才能取
       //      到当帧 fieldView（ping-pong 采样视图与 encoder 内依赖一致）──
@@ -142,13 +150,17 @@
       const sky = new engine.AtmosphereSky(context, {
         sunDirection: SUN,
         starIntensity: 0,          // 白昼场景关星星
-        sunDiskIntensity: 2.0,     // 太阳盘+Mie 光晕（Round3 检查差距1：
-                                   // 1.7→2.0，顶缘入画的盘+晕更醒目）
-        mieG: 0.85,                // Round3 检查差距1：默认 0.8→0.85，前向
-                                   // Mie 相函数更尖，贴盘亮核聚拢可辨
-        mieScale: 0.6,             // 干净晴天低气溶胶：前向眩光减弱，主角视角
-                                   //（朝太阳 ~20°）的天空从灰白回蓝（默认 1 偏霾）
-        rayleighScale: 1.1,        // 瑞利略增 → 中高仰角蓝更深
+        // R7 参考档：太阳盘强度 2.0→0.6、Mie 0.6→0.28——旧值把太阳 + 前向
+        // 眩光打成一片过曝白（顶缘整片 250+），热带白天参考里太阳不在画内。
+        // sunIntensity 11→8：天空/地平线整体压暗（参考天顶 105,140,170 /
+        // 地平线 137,152,163；旧值渲染出 154,186,220 / 209,230,230 偏亮）。
+        sunDiskIntensity: 0.6,
+        sunIntensity: 3.85,
+        mieG: 0.8,
+        mieScale: 0.04,
+        // 瑞利 1.1→1.8：天顶更蓝（目标 sRGB ≈105,140,170），地平线中性灰蓝。
+        rayleighScale: 2.0,
+        ozoneScale: 3.5, // R7：臭氧 G 吸收去掉地平线黄绿（hue 87→~204）
       });
       sky.setDepthView(() => viewer.scene.gbufferPass
         ? viewer.scene.gbufferPass.getDepthView()
@@ -161,51 +173,63 @@
       const clouds = new engine.CloudLayer(context, {
         center: [CEN_LON, CEN_LAT],
         sunDirection: SUN,
-        coverage: 0.42,          // 散云观感（与卷云 0.42 同档；默认 0.5 偏满）
+        coverage: 0.10,          // R7-R2：参考站稀疏积云（天顶云像素 33-56% 洗白 → 0.10）
       });
       clouds.setDepthView(() => viewer.scene.gbufferPass
         ? viewer.scene.gbufferPass.getDepthView()
         : null);
-      clouds.setCirrus({ coverage: 0.42, density: 0.55 }); // Track V：纤维状卷云第二层（enable 默认 true）
+      clouds.setCirrus({ coverage: 0.12, density: 0.55 }); // Track V：纤维状卷云第二层（enable 默认 true）
 
       // ── 4. 海面本体（FFTDataSource + A3/A4/折射接线）─────────────────
       const foamPattern = new engine.FoamPatternTexture(context, { size: 512 });
       foamPattern.generate();
       const ocean = new engine.OceanFFTWater(context, {
         center: [CEN_LON, CEN_LAT],
+        // R7：tropical 档改用 40km 极坐标圆盘网格（horizonRadiusKm），extentKm
+        // 只对 default 档生效；圆盘内圈（≤2km）格距 ≤50m，外缘 500m alpha 收边。
         extentKm: 10,
+        horizonRadiusKm: 40,
         segments: 256,
         waterLevel: 0,
         // 2026-10-22 tropical 观感档（threejswaterpro TROPICAL preset）：
         // 三色水深混合 + wrap-lighting SSS + sparkle + 宽带 fresnel + 泡沫弱化。
         // 旧观感回 look:'default'（零回归）。
-        // R2/R3 复调：sparkleIntensity 2.4 补掠射反射带极亮核；depthFalloffM 120
-        // 深浅分带 + hazeScale/rippleStrength 引擎 tropical 默认（0.55/0.45）。
-        // R4 观感精修（视觉模型双盲对比「效果一般」）：foamScale 0.28（开阔水面
-        // 零星碎点）+ sssIntensity（逆光浪尖透光）；choppiness 波峰更尖
-        // + timeScale 1.6（基准 animationSpeed 3.6 地球尺度折中）+ spreadBlend
-        // 0.62 方向发散 / swellWindDirection -25 交叉涌（~45° 夹角消机械条带）。
-        // R5 复调：sssIntensity 2.2→3.2（R4 视觉评估「有但弱」×1.5）；
-        // choppiness 1.12→1.2（波峰再尖一档；滑杆 step 0.05 取可表达值）。
+        // R7 参考档复调（对齐 threejswaterpro 默认 Three.js Sky Pro 热带白天）：
+        // · fresnel 5（2.2 太宽 → 近中景整片天空反射糊成灰白）
+        // · foamScale 0.7（0.28 只看得到细碎噪点，白冠不成片）
+        // · depth 1/30m（旧 57/200 + min×1.5 硬上限在 vUp≈0.32 横切拉丝；
+        //   新窗口让近景 40-100m 青绿、200m 外转深，中景 lum <110）
+        // · sparkle 900/2.4（450 锐瓣太宽 + 旧 bloom 糊成白带）
+        // · 色板 #3f97a4/#1c3d46（参考近景 62,125,133 sat .53 / 中景 76,92,99）
         look: 'tropical',
         windSpeed: 12,
         windDirection: 17,
         choppiness: 1.2,
-        sparklePower: 450,
-        sparkleIntensity: 3.2,
-        sparkleSunGain: 0.85,
-        foamScale: 0.28,
-        sssIntensity: 3.2,
-        depthFalloffM: 120,
+        sparklePower: 6000,
+        sparkleIntensity: 10.0,
+        sparkleSunGain: 0.9,
+        foamScale: 0.55,
+        sssIntensity: 2.0,
+        fresnelPower: 7.5,
+        depthOffsetM: 1,
+        depthFalloffM: 22,
+        hazeScale: 0.70,
+        rippleStrength: 0.5,
         spreadBlend: 0.62,
         swellWindDirection: -25,
         timeScale: 1.6,
         sunDirection: SUN,
         foamPattern,
-        wake: wakeField,
+        wake: null,
         refraction: true,
       });
       ocean.bindSceneHistory(() => viewer.scene.sceneColorHistory);
+      // R7 船体入画：海面是无深度附件的最后一遍 pass，船体（GBuffer）会被
+      // 整片海面覆盖；绑定 GBuffer worldPos 后 FS 按世界距离 discard 被船体
+      // 挡住的水面像素（详见 OceanFFTWater.setOccluderView）。
+      ocean.setOccluderView(() => viewer.scene.gbufferPass
+        ? viewer.scene.gbufferPass.textures.worldPosView
+        : null);
 
       // ── 5. 浅滩沙洲焦散（A1）：海域中心西南 ~760 m（相机视野内）──────
       const sbLon = CEN_LON - 570 / (METERS_PER_DEG * Math.cos(CEN_LAT * Math.PI / 180));
@@ -292,8 +316,12 @@
       });
       // T-P 真 peeling 卷唇水舌（须 setBreakWave 先行；雾日光染色须上方
       // bindAtmosphere 已接 + 太阳染色默认开 _sunTintOn=true）
-      ocean.setPeelWave(PEEL);
-      ocean.setFogSunTint(0.5);
+      // R7-R3：默认关 PEEL 卷唇——检查员 d5-nopeel 对照实锤它在 100-200m 开阔
+      // 水域贡献整片半透明灰膜（白沫评分 2 的主因）。面板可手动开。
+      ocean.setPeelWave(null);
+      // R7：旧「常量雾色 × 透射染色」关闭——tropical 雾色改由 skyView LUT 沿
+      // 视线方向同源采样（见 OceanFFTShader 远场雾块），低太阳时不再染黄绿。
+      ocean.setFogSunTint(0.0);
       const sbEnu = enuBasis(sbLon, sbLat);   // 函数声明提升，section 8 定义
       const breakCenter = [0, 0, 0];
       engine.ecefFromLonLatHeight(sbLon, sbLat, 0, breakCenter);
@@ -396,14 +424,16 @@
       const hull = new engine.Primitive(viewer.context, {
         vertices: hullGeo.vertices,
         indices: hullGeo.indices,
-        color: new engine.Color(0.85, 0.28, 0.20, 1.0),
+        // R7：船体不再是被海面盖住的「黑剪影」——提亮为木质船壳并保留 unlit
+        // （低太阳背光面光照材质只会更黑）；R7 修 14× 放大 bug 后船长 ≈14m。
+        color: new engine.Color(0.46, 0.31, 0.21, 1.0),
         unlit: true,
       });
       const cabinGeo = boxGeo(4.2, 1.7, 2.6, -2.2, 2.15, 0); // 船艉舱（局部系偏移）
       const cabin = new engine.Primitive(viewer.context, {
         vertices: cabinGeo.vertices,
         indices: cabinGeo.indices,
-        color: new engine.Color(0.93, 0.95, 0.97, 1.0),
+        color: new engine.Color(0.72, 0.68, 0.60, 1.0),
         unlit: true,
       });
       viewer.scene.addPrimitive(hull);   // 预建入场（渲染中途动态 add 曾静默卡死）
@@ -452,10 +482,16 @@
         const cp = Math.cos(pitch), sp = Math.sin(pitch);
         const F = add3(scl3(F0, cp), scl3(up, sp));       // 抬头纵摇
         const U = nrm3(sub3(scl3(up, cp), scl3(F0, sp)));
-        const Q = nrm3(crs3(U, F));
+        // R7：右手基（Q = F × U）。旧式 Q = U × F 使模型矩阵行列式为负（镜像），
+        // GBuffer 管线 cullMode 'back' 把船体正面全部剔除、只剩一小条内壁写入
+        // worldPos → 海面遮挡测试只覆盖一小片，船仍被水面盖住。
+        const Q = nrm3(crs3(F, U));
         const pos = [0, 0, 0];
         engine.ecefFromLonLatHeight(lon, lat, hullLiftM, pos);
-        const sL = HULL_L / R_EARTH, sH = HULL_H / R_EARTH, sW = HULL_W / R_EARTH;
+        // R7 修 14× 放大 bug：boxGeo 顶点已是米（HULL_L=14），模型矩阵列只该
+        // 做「米 → 归一化 ECEF」的 1/R_EARTH 缩放；旧式 HULL_L/R_EARTH 把
+        // 船放大了 14 倍（一条 200m 的巨轮贴着水面）。
+        const sL = 1 / R_EARTH, sH = 1 / R_EARTH, sW = 1 / R_EARTH;
         return engine.Matrix4.fromArray(new Float32Array([
           F[0] * sL, F[1] * sL, F[2] * sL, 0,
           U[0] * sH, U[1] * sH, U[2] * sH, 0,
@@ -495,6 +531,17 @@
       let boatSpeed = 6;
       let lastT = performance.now() / 1000;
       const lastBoat = { planeX: 0, planeZ: 0, heading: 0, speed: 0 };
+
+      // ── 9b. R7 默认机位：水上英雄机位（开阔深水 + 浪形 + 船入画）
+      // 相机在沙洲中心正南 450m、朝太阳方位 21°（俯角 -12°）：船在正前方
+      // 400m 左右，近场掠射天光反射 + 太阳 glitter 带从画面下缘进入（太阳
+      // 仰角 40° 在画外，不会过曝），天空占画面上 1/3。沙洲在左后方（本轮
+      // 深水观感优先，不强行把浅滩塞进画面）。
+      const HERO_LON = CEN_LON;
+      const HERO_LAT = CEN_LAT - 450 / METERS_PER_DEG;
+      const HERO_HEIGHT = 35;
+      const HERO_HEADING = 21 * Math.PI / 180;
+      const HERO_PITCH = -12 * Math.PI / 180;
 
       // ── 9b. L3 潜水：水上机位 ↔ 海面下 3 m 机位互切 ────────────────────
       // 归一化 ECEF → [lon, lat, heightM]。引擎 ecefFromLonLatHeight 的归一化
@@ -540,8 +587,8 @@
         } else if (savedAbove) {
           viewer.camera.flyTo({
             destination: { lon: savedAbove.lon, lat: savedAbove.lat, height: savedAbove.height },
-            // 与开机构图一致：朝太阳方位 21°、-9° 俯角（天空带入画）
-            orientation: { heading: 21 * Math.PI / 180, pitch: -9 * Math.PI / 180 },
+            // 与开机构图一致：朝沙洲方位 226°、-12° 俯角（天空带入画）
+            orientation: { heading: HERO_HEADING, pitch: HERO_PITCH },
           });
         }
         const btn = document.getElementById('diveBtn');
@@ -636,6 +683,9 @@
       document.getElementById('godRaysToggle').addEventListener('change', (e) => {
         viewer.scene.postProcess.godRays.enabled = e.target.checked;
       });
+      document.getElementById('lensFlareToggle').addEventListener('change', (e) => {
+        viewer.scene.postProcess.lensFlare.enabled = e.target.checked;
+      });
       document.getElementById('swashToggle').addEventListener('change', (e) => {
         floor.setSwash(e.target.checked ? 0.85 : 0);
       });
@@ -647,7 +697,7 @@
         ocean.setPeelWave(e.target.checked ? PEEL : null); // null = 二次 draw 跳过
       });
       document.getElementById('cirrusToggle').addEventListener('change', (e) => {
-        clouds.setCirrus({ enable: e.target.checked, coverage: 0.42, density: 0.55 });
+        clouds.setCirrus({ enable: e.target.checked, coverage: 0.12, density: 0.55 });
       });
       document.getElementById('swashSimToggle').addEventListener('change', (e) => {
         floor.bindSwash(e.target.checked ? swashField : null); // 关 = 回退解析路径
@@ -690,11 +740,12 @@
           ck('cloudShadowToggle', b);
         },
         setGodRays(b) { viewer.scene.postProcess.godRays.enabled = b; ck('godRaysToggle', b); },
+        setLensFlare(b) { viewer.scene.postProcess.lensFlare.enabled = b; ck('lensFlareToggle', b); },
         setSwash(b) { floor.setSwash(b ? 0.85 : 0); ck('swashToggle', b); },
         setSunShaft(b) { uwFog.setSunShaftIntensity(b ? 0.45 : 0); ck('sunShaftToggle', b); },
         // ── T-P/W/V/A 探针扩展：卷唇破碎 / 卷云层 / 冲刷模拟 / 大气透视 ──
         setPeel(b) { ocean.setPeelWave(b ? PEEL : null); ck('peelToggle', b); },
-        setCirrus(b) { clouds.setCirrus({ enable: b, coverage: 0.42, density: 0.55 }); ck('cirrusToggle', b); },
+        setCirrus(b) { clouds.setCirrus({ enable: b, coverage: 0.12, density: 0.55 }); ck('cirrusToggle', b); },
         setSwashSim(b) { floor.bindSwash(b ? swashField : null); ck('swashSimToggle', b); },
         setAP(b) { viewer.scene.aerialSource = b ? bindAerial : null; ck('aerialToggle', b); },
         cloudInfo: () => ({
@@ -723,25 +774,18 @@
         },
       };
 
-      // ── 12. 初始视角（设计基线：加载即水下俯视沙洲焦散网）──────────────
-      // Round3 一致性修复：某轮实现把初始机位改成水上开机构图，检查员需点
-      // 两次 diveBtn 才入水（uwMode 初值与构图反转的回归）。修回基线——
-      // uwMode=true + 直接飞水下 3m 俯视沙面（与 setDive(true) 同一构图），
-      // 按钮初始即「上浮」；savedAbove 仍为水上开机构图（上浮回去、再下潜
-      // 往返一致）。水上构图参数保留备查：中心南侧 150m、高 14m、朝太阳
-      // 方位 21°、pitch -9°（天空带 ~35% + 散云 + 船与 wake 入画）。
-      savedAbove = {
-        lon: CEN_LON,
-        lat: CEN_LAT - 150 / METERS_PER_DEG,
-        height: 14,
-      };
-      uwMode = true;
+      // ── 12. 初始视角（R7 设计基线：加载即水上英雄机位）─────────────────
+      // 旧基线是「加载即水下俯视沙洲焦散网」（Round3 一致性修复的产物），与本轮
+      // 参考站（水上热带白天）相反。R7 改为默认水上：uwMode=false、savedAbove
+      // 与开机构图同步（潜水按钮仍从同一机位往返），按钮初始即「潜水」。
+      savedAbove = { lon: HERO_LON, lat: HERO_LAT, height: HERO_HEIGHT };
+      uwMode = false;
       viewer.camera.flyTo({
-        destination: { lon: sbLon, lat: sbLat - 0.0022, height: -3 },
-        orientation: { heading: 0, pitch: -25 * Math.PI / 180 }, // 俯视沙面焦散网
+        destination: { lon: HERO_LON, lat: HERO_LAT, height: HERO_HEIGHT },
+        orientation: { heading: HERO_HEADING, pitch: HERO_PITCH },
       });
       const diveBtn0 = document.getElementById('diveBtn');
-      if (diveBtn0) diveBtn0.textContent = '上浮（恢复水上机位）';
+      if (diveBtn0) diveBtn0.textContent = '潜水（海面下 3 m）';
     }
 
     // ── 标准启动模板（异步 IIFE：ES module 顶层不允许 return）────────
