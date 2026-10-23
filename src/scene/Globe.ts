@@ -934,7 +934,8 @@ export class Globe {
     const fallbackTex = this._terrainFallbackTexture;
     for (const [key, entry] of this._terrainPrimitives) {
       if (entry.texture === fallbackTex || entry.texture.width <= 1) drapingReady = false;
-      const m = key.match(/^terrain:(\d+)\/(\d+)\/(\d+)/);
+      // Keys are "{z}/{x}/{y}" (geographic tile, see _syncTerrainPrimitives).
+      const m = key.match(/^(\d+)\/(\d+)\/(\d+)$/);
       if (m !== null) {
         const b = geographicTileBounds(+m[1], +m[2], +m[3]);
         coverage = coverage === null
