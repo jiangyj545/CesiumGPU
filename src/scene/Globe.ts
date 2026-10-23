@@ -104,6 +104,16 @@ export class Globe {
   /** 1×1 earthy texture bound to terrain tiles with no resolvable imagery. */
   private _terrainFallbackTexture: GPUTexture | null = null;
   /**
+   * Imagery flat tiles to SUPPRESS in {@link drawTiles}: keys whose mercator
+   * rectangle is FULLY covered by the terrain tile union (tile-exact — a
+   * mesh-free gap keeps its imagery, no black holes). Rebuilt by
+   * {@link _syncTerrainPrimitives} only when the terrain/imagery key
+   * signature or draping readiness changes (see postmortem in drawTiles).
+   */
+  private _imagerySkipKeys = new Set<string>();
+  /** Last signature the skip-set was computed for ('' = never). */
+  private _imagerySkipSig = '';
+  /**
    * Imagery cache that holds the live terrain pins (released on clear —
    * pins outliving the terrain set would leak capacity exemption).
    */
@@ -455,12 +465,17 @@ export class Globe {
    * BLACK HOLES, strictly worse than the flicker it aimed to fix. The flicker
    * root cause (depth alternation between the two shells at far distances)
    * needs a tile-exact coverage test + cached skip-set, not a bounding rect.
+   * That v2 now lives here: {@link _imagerySkipKeys} (tile-exact, gap-safe,
+   * signature-cached) suppresses the flat shell only where terrain FULLY
+   * covers it.
    */
   drawTiles(pass: GPURenderPassEncoder, cameraBindGroup: GPUBindGroup): void {
     for (const entry of this._terrainPrimitives.values()) {
       entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
-    for (const entry of this._tilePrimitives.values()) {
+    const skip = this._imagerySkipKeys;
+    for (const [imageryKey, entry] of this._tilePrimitives) {
+      if (skip.has(imageryKey)) continue;
       entry.primitive.drawOpaque(pass, cameraBindGroup);
     }
     // Polar fills ride along with the flat imagery path.
@@ -914,6 +929,33 @@ export class Globe {
         );
       }
     }
+
+    // Tile-exact imagery suppression (flicker fix v2, 2026-10-23): inside
+    // regions FULLY covered by terrain tiles the flat imagery shell is
+    // skipped — at far view distances the two shells (tens of metres apart)
+    // degenerate the depth test into frame-by-frame alternation. Tile-exact
+    // means a mesh-free gap KEEPS its imagery (the union-rect variant was
+    // reverted for opening black holes); draping must also be fully resident
+    // or nothing is skipped. Signature-cached: rebuilt only when the terrain
+    // or imagery key set / readiness changes, never per stable frame.
+    const fallbackTex = this._terrainFallbackTexture;
+    let drapingReady = this._terrainPrimitives.size > 0;
+    if (drapingReady) {
+      for (const entry of this._terrainPrimitives.values()) {
+        if (entry.texture === fallbackTex || entry.texture.width <= 1) { drapingReady = false; break; }
+      }
+    }
+    const sig = (drapingReady
+      ? [...this._terrainPrimitives.keys()].sort().join('|')
+      : '-') + '#' + [...this._tilePrimitives.keys()].sort().join('|');
+    if (sig !== this._imagerySkipSig) {
+      this._imagerySkipSig = sig;
+      this._imagerySkipKeys = drapingReady
+        ? computeImagerySkipKeys(
+            new Set(this._terrainPrimitives.keys()),
+            this._tilePrimitives.keys())
+        : new Set();
+    }
   }
 
   /**
@@ -1269,15 +1311,28 @@ const TILE_SKIRT_DEPTH = 0.005;
  * "tiles above a drawn base globe" architecture; `edgeLift` stays a no-op.
  */
 function tileRadiusScale(_level: number): number {
-  // 影像瓦片微抬升（共存绘制必需）：地形 mesh 与平面影像瓦片同帧绘制、
-  // 深度裁决——山区地形（>50m）自然凸出，0 高水面/平原由抬升的影像覆盖
-  // （影像本就是该处纹理，视觉无差），彻底避免 0 高区域的 z-fighting。
-  // 50m 在 ~300km 视距的深度精度下稳定可分辨，又远低于任何显著地形。
+  // 影像瓦片径向下沉（2026-10-23 拉远闪烁修复）：地形 mesh 与平面影像瓦片
+  // 同帧绘制、深度裁决——影像壳沉到地表下 300m（见 IMAGERY_LIFT 注释），
+  // 对最低地形块仍有 ≥317m 稳定隔离，任何视距的深度测试都可分辨；
+  // h<-300m 的水面/河床由影像覆盖（语义正确），其余区域地形 draping
+  // 自带纹理。旧 +50m 抬升对低地只有 ~33m 隔离——拉远视距深度混叠=闪。
   return 1.0 + IMAGERY_LIFT;
 }
 
-/** Imagery tile radial lift over the ellipsoid (50 m in normalised units). */
-const IMAGERY_LIFT = 50 / 6378137;
+/**
+ * Imagery tile radial offset from the ellipsoid — NEGATIVE (300 m BELOW the
+ * surface, 2026-10-23 far-view flicker fix). History: +50 m kept the flat
+ * shell just ABOVE zero-height terrain so imagery covered water/plains, but
+ * that left only ~33 m of separation against low terrain — at far view
+ * distances the depth test cannot resolve tens of metres and the two shells
+ * alternate frame by frame ("one rippled layer, one flat layer" flicker).
+ * Sinking the shell −300 m instead gives ≥317 m of separation against the
+ * lowest Hubei tiles (h≈17 m), stable at every view distance; regions with
+ * terrain below −300 m (river gorges / lake beds) read as water and are
+ * legitimately covered by imagery; terrain draping carries the texture
+ * everywhere else. Polar fills share this offset (same function).
+ */
+const IMAGERY_LIFT = -300 / 6378137;
 
 /**
  * tile 的 RTC 几何中心：tile 矩形中心点的真 WGS84 归一化 ECEF（与
@@ -1296,6 +1351,75 @@ const IMAGERY_LIFT = 50 / 6378137;
 function tileRTCEnabled(): boolean {
   if (typeof location === 'undefined') return false;
   return new URLSearchParams(location.search).get('waRtcTiles') === '1';
+}
+
+/**
+ * Tile-exact imagery suppression set (flicker fix v2, 2026-10-23): imagery
+ * mercator keys whose rectangle is FULLY covered by the union of terrain
+ * geographic tiles. The depth test between the terrain shell and the flat
+ * imagery shell degenerates into frame-by-frame alternation at far view
+ * distances ("one rippled layer, one flat layer" flicker); suppressing the
+ * flat shell where terrain FULLY covers it removes the competitor while any
+ * mesh-free gap keeps its imagery — tile-exactness is what the reverted
+ * union-rect variant lacked (it opened black holes).
+ *
+ * Coverage test: an 8×8 sample grid over the imagery rectangle; a sample is
+ * covered when the geographic tile containing it (at ANY terrain zoom level
+ * present in the set — meshes mix levels during refinement) is in
+ * `terrainKeys`. Miss-direction-safe: an undetected sub-1/8-tile gap merely
+ * keeps the flat shell drawn (status-quo flicker), never a hole.
+ *
+ * Grids: terrain = geographicTileBounds (cols 2^(z+1), rows 2^z, south-up
+ * linear latitudes); imagery = webmercatorTileBounds (cols 2^z, mercator
+ * latitudes) — both axis-aligned rectangles in lon/lat space.
+ */
+export function computeImagerySkipKeys(
+  terrainKeys: ReadonlySet<string>,
+  imageryKeys: Iterable<string>
+): Set<string> {
+  const skip = new Set<string>();
+  if (terrainKeys.size === 0) return skip;
+  const levels: number[] = [];
+  for (const key of terrainKeys) {
+    const slash = key.indexOf('/');
+    if (slash <= 0) continue;
+    const z = Number(key.slice(0, slash));
+    if (Number.isFinite(z) && !levels.includes(z)) levels.push(z);
+  }
+  if (levels.length === 0) return skip;
+  const SAMPLES = 8;
+  for (const ikey of imageryKeys) {
+    const m = ikey.match(/^(\d+)\/(\d+)\/(\d+)$/);
+    if (m === null) continue;
+    const iz = +m[1];
+    const ix = +m[2];
+    const iy = +m[3];
+    const n = 2 ** iz;
+    const west  = (ix / n) * 360 - 180;
+    const east  = ((ix + 1) / n) * 360 - 180;
+    const north = (Math.atan(Math.sinh(Math.PI * (1 - (2 * iy) / n))) * 180) / Math.PI;
+    const south = (Math.atan(Math.sinh(Math.PI * (1 - (2 * (iy + 1)) / n))) * 180) / Math.PI;
+    if (!Number.isFinite(north) || !Number.isFinite(south)) continue;
+    let covered = true;
+    scan:
+    for (let sy = 0; sy < SAMPLES && covered; sy++) {
+      const lat = south + ((sy + 0.5) / SAMPLES) * (north - south);
+      for (let sx = 0; sx < SAMPLES; sx++) {
+        const lon = west + ((sx + 0.5) / SAMPLES) * (east - west);
+        let hit = false;
+        for (const zl of levels) {
+          const cols = 2 ** (zl + 1);
+          const rows = 2 ** zl;
+          const tx = Math.min(cols - 1, Math.max(0, Math.floor(((lon + 180) / 360) * cols)));
+          const ty = Math.min(rows - 1, Math.max(0, Math.floor(((lat + 90) / 180) * rows)));
+          if (terrainKeys.has(zl + '/' + tx + '/' + ty)) { hit = true; break; }
+        }
+        if (!hit) { covered = false; break scan; }
+      }
+    }
+    if (covered) skip.add(ikey);
+  }
+  return skip;
 }
 
 function tileRTCOrigin(tile: TileKey): [number, number, number] {
