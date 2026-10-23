@@ -882,20 +882,15 @@ export class Globe {
         const rect = geographicTileBounds(tile.z, tile.x, tile.y);
         const lonC = (rect.west + rect.east) / 2;
         const latC = (rect.north + rect.south) / 2;
-        const n = 2 ** tile.z;
-        const mx = Math.min(n - 1, Math.max(0,
-          Math.floor(((lonC + 180) / 360) * n)));
-        const mercN = (1 - Math.log(Math.tan(
-          Math.PI / 4 + (latC * Math.PI / 180) / 2)) / Math.PI) / 2;
-        const my = Math.min(n - 1, Math.max(0, Math.floor(mercN * n)));
-        const resolved = layer.resolveTexture(new TileKey(tile.z, mx, my));
+        const ref = mercatorDrapingKey(tile.z, lonC, latC);
+        const resolved = layer.resolveTexture(ref);
         if (resolved !== null) {
           texture = resolved.texture;
           textureLevels = resolved.ancestorLevels;
           refMerc = {
-            z: tile.z - resolved.ancestorLevels,
-            x: mx >> resolved.ancestorLevels,
-            y: my >> resolved.ancestorLevels,
+            z: ref.level - resolved.ancestorLevels,
+            x: ref.x >> resolved.ancestorLevels,
+            y: ref.y >> resolved.ancestorLevels,
           };
           pinKey = `${refMerc.z}/${refMerc.x}/${refMerc.y}`;
         } else {
@@ -1373,6 +1368,27 @@ function tileRTCEnabled(): boolean {
  * linear latitudes); imagery = webmercatorTileBounds (cols 2^z, mercator
  * latitudes) — both axis-aligned rectangles in lon/lat space.
  */
+/**
+ * Mercator imagery TileKey covering a geographic terrain tile's centre —
+ * the draping texture reference. The query level is CLAMPED to the imagery
+ * quadtree root ({@link ImageryLayer.ROOT_LEVEL}): terrain tiles coarser
+ * than the root (z0/z1 far-view fallbacks) have no imagery counterpart at
+ * their own level, so an unclamped lookup is structurally null and the
+ * draping primitive sticks on the 1×1 fallback forever (permanent
+ * flesh-coloured block, fourth flicker case 2026-10-23). A z0/z1 terrain
+ * tile resolves to the z2 tile containing its centre; the straddle across
+ * two z2 tiles degrades to clamp-to-edge sampling like any other
+ * cross-column tile.
+ */
+export function mercatorDrapingKey(z: number, lonDeg: number, latDeg: number): TileKey {
+  const rz = Math.max(z, ImageryLayer.ROOT_LEVEL);
+  const n = 2 ** rz;
+  const x = Math.min(n - 1, Math.max(0, Math.floor(((lonDeg + 180) / 360) * n)));
+  const mercN = (1 - Math.log(Math.tan(Math.PI / 4 + (latDeg * Math.PI / 180) / 2)) / Math.PI) / 2;
+  const y = Math.min(n - 1, Math.max(0, Math.floor(mercN * n)));
+  return new TileKey(rz, x, y);
+}
+
 export function computeImagerySkipKeys(
   terrainKeys: ReadonlySet<string>,
   imageryKeys: Iterable<string>

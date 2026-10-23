@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeImagerySkipKeys } from '../../src/scene/Globe';
+import { computeImagerySkipKeys, mercatorDrapingKey } from '../../src/scene/Globe';
 
 /**
  * Tile-exact 影像压制（闪烁修复 v2，2026-10-23 回滚重做版）：
@@ -84,5 +84,35 @@ describe('computeImagerySkipKeys（tile-exact 影像压制 v2）', () => {
     const terrain = new Set(coveringTerrainKeys(IMG, 8));
     const skip = computeImagerySkipKeys(terrain, ['terrain:12/6614/2775', '']);
     expect(skip.size).toBe(0);
+  });
+});
+
+describe('mercatorDrapingKey（draping 源层级 clamp 到影像树根）', () => {
+  // 第四案（2026-10-23）：z0/z1 地形块按自身 z 解析 mercator 瓦片，低于
+  // 影像四叉树根（ROOT_LEVEL=2）——瓦片树上根本不存在该层，resolveTexture
+  // 结构性永 null，draping 永久挂 1×1 fallback（远视角实测土色块 100% 帧）。
+  it('z1 地形块（低于树根）→ clamp 到 z2 查询，列号在 z2 网格内', () => {
+    const k = mercatorDrapingKey(1, 110.9, 31.7); // 神农架
+    expect(k.level).toBe(2);
+    expect(k.x).toBeGreaterThanOrEqual(0);
+    expect(k.x).toBeLessThanOrEqual(3);
+    expect(k.y).toBeGreaterThanOrEqual(0);
+    expect(k.y).toBeLessThanOrEqual(3);
+  });
+
+  it('z11 地形块 → 保持 z11（clamp 不动细层），列号与手算一致', () => {
+    const k = mercatorDrapingKey(11, 110.9, 31.7);
+    expect(k.level).toBe(11);
+    const n = 2 ** 11;
+    expect(k.x).toBe(Math.floor(((110.9 + 180) / 360) * n));
+  });
+
+  it('极纬（超出 mercator 定义域）→ y 仍 clamp 在网格内（不 NaN）', () => {
+    for (const lat of [89.9, -89.9]) {
+      const k = mercatorDrapingKey(5, 110, lat);
+      expect(Number.isFinite(k.y)).toBe(true);
+      expect(k.y).toBeGreaterThanOrEqual(0);
+      expect(k.y).toBeLessThan(2 ** 5);
+    }
   });
 });

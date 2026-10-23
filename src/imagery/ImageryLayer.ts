@@ -40,6 +40,25 @@ export class ImageryLayer {
   /** Root level the quadtree selection starts from. */
   static readonly ROOT_LEVEL = 2;
 
+  /**
+   * Eviction-protection keys for a frame: every selected tile plus its full
+   * ancestor chain down to the quadtree root. `resolveTexture` walks exactly
+   * that chain for upsampling fallbacks (and terrain draping binds coarse
+   * chain members directly at the terrain tile's own level), so a chain
+   * member being evicted is every bit as visible as losing a selected tile
+   * — see the fourth flicker case (2026-10-23) in `_selectTiles`.
+   */
+  static renderProtectionKeys(tiles: readonly TileKey[]): Set<string> {
+    const keys = new Set<string>();
+    for (const tile of tiles) {
+      keys.add(tile.key);
+      for (let anc = tile.parent(); anc !== null && anc.level >= ImageryLayer.ROOT_LEVEL; anc = anc.parent()) {
+        keys.add(anc.key);
+      }
+    }
+    return keys;
+  }
+
   /** Aggregate counters for HUD/debug (selected tiles, cache, queue). */
   get stats(): ImageryLayerStats {
     return {
@@ -286,9 +305,16 @@ export class ImageryLayer {
     // select more tiles than the texture-cache capacity — without protection
     // every incoming texture evicts a SELECTED tile, whose primitive is then
     // dropped (or terrain draping falls back to the 1×1 placeholder) until
-    // refetch lands: an endless evict→refetch→rebuild flicker loop. Selected
-    // tiles are budget-exempt; capacity still bounds the prefetch cache.
-    this._cache.protectRenderSet(selected.map(entry => entry.tile.key));
+    // refetch lands: an endless evict→refetch→rebuild flicker loop.
+    //
+    // 2026-10-23 (fourth flicker case): the guard must ALSO cover each
+    // selected tile's ancestor chain — terrain draping binds coarse tiles at
+    // the terrain tile's own level, which drops out of `selected` once the
+    // camera zooms past it. On texture pressure those sources were evicted
+    // continuously (~0.5 evictions/frame measured) and the draping primitive
+    // flashed the 1×1 placeholder through every refetch window. Selected
+    // tiles + their chains are budget-exempt; capacity still bounds prefetch.
+    this._cache.protectRenderSet(ImageryLayer.renderProtectionKeys(selected.map(entry => entry.tile)));
   }
 
   /**
